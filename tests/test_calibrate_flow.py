@@ -17,7 +17,7 @@ from tlod.types import Frame
 from tlod.vision.calibrate_flow import (
     calibration_poses, find_marker, run_extrinsics,
 )
-from tlod.vision.calibration import Intrinsics, Projector, synthetic_projector
+from tlod.vision.calibration import synthetic_projector
 
 
 class MarkerCamera:

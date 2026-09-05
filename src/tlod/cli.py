@@ -647,7 +647,6 @@ def cmd_calibrate(args) -> int:
         # Rehearsal: a synthetic camera that renders a marker at the true
         # tool position. Proves the whole procedure end to end -- motion,
         # detection, solve, residuals -- before it drives real hardware.
-        from tlod.vision.calibrate_flow import find_marker
         from tlod.vision.calibration import synthetic_projector
 
         truth = synthetic_projector((cfg.camera.width, cfg.camera.height),
