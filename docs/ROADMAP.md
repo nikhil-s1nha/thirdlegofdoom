@@ -19,11 +19,24 @@ Measured and estimated end-to-end, hand-moves to arm-moves:
 Human visual reaction is ~200–250 ms *plus* their own hand travel. So a
 robot that reacts to what it saw is at best tied and usually late.
 
-**The design response is prediction, not speed.** A Kalman filter estimates
-hand velocity so the arm aims where the hand *will be*. Measured: 4.8×
-better aim at a 300 ms horizon (34.8 cm → 7.3 cm error). Everything else
-in this project is in service of that loop being fast, honest about its
-own timing, and safe.
+**Two responses, and the second one is the important one.**
+
+*Prediction, not speed.* A Kalman filter estimates hand velocity so the arm
+aims where the hand *will be*. Measured: 4.8× better aim at a 300 ms
+horizon (34.8 cm → 7.3 cm error).
+
+*And: let the robot initiate.* Latency taxes only the **responder**. Making
+the robot the slapper and the human the dodger spends the whole pipeline
+delay *before* the strike, where nobody is waiting on it. An 8 cm strike
+lands in 210 ms against a 230–400 ms human escape budget. This removes
+the hard real-time requirement from aiming entirely — a hand waiting to be
+slapped is nearly stationary, so a stale estimate is still a correct one.
+
+See [slap-analysis.md](slap-analysis.md). The consequence for the plan:
+vision's hard problem moves from *aiming* to *hit detection* (where a
+camera is genuinely incapable — the arm occludes the contact point) and
+the remaining hard problem becomes *commit timing* rather than reaction
+speed.
 
 ---
 
@@ -105,8 +118,10 @@ behaviour question from here on is a question about motion.
 The laptop webcam becomes the sensor. Everything from photons to a
 predicted 3D hand position is now real; only the arm is simulated.
 
-- Real hand tracking through its actual failure modes: motion blur on a
-  fast slap, occlusion, edge-of-frame entry, varied lighting and skin tones
+- Real hand tracking through its actual failure modes: occlusion by the
+  arm, edge-of-frame entry, varied lighting and skin tones. Motion blur
+  matters much less now that the target is a waiting hand rather than a
+  fast-moving one.
 - Validate palm-width depth ranging against measured ground truth, and
   decide whether the plane assumption suffices
 - **Retune the Kalman filter on recorded real hand motion** rather than a
@@ -118,21 +133,52 @@ predicted 3D hand position is now real; only the arm is simulated.
 **Exit:** real hand tracked to a few cm at full frame rate, with
 prediction error measured at the real latency horizon.
 
-## M4 — Vision and control fused *(tier B)*
+## M4 — Strike primitives and safety *(tier B)*
 
-The point of the project: closed-loop visual servoing with latency
-compensation, driven by a real hand.
+Reshaped by the slap analysis: the robot initiates, so this milestone is
+about *striking well and safely* rather than about chasing.
 
-- Arm tracks a real moving hand in real time, in the viewer
-- Latency compensation wired end to end: aim at
-  `predict(measured_latency)` using the M3 number
-- Motion primitives: **strike**, **retract**, **hover**, **track**, **grasp**
-- Winnability gating: given where the hand is going and how fast the arm
-  is, decide *whether a swing can land* before committing to it
-- Safety hardened here, while the consequences are still pixels
+- Motion primitives: **hover**, **strike**, **retract**, **feint**, **track**, **grasp**
+- The design rule from the analysis, enforced in code: hover close
+  (~8 cm), strike short. Short strikes are both faster to land and softer
+  on impact.
+- **Safety, as the dominant concern of this milestone.** The machine
+  deliberately swings at a human hand:
+  - strike distance capped in code
+  - `torque_limit` lowered for strikes so the servo yields on unexpected
+    contact (the current 800/1000 default is far too high)
+  - never command below the hand plane — worst case is a gentle stall
+  - soft foam end effector, not the gripper; compliance matters more than
+    speed
+  - strike-zone gating: refuse to strike unless a hand is confirmed
+    present and in a valid pose
+- Visual servoing retained for tracking and grasping, where it is still
+  the right tool
 
-**Exit:** simulated arm reliably intercepts your real hand, and declines
-swings it cannot win instead of flailing.
+**Exit:** the simulated arm strikes a real hand target reliably, within
+measured speed and force envelopes, and refuses to strike when the
+preconditions are not met.
+
+## M5 — Timing intelligence and the games *(tier B — playable)*
+
+The hard problem is no longer reaction speed. It is *when* to commit.
+
+- **Hand slap**, robot as slapper. A fixed rhythm is trivially gamed, so:
+  unpredictable commit timing, and reading when the human is least ready
+  (drift, settling, a glance away). Low-rate vision — much easier than
+  what a dodging robot needed.
+- **Feints** — possible for the first time, because the robot owns the
+  clock. Bait the flinch, strike the recovery.
+- **Hit detection**: vision cannot do this (the arm occludes the contact
+  point at exactly the wrong moment, and 30 fps is 33 ms of granularity
+  on the deciding event). Sim uses geometry; hardware uses a piezo.
+  Designed now, wired in M6.
+- Difficulty tuned by hover distance and deliberate reaction delay, not
+  by crippling the arm. The margin against a fast human is genuinely
+  thin, which is what makes it a game.
+- Additional games on the same primitives: rock-paper-scissors (needs
+  landmarks), quick-draw, cup shuffle, pick-and-place
+- Game-agnostic scoring, rounds, state machine
 
 ## M5 — The games *(tier B — playable)*
 
@@ -146,7 +192,7 @@ swings it cannot win instead of flailing.
 - Game-agnostic scoring, rounds, state machine
 
 **Exit:** you can play a full game against the on-screen robot with your
-real hand, and it is fun.
+real hand, and it is fun — and close.
 
 ## M6 — Hardware handoff *(tier C — last)*
 
@@ -173,8 +219,8 @@ deployment, not design.
   - Re-measure: A76 cores are slower than an M-series laptop
 - **Raspberry Pi Pico as I/O sidecar** — the right job for a chip that
   cannot do vision:
-  - **Piezo impact detection** for scoring. Microsecond hit timestamps
-    versus vision guessing at 20 ms granularity.
+  - **Piezo impact detection** for scoring — now load-bearing, not a
+    nicety. Vision physically cannot see a contact the arm is occluding.
   - **Hardware e-stop** cutting servo torque independently of whether
     Python is responsive. Real safety needs this.
   - Score display, LEDs, buzzer, start button
