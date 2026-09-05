@@ -209,6 +209,15 @@ class FeetechArm(ArmBackend):
                 self._port_handler, mid, ADDR_TORQUE_ENABLE, 1 if enabled else 0
             )
 
+    def set_torque_limit(self, value: int) -> None:
+        self._require()
+        value = int(np.clip(value, 0, 1000))
+        for mid in self.motor_ids:
+            self._packet_handler.write2ByteTxRx(
+                self._port_handler, mid, ADDR_TORQUE_LIMIT, value
+            )
+        self.torque_limit = value
+
     def _require(self) -> None:
         if not self._connected:
             raise RuntimeError("arm not connected; call connect() first")

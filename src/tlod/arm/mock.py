@@ -42,6 +42,7 @@ class MockArm(ArmBackend):
         self.latency = latency
         self.noise = noise
         self._torque = True
+        self._torque_limit = 800
         self._connected = False
         self._t = time.perf_counter()
         self._pending: list[tuple[float, np.ndarray]] = []
@@ -61,6 +62,9 @@ class MockArm(ArmBackend):
 
     def set_torque(self, enabled: bool) -> None:
         self._torque = enabled
+
+    def set_torque_limit(self, value: int) -> None:
+        self._torque_limit = int(value)
 
     # -- simulation --------------------------------------------------------
     def _integrate(self, now: float) -> None:
@@ -114,4 +118,5 @@ class MockArm(ArmBackend):
             self._pending.append((now + self.latency, goal))
 
     def diagnostics(self) -> dict[str, object]:
-        return {"sim": True, "torque": self._torque, "speed": float(np.abs(self._dq).max())}
+        return {"sim": True, "torque": self._torque, "torque_limit": self._torque_limit,
+                "speed": float(np.abs(self._dq).max())}

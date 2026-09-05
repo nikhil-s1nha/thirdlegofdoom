@@ -48,6 +48,15 @@ class ArmBackend(abc.ABC):
     @abc.abstractmethod
     def connected(self) -> bool: ...
 
+    def set_torque_limit(self, value: int) -> None:
+        """Cap output torque, 0-1000. Optional; ignored where unsupported.
+
+        Used to lower torque for the duration of a strike so the servo
+        yields on unexpected contact rather than pushing through it. A
+        robot that swings at hands needs this to be cheap to call.
+        """
+        return
+
     # Optional: backends that can report it override this.
     def diagnostics(self) -> dict[str, object]:
         """Temperatures, voltages, loads. Empty when unsupported."""

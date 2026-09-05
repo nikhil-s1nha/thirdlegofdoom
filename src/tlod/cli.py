@@ -339,6 +339,86 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def cmd_move(args) -> int:
+    """Move the tool to a position. The core capability, on its own.
+
+    Works identically against the simulator and real hardware -- the
+    backend interface is what makes `--real` a flag rather than a
+    different program.
+    """
+    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.model import HOME, tool_pose
+    from tlod.types import Pose
+
+    cfg = Config.load(args.config)
+    if args.real:
+        cfg = cfg.with_overrides(arm={"backend": "feetech"})
+
+    limits = SafetyLimits(
+        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
+        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
+        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
+        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
+    )
+    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
+    controller.start()
+    print(f"  backend {cfg.arm.backend}")
+    start = controller.pose()
+    print(f"  start   ({start.x:+.4f}, {start.y:+.4f}, {start.z:+.4f}) m")
+
+    try:
+        if args.home:
+            controller.goto_joints(HOME, duration=args.duration)
+            target = None
+        elif args.joints is not None:
+            q = np.array(args.joints, dtype=float)
+            controller.goto_joints(q, duration=args.duration)
+            target = tool_pose(q[:5]).xyz()
+        else:
+            target = np.array([args.x, args.y, args.z], dtype=float)
+            safe, violations = limits.clamp_pose(Pose(*target))
+            if violations:
+                print(f"  clamped by safety: {', '.join(violations)} -> "
+                      f"({safe.x:+.4f}, {safe.y:+.4f}, {safe.z:+.4f})")
+            if not controller.goto_pose(Pose(args.x, args.y, args.z), duration=args.duration):
+                print("  IK failed: that point is not reachable")
+                controller.stop(park=False)
+                return 1
+
+        end = controller.pose()
+        print(f"  end     ({end.x:+.4f}, {end.y:+.4f}, {end.z:+.4f}) m")
+        if target is not None:
+            error = np.linalg.norm(end.xyz() - np.asarray(target, float))
+            print(f"  error   {error*1000:.2f} mm")
+        print(f"  joints  {np.round(controller.commanded[:5], 4)}")
+        if args.hold:
+            print(f"  holding {args.hold:.1f}s ...")
+            time.sleep(args.hold)
+    except KeyboardInterrupt:
+        print("\n  interrupted")
+    finally:
+        controller.stop(park=args.park)
+    return 0
+
+
+def cmd_reach(args) -> int:
+    """Probe the reachable workspace. Answers 'can it get there?'."""
+    from tlod.arm.model import HOME, ik_position
+
+    zs = [float(v) for v in args.heights.split(",")]
+    print(f"  reachable radius by height (tool pointing freely)\n")
+    for z in zs:
+        radii = []
+        for r in np.arange(0.05, 0.42, 0.005):
+            if ik_position([r, 0.0, z], HOME).ok:
+                radii.append(r)
+        if radii:
+            print(f"    z = {z*100:5.1f} cm   r = {min(radii)*100:5.1f} .. {max(radii)*100:5.1f} cm")
+        else:
+            print(f"    z = {z*100:5.1f} cm   unreachable")
+    return 0
+
+
 def cmd_cameras(args) -> int:
     from tlod.vision.camera import list_cameras
 
@@ -440,6 +520,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--loop", action="store_true")
     s.add_argument("--view", action="store_true")
     s.set_defaults(func=cmd_replay)
+
+    s = sub.add_parser("move", help="move the tool to a position")
+    s.add_argument("x", type=float, nargs="?", default=0.22)
+    s.add_argument("y", type=float, nargs="?", default=0.0)
+    s.add_argument("z", type=float, nargs="?", default=0.12)
+    s.add_argument("--joints", type=float, nargs=5, metavar=("J1", "J2", "J3", "J4", "J5"))
+    s.add_argument("--home", action="store_true", help="go to the home configuration")
+    s.add_argument("--duration", type=float, default=1.5)
+    s.add_argument("--hold", type=float, default=0.0, help="stay there for N seconds")
+    s.add_argument("--park", action="store_true", help="return home afterwards")
+    s.add_argument("--real", action="store_true", help="drive real hardware")
+    s.set_defaults(func=cmd_move)
+
+    s = sub.add_parser("reach", help="probe the reachable workspace")
+    s.add_argument("--heights", default="0.02,0.05,0.10,0.15,0.20,0.30")
+    s.set_defaults(func=cmd_reach)
 
     s = sub.add_parser("cameras", help="list camera indices")
     s.set_defaults(func=cmd_cameras)
