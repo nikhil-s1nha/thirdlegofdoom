@@ -184,6 +184,7 @@ class Strike(Motion):
         self._q0: np.ndarray | None = None
         self._q1: np.ndarray | None = None
         self._restored = False
+        self._controller = None
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
@@ -199,6 +200,7 @@ class Strike(Motion):
         self.ok = result.ok
         self._q1 = np.concatenate([result.q, [self._q0[5]]])
 
+        self._controller = controller
         set_limit = getattr(controller.backend, "set_torque_limit", None)
         if callable(set_limit):
             set_limit(self.limits.torque_limit)
@@ -228,7 +230,17 @@ class Strike(Motion):
         return self.finished
 
     def abort(self) -> None:
+        """Restore torque on the way out.
+
+        An aborted strike used to leave the servos capped at the strike
+        limit permanently. That is not hypothetical: run_motion() aborts
+        whatever motion it replaces, and the feint handler aborts
+        explicitly, so any interrupted strike silently left the arm weak
+        for the rest of the session.
+        """
         super().abort()
+        if self._controller is not None:
+            self._restore(self._controller)
 
 
 class Retract(GoTo):

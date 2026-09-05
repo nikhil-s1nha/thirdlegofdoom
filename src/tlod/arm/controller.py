@@ -169,12 +169,17 @@ class ArmController:
     # -- low level ---------------------------------------------------------
     def _write(self, q: np.ndarray, max_speed: float | None = None, dt: float | None = None) -> None:
         """Rate-limit and dispatch a joint command."""
-        if self._estop:
-            return
         max_speed = self.limits.max_speed if max_speed is None else max_speed
         dt = (1.0 / self.control_hz) if dt is None else dt
 
         with self._lock:
+            # Checked inside the lock. estop() runs on whichever thread
+            # noticed the problem -- the viewer, a watchdog -- while the
+            # control loop is mid-command, and a check outside the lock
+            # leaves a window where a command issued after the stop still
+            # reaches the servos.
+            if self._estop:
+                return
             prev = self._command
             step_cap = max_speed * dt
             delta = np.clip(np.asarray(q, float) - prev, -step_cap, step_cap)

@@ -46,7 +46,7 @@ class MockArm(ArmBackend):
         self._connected = False
         self._t = time.perf_counter()
         self._pending: list[tuple[float, np.ndarray]] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -70,16 +70,30 @@ class MockArm(ArmBackend):
     def _integrate(self, now: float) -> None:
         """Advance the sim to `now`. Called lazily on read/write so the
         simulator costs nothing when idle and stays in step with wall clock,
-        which is what makes latency measurements in sim comparable to real."""
+        which is what makes latency measurements in sim comparable to real.
+
+        The whole body holds the lock. It is called from every thread that
+        touches the arm -- the control loop through write(), and the
+        perception loop and viewer through read() -- and it is not
+        reentrant: two threads both read `_t`, both compute the same dt,
+        and both integrate, so the simulated arm advances twice per tick
+        and moves faster than its configured slew rate. That failure is
+        invisible except as timing conclusions that are quietly wrong,
+        and it only appears when something else is watching, which is the
+        worst possible property for a simulator to have.
+        """
+        with self._lock:
+            self._integrate_locked(now)
+
+    def _integrate_locked(self, now: float) -> None:
         dt = now - self._t
         if dt <= 0:
             return
         self._t = now
 
-        with self._lock:
-            while self._pending and self._pending[0][0] <= now:
-                _, goal = self._pending.pop(0)
-                self._goal = goal
+        while self._pending and self._pending[0][0] <= now:
+            _, goal = self._pending.pop(0)
+            self._goal = goal
 
         if not self._torque:
             self._dq[:] = 0.0
@@ -102,19 +116,21 @@ class MockArm(ArmBackend):
 
     def read(self) -> JointState:
         now = time.perf_counter()
-        self._integrate(now)
-        q = self._q.copy()
+        with self._lock:
+            self._integrate_locked(now)
+            q = self._q.copy()
+            dq = self._dq.copy()
         if self.noise:
             q = q + np.random.normal(0.0, self.noise, NUM_JOINTS)
-        return JointState(q=q, stamp=now, dq=self._dq.copy())
+        return JointState(q=q, stamp=now, dq=dq)
 
     def write(self, q: np.ndarray) -> None:
         now = time.perf_counter()
-        self._integrate(now)
         goal = np.asarray(q, float).copy()
         lim = np.vstack([JOINT_LIMITS, np.array([GRIPPER_LIMITS])])
         goal = np.clip(goal, lim[:, 0], lim[:, 1])
         with self._lock:
+            self._integrate_locked(now)
             self._pending.append((now + self.latency, goal))
 
     def diagnostics(self) -> dict[str, object]:
