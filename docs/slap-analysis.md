@@ -1,171 +1,92 @@
-# Why the robot should be the one slapping
+# Why the robot slaps instead of dodging
 
-## The finding
+## The latency problem
 
-Making the robot the **slapper** and the human the **dodger** removes
-latency from the critical path. Not by making anything faster — by
-changing who is responding to whom.
+Hand moves to arm moves, end to end:
 
-Latency only taxes the responder. When the robot initiates, its ~250 ms
-sense-to-motion pipeline is spent *before* the strike begins, where nobody
-is waiting on it. The human's clock starts at contact-minus-strike-time.
-
-A second effect compounds it: a hand *waiting to be slapped* is nearly
-stationary, so a 300 ms-old position estimate is still a correct estimate.
-Kalman prediction stops being load-bearing for aiming. (It stays useful
-for the case where the human is already withdrawing mid-strike.)
-
-## Measured strike performance
-
-Simulated, using datasheet-derived servo parameters. **These need M6
-validation on real hardware.** Tip velocity is Jacobian-derived, not
-finite-differenced — an early version of this measurement differenced
-position over sub-millisecond intervals and produced impossible readings
-of 7-15 m/s.
-
-Strike geometry: tool hovers directly above the hand and drives straight
-down. Impact energy assumes ~0.15 kg effective tip mass.
-
-| drop | 2.0 rad/s | 3.5 rad/s | 5.0 rad/s |
-|---|---|---|---|
-| 5 cm | 222 ms / 0.41 m/s | **175 ms / 0.53 m/s** | 137 ms / 0.67 m/s |
-| 8 cm | 280 ms / 0.54 m/s | **210 ms / 0.70 m/s** | 161 ms / 0.89 m/s |
-| 10 cm | 315 ms / 0.58 m/s | 228 ms / 0.81 m/s | 182 ms / 1.01 m/s |
-| 15 cm | 357 ms / 0.61 m/s | 258 ms / 1.05 m/s | 190 ms / 1.35 m/s |
-
-Human escape budget, from the literature:
-
-| | |
+| stage | cost |
 |---|---|
-| simple visual reaction, expecting it | 150–250 ms |
-| hand withdrawal once initiated | 80–150 ms |
-| **total** | **230–400 ms** |
+| camera → decode | 30–50 ms |
+| MediaPipe hand landmarks | 19 ms measured |
+| IK + control | 0.4 ms measured |
+| serial write @1 Mbaud | 0.5 ms |
+| servo response and travel | 120–300 ms |
+| **total** | **200–370 ms** |
 
-## The design rule: hover close, strike short
+Human visual reaction is 200–250 ms *plus* hand travel. A robot reacting
+to what it saw is always late, and the servo alone eats most of the
+budget, so no optimisation fixes it.
 
-Short strikes are better on both axes simultaneously — faster to land
-*and* softer on impact. This is unusual and worth exploiting. A big
-windup is worse in every respect: slower, harder-hitting, and more
-visible to the human, which starts their reaction clock earlier.
+## The fix: initiate, don't respond
 
-Target: **8 cm drop, ~210 ms, ~0.7 m/s**. For scale, a casual human
-high-five is 1–3 m/s, so this taps noticeably more softly than a person.
+Latency taxes whoever is responding. If the robot strikes and the human
+dodges, the robot's pipeline delay is spent *before* the strike, where
+nobody is waiting on it. A hand waiting to be slapped is also nearly
+stationary, so a slightly stale position estimate is still correct.
 
-The margin against a fast human is genuinely thin, which makes for a
-better game than a robot that always wins. Difficulty should be tuned by
-adjusting hover distance and reaction delay, not by crippling the arm.
+This is why prediction is not load-bearing here. The Kalman filter stays
+for smoothing, for a settled/moving signal, and for uncertainty gating —
+the game extrapolates once, by about 100 ms, as a small lead correction.
 
-## What this does to the vision requirements
+## Then dodging turned out to be a cliff
 
-Requirements collapse in the place they were hardest, and the difficulty
-moves somewhere much more tractable.
+Measured against a simulated 250 ms opponent, feints off:
 
-| need | robot dodges | robot slaps |
-|---|---|---|
-| aiming | 60 fps, <20 ms, prediction critical | static target, 30 fps, latency irrelevant |
-| presence / safety gating | — | needed, low rate |
-| hit vs miss | vision | **vision cannot do this** |
-| when to strike | — | **the new hard problem** |
-
-**Hit detection is the catch.** At the moment of contact the arm is
-directly between the camera and the contact point, occluding exactly what
-needs to be seen, and 30 fps gives 33 ms of granularity on an event that
-decides the round. This is the strongest argument yet for the Pico: a
-piezo disc on the target pad timestamps a hit in microseconds and cannot
-be occluded. Scoring should be Pico's job, not the camera's.
-
-**Timing intelligence replaces reaction speed.** A robot that strikes on a
-fixed rhythm is trivially gamed — the human counts and leaves early. It
-needs unpredictable commit timing, and ideally a read on when the human is
-least ready (drift, settling, a glance away). That is low-rate vision, and
-far easier than what the dodging robot needed. Feints become possible for
-the first time, because the robot owns the clock.
-
-## Safety
-
-The robot is now deliberately swinging at a human hand. This is the
-dominant design concern, not an afterthought.
-
-1. **Cap strike distance in code**, ~8 cm. The one knob that improves
-   speed and safety together.
-2. **Lower `torque_limit` for strikes.** The current default of 800/1000
-   is far too high for striking a person; the servo should yield on
-   unexpected contact rather than push through it.
-3. **Soft end effector** — a foam paddle, not the gripper. Compliance
-   matters more than speed: the same 1 m/s impact is ~15 N spread over
-   10 ms, or ~150 N over 1 ms against something rigid.
-4. **Never command below the hand plane.** Position-limit the strike so
-   the worst case is a gentle stall, not a press.
-5. **Padded target pad** under the hand, so there is give on both sides.
-   Striking a hand resting on a bare table is worse — no give underneath.
-6. **Hardware e-stop** on the Pico, cutting torque independently of
-   whether Python is responsive.
-
-## Verified along the way
-
-The joint-space straight line between the hover and contact IK solutions
-stays within 6% of the Cartesian straight line (15.9 cm vs 15.0 cm for a
-15 cm strike), so simple joint interpolation is safe for strikes of this
-size and does not need Cartesian path planning. This was checked rather
-than assumed, because a joint-space interpolation that wandered would be
-a serious hazard for a striking robot.
-
----
-
-# Addendum: dodging alone is a cliff, not a curve
-
-Measured after building the game, against a simulated opponent with a
-250 ms reaction time, feints disabled so only the strike is in play:
-
-| hover | strike duration | robot win rate |
+| hover | strike | robot wins |
 |---|---|---|
 | 6 cm | 180 ms | 100% |
 | 8 cm | 250 ms | 100% |
 | 8 cm | 350 ms | 100% |
-| 10 cm | 450 ms | **17%** |
+| 10 cm | 450 ms | 17% |
 | 12 cm | 550 ms | 0% |
-| 15 cm | 900 ms | 0% |
 
-The transition from *always wins* to *never wins* happens inside 100 ms.
-That is not a difficulty curve, it is a step function, and no amount of
-parameter tuning will turn it into a game. Either the human's reaction
-fits inside the window and they escape every single time, or it does not
-and they never do.
+Always-wins to never-wins inside 100 ms. That is a step function, not a
+difficulty curve, and no parameter turns it into a game.
 
-Why the window is so much smaller than the nominal strike duration:
+The window is much smaller than the strike duration because contact fires
+at ~70% of the travel (the paddle reaches the hand before the motion
+ends) and motion onset costs the first ~25% (min-jerk spends a quarter of
+its time covering the first few millimetres, and the servo ramps on top).
+So the human gets ~45% of the strike duration. Beating an 8 cm strike
+needs a sub-70 ms reaction.
 
-* contact fires at roughly **70%** of the strike travel, because the
-  paddle reaches the hand before the motion ends
-* motion onset costs the human the first **~25%**: min-jerk spends a
-  quarter of its duration covering the first few millimetres, and the
-  servo's own acceleration limit adds more
+Slowing the arm to compensate takes ~650 ms per strike, which stops
+reading as a slap. Striking from further away is both slower *and*
+harder-hitting.
 
-So the human's usable window is about **45% of the strike duration**.
-Beating an 8 cm strike would need a reaction under ~70 ms. Restoring
-fairness by slowing the arm takes ~650 ms per strike, which no longer
-reads as a slap; restoring it by striking from further away is both
-slower *and* harder-hitting, which is the wrong direction on safety.
-
-## What actually makes it a game
+## What makes it a game: feints
 
 Real hand-slap is slapper-favoured too. What makes it fun is that the
-dodger is punished for flinching. So:
+dodger is punished for flinching.
 
-| event | point to |
+| | point to |
 |---|---|
 | strike lands | robot |
 | strike dodged | human |
-| **feint draws a flinch** | **robot** |
-| **feint held through** | **human** |
+| feint draws a flinch | robot |
+| feint held through | human |
 
-Now the human's task is reading intent, which is a decision rather than a
-reflex, and it does not require beating physics. Difficulty becomes
-`feint_probability` -- how often the robot offers a scoring chance --
-which is a smooth dial rather than a cliff. The arm keeps striking short,
-fast and softly, so the safety argument and the game design stop pulling
-against each other.
+The human reads intent rather than racing physics. Difficulty becomes
+feint frequency — a smooth dial — and the arm keeps striking short, fast
+and softly, so safety stops fighting the game design.
 
-This is why difficulty is tuned by feint frequency rather than by
-crippling the arm: a slower arm hits softer but feels broken, whereas a
-robot that feints more genuinely gives more ground and reads as a more
-cautious opponent.
+Calibrated (`tlod eval`), robot win rate:
+
+| preset | vs 180 ms | vs 250 ms | vs 350 ms |
+|---|---|---|---|
+| easy | 21% | 0% | 0% |
+| normal | 57% | 43% | 50% |
+| hard | 86% | 79% | 64% |
+
+Re-tune against real people; these are against the simulated opponent.
+
+## Impact
+
+An 8 cm strike lands in ~210 ms at ~0.7 m/s. A casual human high-five is
+1–3 m/s. Short strikes are better on both axes at once — faster to land
+and softer on impact — which gives the design rule: hover close, strike
+short.
+
+Safety specifics are in the walkthrough. The short version: cap
+`max_drop`, lower `torque_limit` during strikes, foam paddle not the
+gripper, and a hardware e-stop.

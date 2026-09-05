@@ -41,7 +41,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 
 | | |
 |---|---|
-| `main`, `arm-core` | arm, vision, calibration. No game. |
+| `main`, `arm-core` | **you are here** — arm, vision, calibration |
 | `gamification` | the above plus hand slap |
 
 ## Layout
@@ -66,8 +66,8 @@ hardware are the same code path.
 
 - **The arm is 5-DOF, not 6.** Six motors, one drives the gripper. You get
   position + tool pitch + roll; yaw is fixed by the base pan.
-- **Sense-to-motion is ~200–370 ms**, slower than human reaction, so the
-  tracker aims where the hand *will* be rather than where it was. See
+- **Sense-to-motion is ~200–370 ms**, slower than human reaction. The
+  design answer is that the robot initiates rather than responds; see
   [docs/slap-analysis.md](docs/slap-analysis.md).
 - **`mediapipe` 1.0 removed `mp.solutions`** and crashes on macOS arm64.
   Pinned per platform; arm64 Linux caps at 0.10.18.
