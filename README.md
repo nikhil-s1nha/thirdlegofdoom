@@ -76,6 +76,48 @@ src/tlod/
   cli.py              tlod sim | hybrid | bench | first-light | ...
 ```
 
+## What has actually been verified
+
+Measured, not assumed. Everything here ran on a laptop; nothing has
+touched the arm.
+
+| | result |
+|---|---|
+| IK, tracking regime | 400/400 solved, 0.40 ms mean, 0.59 ms p95 |
+| control loop | 100.4 Hz effective, **0.000 ms p95 jitter**, 0.2% overruns |
+| MediaPipe, real 720p webcam frames | 20.2 ms mean, 24.4 ms p95, 113 ms tail spike |
+| full loop, real camera | 73.5 ms p50 shutter→command |
+| record → replay, real camera | 146 frames, 0 failures, deterministic |
+| object touching | 0.2 mm mean placement error |
+| **7-minute soak** | **RSS flat, +17 gc objects, latency drift −0.7 ms** |
+| tests | 135 passing, ruff clean |
+
+Every CLI path has been executed at least once, including `first-light`
+rehearsed in simulation.
+
+### Bugs this found
+
+Worth listing, because each passed the test suite and would have surfaced
+as "the robot feels wrong" rather than as a failure:
+
+- the mock camera free-ran at **1745 fps**, starving the control loop to
+  70 ms jitter — a simulator that does not respect frame timing quietly
+  invalidates every timing conclusion drawn from it
+- the synthetic hand's path was defined in pixels, so most of it lay
+  outside the workspace: the demo was exercising the safety clamps, not
+  the behaviour
+- `latency_offset` defaulted to 35 ms, **below one frame period** on a
+  camera actually delivering 29.6 fps — every timestamp claimed the
+  shutter opened more recently than was physically possible
+- the camera accepted `fps=60` and delivered 30, silently
+- `MockArm._integrate` ran unlocked while called from three threads
+- `Strike.abort()` never restored the torque limit, so every interrupted
+  strike left the arm permanently weak
+- `_write` checked the e-stop flag outside the lock
+- a hand in frame was detected as a red object (skin reads as red to any
+  colour segmenter — not a simulation artifact)
+- `Difficulty.commit_delay` was set in two presets and never read
+
 ## Design decisions worth knowing
 
 **The arm is 5-DOF + gripper, not 6-DOF.** Six motors, one drives the
