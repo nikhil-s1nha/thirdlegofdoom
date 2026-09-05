@@ -69,10 +69,12 @@ class SyntheticHandScene:
         projector,
         path: HandPath | None = None,
         palm_width_m: float = PALM_WIDTH_M,
+        objects: tuple[TableObject, ...] | None = None,
     ) -> None:
         self.projector = projector
         self.path = path or HandPath()
         self.palm_width_m = palm_width_m
+        self.objects = DEFAULT_OBJECTS if objects is None else objects
 
     # -- ground truth ------------------------------------------------------
     def position_at(self, t: float) -> np.ndarray:
@@ -111,6 +113,18 @@ class SyntheticHandScene:
         """A frame showing the hand and a few table markers for context."""
         img = np.full((height, width, 3), 32, dtype=np.uint8)
 
+        # Objects are drawn first so the hand and arm occlude them, which
+        # is what happens in reality and is worth exercising.
+        for obj in self.objects:
+            uv = self.projector.project(np.array(obj.position, float))
+            if uv is None:
+                continue
+            edge = self.projector.project(
+                np.array([obj.position[0] + obj.radius, obj.position[1], obj.position[2]])
+            )
+            r = int(abs(edge[0] - uv[0])) if edge else 12
+            cv2.circle(img, (int(uv[0]), int(uv[1])), max(4, r), obj.color_bgr, -1)
+
         # Workspace annulus on the table, so the view is legible.
         for r in (0.10, 0.20, 0.30):
             pts = []
@@ -127,6 +141,23 @@ class SyntheticHandScene:
             cv2.circle(img, (int(uv[0]), int(uv[1])), radius, (70, 110, 230), -1)
             cv2.circle(img, (int(uv[0]), int(uv[1])), radius, (200, 220, 255), 2)
         return img
+
+
+@dataclass(slots=True)
+class TableObject:
+    """A coloured piece resting on the table, in the robot base frame."""
+
+    label: str
+    position: tuple[float, float, float]
+    color_bgr: tuple[int, int, int]
+    radius: float = 0.022
+
+
+DEFAULT_OBJECTS: tuple[TableObject, ...] = (
+    TableObject("red", (0.18, 0.11, 0.0), (60, 60, 220)),
+    TableObject("green", (0.26, -0.02, 0.0), (70, 190, 90)),
+    TableObject("blue", (0.20, -0.12, 0.0), (210, 130, 60)),
+)
 
 
 class SceneHandDetector:

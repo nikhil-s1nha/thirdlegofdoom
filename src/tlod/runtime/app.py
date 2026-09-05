@@ -126,6 +126,8 @@ class RobotApp:
         controller: ArmController,
         policy: Policy | None = None,
         tracker: MultiTracker | None = None,
+        object_detector=None,
+        hand_suppression_radius: float = 0.07,
         control_hz: float = 100.0,
         perception_max_age: float = 0.25,
         prediction_horizon: float = 0.30,
@@ -136,6 +138,14 @@ class RobotApp:
         self.controller = controller
         self.policy = policy or IdlePolicy()
         self.tracker = tracker or MultiTracker()
+        self.object_detector = object_detector
+        # Skin reads as red or orange to a colour segmenter, so a hand in
+        # frame reliably produces a phantom object. Suppressing detections
+        # that coincide with a tracked hand is the general fix -- it also
+        # covers a hand holding a coloured piece, where the piece is real
+        # but must not be treated as sitting on the table. Set to 0 to
+        # disable.
+        self.hand_suppression_radius = hand_suppression_radius
         self.control_hz = control_hz
         self.perception_max_age = perception_max_age
         self.prediction_horizon = prediction_horizon
@@ -165,6 +175,42 @@ class RobotApp:
             t.start()
             self._threads.append(t)
         log.info("robot started: policy=%s control=%.0f Hz", self.policy.name, self.control_hz)
+
+    def _suppress_hand_objects(self, objects, hands):
+        """Drop object detections that are really the hand.
+
+        The comparison has to be made on the table plane, not in 3D. An
+        object detector resolves every blob by intersecting its ray with
+        the table, so a hand hovering 10 cm up is reported at the point
+        on the table *behind* it -- which parallax can put well over
+        10 cm from where the hand actually is. Comparing that against the
+        hand's true 3D position finds no match and suppresses nothing.
+        Projecting the hand the same way makes it like for like.
+        """
+        projector = getattr(self.locator, "projector", None)
+        if projector is None:
+            return objects
+
+        shadows = []
+        for hand in hands:
+            uv = projector.project(hand.position)
+            if uv is None:
+                continue
+            on_table = projector.pixel_to_plane(uv[0], uv[1], 0.0)
+            if on_table is not None:
+                shadows.append(on_table)
+        if not shadows:
+            return objects
+        return [
+            d for d in objects
+            if min(float(np.linalg.norm(d.position - s)) for s in shadows)
+            > self.hand_suppression_radius
+        ]
+
+    @property
+    def objects(self):
+        snapshot = self.perception.get()
+        return snapshot.objects if snapshot else []
 
     def stop(self, park: bool = True) -> None:
         self._running = False
@@ -229,12 +275,18 @@ class RobotApp:
                     )
                 self.t_locate.record(t1)
 
+                objects = []
+                if self.object_detector is not None:
+                    objects = self.object_detector.detect(frame)
+                    if self.hand_suppression_radius > 0 and enriched:
+                        objects = self._suppress_hand_objects(objects, enriched)
+
                 now = time.perf_counter()
                 self.perception.set(
                     Perception(
                         stamp=frame.stamp,
                         hands=enriched,
-                        objects=[],
+                        objects=objects,
                         frame=frame,
                         vision_latency=now - frame.stamp,
                     )

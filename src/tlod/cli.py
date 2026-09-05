@@ -183,6 +183,63 @@ def build_game_app(cfg: Config, policy, *, dodging=True, opponent=None, render=F
     return app
 
 
+def cmd_touch(args) -> int:
+    """Detect the objects on the table and touch each one.
+
+    The perception-to-control path on something that is not a hand, and
+    the clearest way to see calibration error: a consistent offset in the
+    same direction on every object means the extrinsics are wrong.
+    """
+    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.mock import MockArm
+    from tlod.arm.model import HOME
+    from tlod.game.touch import TouchObjectsPolicy
+    from tlod.runtime.app import RobotApp
+    from tlod.vision.camera import MockCamera
+    from tlod.vision.hands import HandLocator
+    from tlod.vision.objects import ColorBlobDetector
+    from tlod.vision.scene import SceneHandDetector, SyntheticHandScene
+    from tlod.vision.tracking import MultiTracker
+
+    cfg = Config.load(args.config)
+    projector = build_projector(cfg)
+    scene = SyntheticHandScene(projector)
+    policy = TouchObjectsPolicy()
+    controller = ArmController(
+        MockArm(q0=np.concatenate([HOME, [0.0]]), max_speed=cfg.arm.sim_max_speed,
+                accel=cfg.arm.sim_accel),
+        SafetyLimits(), cfg.runtime.control_hz)
+
+    app = RobotApp(
+        # Objects have to be visible, so this run renders pixels and the
+        # detector actually looks at them -- unlike the hand path, which
+        # short-circuits to scene truth for determinism.
+        camera=MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps,
+                          scene=scene, render=True),
+        detector=SceneHandDetector(scene),
+        locator=HandLocator(projector, depth_mode="size"),
+        controller=controller,
+        policy=policy,
+        tracker=MultiTracker(),
+        object_detector=ColorBlobDetector(projector, min_area_px=150),
+        control_hz=cfg.runtime.control_hz,
+    )
+    app.projector = projector
+    print(f"  scene has {len(scene.objects)} objects: "
+          f"{', '.join(o.label for o in scene.objects)}")
+    _run_for(app, args.duration, view=args.view, projector=projector)
+    print(f"\n  touched {len(policy.visited)}: {', '.join(policy.visited) or 'none'}")
+    if policy.errors:
+        print(f"  placement error: mean {np.mean(policy.errors)*1000:.1f} mm, "
+              f"max {np.max(policy.errors)*1000:.1f} mm")
+        truth = {o.label: np.array(o.position) for o in scene.objects}
+        for det in app.objects:
+            if det.label in truth:
+                err = np.linalg.norm(det.position - truth[det.label])
+                print(f"    {det.label:<6} detected {err*1000:5.1f} mm from true position")
+    return 0
+
+
 def cmd_play(args) -> int:
     """Play hand slap. The robot slaps; you dodge."""
     from tlod.game.contact import GeometricContactSensor, ProximityContactSensor
@@ -252,7 +309,7 @@ def cmd_eval(args) -> int:
         results.append((reaction, rate))
         print(f"  {reaction*1000:7.0f}ms {game.score.rounds:7d} {game.score.robot:6d} "
               f"{game.score.human:6d} {rate:8.0%}   "
-              f"(hits {game.strikes}, flinches {game.flinches}, holds {game.holds})")
+              f"(strikes {game.strikes}, flinches {game.flinches}, holds {game.holds})")
     fair = [r for r, w in results if 0.35 <= w <= 0.65]
     if fair:
         print(f"\n  even match against a {min(fair)*1000:.0f}-{max(fair)*1000:.0f} ms reaction")
@@ -646,6 +703,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--loop", action="store_true")
     s.add_argument("--view", action="store_true")
     s.set_defaults(func=cmd_replay)
+
+    s = sub.add_parser("touch", help="detect table objects and touch each one")
+    s.add_argument("--duration", type=float, default=25.0)
+    s.add_argument("--view", action="store_true")
+    s.set_defaults(func=cmd_touch)
 
     s = sub.add_parser("play", help="play hand slap; the robot slaps, you dodge")
     s.add_argument("--difficulty", default="normal", choices=["easy", "normal", "hard"])

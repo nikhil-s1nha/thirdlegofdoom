@@ -72,7 +72,11 @@ def test_difficulty_presets_are_ordered():
     easy, normal, hard = (Difficulty.preset(n) for n in ("easy", "normal", "hard"))
     assert easy.hover_height > normal.hover_height > hard.hover_height
     assert easy.strike_duration > normal.strike_duration > hard.strike_duration
-    assert easy.feint_probability < hard.feint_probability
+    # More feints means *easier*, not harder. A feint is the human's
+    # scoring opportunity: hold through it and they take the point. This
+    # assertion was the other way round while the game was still a pure
+    # dodge contest, and inverted when flinch scoring was introduced.
+    assert easy.feint_probability > normal.feint_probability > hard.feint_probability
 
 
 def test_unknown_difficulty_raises():
