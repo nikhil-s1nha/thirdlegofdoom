@@ -133,6 +133,132 @@ def build_detector(cfg: Config, scene=None):
     )
 
 
+def build_game_app(cfg: Config, policy, *, dodging=True, opponent=None, render=False):
+    """An app whose scene contains an opponent that fights back."""
+    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.model import HOME
+    from tlod.arm.mock import MockArm
+    from tlod.game.opponent import DodgingHand, DodgingHandScene
+    from tlod.runtime.app import RobotApp
+    from tlod.vision.camera import MockCamera
+    from tlod.vision.hands import HandLocator
+    from tlod.vision.scene import SceneHandDetector, SyntheticHandScene
+    from tlod.vision.tracking import MultiTracker
+
+    projector = build_projector(cfg)
+    scene = (DodgingHandScene(projector, opponent or DodgingHand())
+             if dodging else SyntheticHandScene(projector))
+
+    limits = SafetyLimits(
+        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
+        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
+        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
+        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
+        command_timeout=cfg.safety.command_timeout,
+    )
+    controller = ArmController(
+        MockArm(q0=np.concatenate([HOME, [0.0]]), max_speed=cfg.arm.sim_max_speed,
+                accel=cfg.arm.sim_accel, latency=cfg.arm.sim_latency),
+        limits, cfg.runtime.control_hz,
+    )
+    if dodging:
+        # The opponent must be able to see the arm coming.
+        scene.tool_provider = lambda: controller.pose().xyz()
+
+    app = RobotApp(
+        camera=MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps,
+                          scene=scene, render=render),
+        detector=SceneHandDetector(scene),
+        locator=HandLocator(projector, depth_mode="size"),
+        controller=controller,
+        policy=policy,
+        tracker=MultiTracker(process_noise=cfg.vision.process_noise,
+                             measurement_noise=cfg.vision.measurement_noise),
+        control_hz=cfg.runtime.control_hz,
+        perception_max_age=cfg.runtime.perception_max_age,
+        prediction_horizon=cfg.runtime.prediction_horizon,
+    )
+    app.projector = projector
+    app.scene = scene
+    return app
+
+
+def cmd_play(args) -> int:
+    """Play hand slap. The robot slaps; you dodge."""
+    from tlod.game.contact import GeometricContactSensor, ProximityContactSensor
+    from tlod.game.handslap import HandSlapGame
+    from tlod.game.opponent import DodgingHand
+
+    cfg = Config.load(args.config)
+    if args.real_hand:
+        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+                                 vision={"detector": "mediapipe"})
+        game = HandSlapGame(args.difficulty, contact=ProximityContactSensor(), seed=args.seed)
+        app = build_app(cfg)
+        app.policy = game
+        game.start(app)
+        print(f"tier B: real hand, simulated arm. difficulty={args.difficulty}")
+        print("put your hand in view and try not to get slapped. space pauses, e is e-stop.")
+    else:
+        game = HandSlapGame(args.difficulty, contact=GeometricContactSensor(), seed=args.seed)
+        app = build_game_app(cfg, game,
+                             opponent=DodgingHand(reaction_time=args.reaction, seed=args.seed),
+                             render=args.view)
+        game.truth_provider = lambda: app.scene.hand.position
+        print(f"tier A: simulated opponent (reaction {args.reaction*1000:.0f} ms), "
+              f"difficulty={args.difficulty}")
+
+    _run_for(app, args.duration, view=args.view, projector=app.projector)
+    print(f"\n  final score: {game.score}  over {game.score.rounds} rounds")
+    if game.score.rounds:
+        print(f"  robot win rate: {game.score.robot/game.score.rounds:.0%}  "
+              f"({game.strikes} strikes, {game.feints} feints)")
+    return 0
+
+
+def cmd_eval(args) -> int:
+    """Sweep opponent reaction time and measure the robot's win rate.
+
+    The design question of the project, answered numerically: does a
+    short strike actually beat a human, and where is the crossover?
+    """
+    from tlod.game.contact import GeometricContactSensor
+    from tlod.game.handslap import Difficulty, HandSlapGame
+    from tlod.game.opponent import DodgingHand
+
+    cfg = Config.load(args.config)
+    reactions = [float(x) for x in args.reactions.split(",")]
+    print(f"  {args.rounds} rounds per point, difficulty={args.difficulty}\n")
+    print(f"  {'reaction':>9} {'rounds':>7} {'robot':>6} {'human':>6} {'win rate':>9}")
+    results = []
+    for reaction in reactions:
+        difficulty = Difficulty.preset(args.difficulty)
+        difficulty.mean_wait = args.mean_wait
+        if args.no_feints:
+            # Measures only the reflex half of the game. Useful for
+            # isolating strike physics; misleading as a difficulty figure,
+            # since feints are how the human scores.
+            difficulty.feint_probability = 0.0
+        game = HandSlapGame(difficulty, contact=GeometricContactSensor(), seed=args.seed)
+        app = build_game_app(
+            cfg, game, opponent=DodgingHand(reaction_time=reaction, seed=args.seed)
+        )
+        game.truth_provider = lambda a=app: a.scene.hand.position
+        with app:
+            deadline = time.perf_counter() + args.timeout
+            while game.score.rounds < args.rounds and time.perf_counter() < deadline:
+                time.sleep(0.05)
+        rate = game.score.robot / game.score.rounds if game.score.rounds else float("nan")
+        results.append((reaction, rate))
+        print(f"  {reaction*1000:7.0f}ms {game.score.rounds:7d} {game.score.robot:6d} "
+              f"{game.score.human:6d} {rate:8.0%}   "
+              f"(hits {game.strikes}, flinches {game.flinches}, holds {game.holds})")
+    fair = [r for r, w in results if 0.35 <= w <= 0.65]
+    if fair:
+        print(f"\n  even match against a {min(fair)*1000:.0f}-{max(fair)*1000:.0f} ms reaction")
+    return 0
+
+
 def build_app(cfg: Config, render: bool = False):
     from tlod.arm.controller import ArmController, SafetyLimits
     from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
@@ -520,6 +646,27 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--loop", action="store_true")
     s.add_argument("--view", action="store_true")
     s.set_defaults(func=cmd_replay)
+
+    s = sub.add_parser("play", help="play hand slap; the robot slaps, you dodge")
+    s.add_argument("--difficulty", default="normal", choices=["easy", "normal", "hard"])
+    s.add_argument("--duration", type=float, default=60.0)
+    s.add_argument("--reaction", type=float, default=0.22, help="simulated human reaction, s")
+    s.add_argument("--real-hand", action="store_true", help="tier B: use the webcam")
+    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--seed", type=int, default=None)
+    s.add_argument("--view", action="store_true")
+    s.set_defaults(func=cmd_play)
+
+    s = sub.add_parser("eval", help="sweep opponent reaction time, measure win rate")
+    s.add_argument("--reactions", default="0.15,0.20,0.25,0.30,0.40")
+    s.add_argument("--rounds", type=int, default=12)
+    s.add_argument("--difficulty", default="normal", choices=["easy", "normal", "hard"])
+    s.add_argument("--mean-wait", type=float, default=0.6, dest="mean_wait")
+    s.add_argument("--no-feints", action="store_true",
+                   help="measure strike physics alone, without the feint game")
+    s.add_argument("--timeout", type=float, default=90.0)
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("move", help="move the tool to a position")
     s.add_argument("x", type=float, nargs="?", default=0.22)
