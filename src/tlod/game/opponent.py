@@ -21,7 +21,6 @@ falls out of `withdraw_speed` and the distance needed to escape.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
 import numpy as np

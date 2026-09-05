@@ -15,7 +15,6 @@ which pushed loop jitter to 70 ms).
 import time
 
 import numpy as np
-import pytest
 
 from tlod.arm.controller import ArmController, SafetyLimits
 from tlod.arm.mock import MockArm

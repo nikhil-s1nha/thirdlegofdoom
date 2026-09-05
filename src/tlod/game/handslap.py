@@ -77,7 +77,7 @@ class Difficulty:
     settle_bonus: float = 2.5         # how much a still hand tempts a strike
 
     @classmethod
-    def preset(cls, name: str) -> "Difficulty":
+    def preset(cls, name: str) -> Difficulty:
         return {
             # Calibrated against the simulated opponent at a 250 ms
             # reaction (`tlod eval`). Difficulty is set by how often the

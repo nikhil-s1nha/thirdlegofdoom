@@ -71,7 +71,8 @@ class Overlay:
         for r in (0.15, 0.25):
             self._circle_on_table(img, r, self.limits.table_z, DARK, 1)
         # Base axes, so the frame convention is visible at a glance.
-        for axis, color in zip(np.eye(3) * 0.06, ((90, 90, 230), (90, 230, 90), (230, 160, 90))):
+        for axis, color in zip(np.eye(3) * 0.06,
+                               ((90, 90, 230), (90, 230, 90), (230, 160, 90)), strict=True):
             self._line(img, [0, 0, 0], axis, color, 2)
 
     def draw_arm(self, img, q, color=CYAN, thickness=3) -> None:
@@ -79,7 +80,7 @@ class Overlay:
         the camera calibration is right."""
         frames = model.fk_all(np.asarray(q, float)[:5])
         points = [np.zeros(3)] + [f[:3, 3] for f in frames]
-        for a, b in zip(points, points[1:]):
+        for a, b in zip(points, points[1:], strict=False):
             self._line(img, a, b, color, thickness)
         for p in points:
             px = self._px(p)

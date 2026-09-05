@@ -11,7 +11,7 @@ from __future__ import annotations
 import abc
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from tlod.arm.primitives import Motion
 from tlod.runtime.app import Policy

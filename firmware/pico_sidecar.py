@@ -142,7 +142,9 @@ class Sidecar:
             return
         self.last_hit_us = now
         amplitude = deviation if deviation < 1.0 else 1.0
-        self._send("HIT", now, "%.3f" % amplitude)
+        # Percent formatting rather than an f-string: this runs under
+        # MicroPython, where % is supported on every port and build.
+        self._send("HIT", now, "%.3f" % amplitude)  # noqa: UP031
         self.led_hit.value(1)
         self._hit_led_off_at = time.ticks_add(now, 150_000)
 

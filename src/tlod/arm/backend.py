@@ -62,7 +62,7 @@ class ArmBackend(abc.ABC):
         """Temperatures, voltages, loads. Empty when unsupported."""
         return {}
 
-    def __enter__(self) -> "ArmBackend":
+    def __enter__(self) -> ArmBackend:
         self.connect()
         return self
 

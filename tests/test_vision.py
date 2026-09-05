@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from tlod.types import Frame
-from tlod.vision.calibration import Extrinsics, Intrinsics, Projector, solve_extrinsics, synthetic_projector
+from tlod.vision.calibration import Extrinsics, Intrinsics, solve_extrinsics, synthetic_projector
 from tlod.vision.hands import HandLocator, Hand2D, INDEX_MCP, PINKY_MCP
 from tlod.vision.objects import ColorBlobDetector
 from tlod.vision.scene import HandPath, SceneHandDetector, SyntheticHandScene

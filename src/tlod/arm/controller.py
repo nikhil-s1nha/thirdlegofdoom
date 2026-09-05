@@ -23,7 +23,7 @@ import numpy as np
 
 from tlod.arm import model
 from tlod.arm.backend import ArmBackend
-from tlod.types import ARM_JOINTS, GRIPPER, NUM_JOINTS, JointState, Pose
+from tlod.types import NUM_JOINTS, JointState, Pose
 
 log = logging.getLogger(__name__)
 

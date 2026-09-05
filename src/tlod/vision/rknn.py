@@ -113,7 +113,7 @@ class RknnHandDetector(HandDetector):
         boxes, scores = self._decode(outputs)
 
         hands: list[Hand2D] = []
-        for (x1, y1, x2, y2), score in zip(boxes, scores):
+        for (x1, y1, x2, y2), score in zip(boxes, scores, strict=True):
             # Undo the letterbox to get back to original image pixels.
             x1 = (x1 - ox) / scale
             x2 = (x2 - ox) / scale

@@ -15,7 +15,7 @@ This is the one place monocular depth is not a compromise.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np

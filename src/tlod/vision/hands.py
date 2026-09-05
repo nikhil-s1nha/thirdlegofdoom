@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import os
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path

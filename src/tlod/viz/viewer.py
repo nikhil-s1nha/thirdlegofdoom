@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from tlod.arm import model
-from tlod.viz.overlay import AMBER, CYAN, GREEN, MAGENTA, Overlay, WHITE
+from tlod.viz.overlay import AMBER, CYAN, GREEN, Overlay
 
 
 class Viewer:

@@ -47,3 +47,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "UP"]
+# B027: optional hooks on ABCs are deliberate -- a subclass that does not
+#   need start/stop/close should not be forced to write an empty override.
+# UP046: the generic Latest[T] class predates PEP 695 syntax and reads fine.
+ignore = ["B027", "UP046"]

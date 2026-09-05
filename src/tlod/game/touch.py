@@ -13,7 +13,6 @@ table never will.
 
 from __future__ import annotations
 
-import time
 
 import numpy as np
 

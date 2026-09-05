@@ -54,7 +54,7 @@ class Camera(abc.ABC):
     @abc.abstractmethod
     def resolution(self) -> tuple[int, int]: ...
 
-    def __enter__(self) -> "Camera":
+    def __enter__(self) -> Camera:
         self.start()
         return self
 

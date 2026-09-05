@@ -10,7 +10,6 @@ import threading
 import time
 
 import numpy as np
-import pytest
 
 from tlod.arm import model
 from tlod.arm.controller import ArmController, SafetyLimits
@@ -39,6 +38,11 @@ def test_mock_arm_respects_its_speed_limit_under_concurrent_access():
     arm.connect()
     target = np.full(6, 1.0)
     arm.write(target)
+    # Take t0 before the threads start. Starting them first let the arm
+    # integrate outside the measured window, so `travelled` was compared
+    # against an `elapsed` shorter than the motion actually had -- a
+    # flaky test that blamed the code for the test's own bookkeeping.
+    t0 = time.perf_counter()
 
     stop = threading.Event()
 
@@ -49,8 +53,6 @@ def test_mock_arm_respects_its_speed_limit_under_concurrent_access():
     threads = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
     for t in threads:
         t.start()
-
-    t0 = time.perf_counter()
     time.sleep(0.30)
     stop.set()
     for t in threads:
@@ -58,7 +60,7 @@ def test_mock_arm_respects_its_speed_limit_under_concurrent_access():
     elapsed = time.perf_counter() - t0
 
     travelled = float(np.max(np.abs(arm.read().q)))
-    ceiling = 1.0 * elapsed * 1.25   # max_speed * time, plus slack
+    ceiling = 1.0 * elapsed * 1.15   # max_speed * time, plus slack
     assert travelled <= ceiling, (
         f"arm travelled {travelled:.4f} rad in {elapsed:.3f}s at max_speed=1.0; "
         f"ceiling {ceiling:.4f}. Concurrent reads are advancing the simulation."
@@ -129,7 +131,6 @@ def test_estop_wins_a_race_against_a_concurrent_command():
                                SafetyLimits(), control_hz=500.0)
     controller.start()
     stop = threading.Event()
-    commanded = []
 
     def spammer():
         target = np.concatenate([model.HOME + 0.4, [0.0]])

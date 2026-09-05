@@ -51,13 +51,13 @@ class Policy(abc.ABC):
 
     name: str = "policy"
 
-    def start(self, robot: "RobotApp") -> None:
+    def start(self, robot: RobotApp) -> None:
         pass
 
     @abc.abstractmethod
-    def update(self, robot: "RobotApp", perception: Perception | None, dt: float) -> None: ...
+    def update(self, robot: RobotApp, perception: Perception | None, dt: float) -> None: ...
 
-    def stop(self, robot: "RobotApp") -> None:
+    def stop(self, robot: RobotApp) -> None:
         pass
 
 
@@ -224,7 +224,7 @@ class RobotApp:
             self.controller.stop(park=park)
             self.detector.close()
 
-    def __enter__(self) -> "RobotApp":
+    def __enter__(self) -> RobotApp:
         self.start()
         return self
 

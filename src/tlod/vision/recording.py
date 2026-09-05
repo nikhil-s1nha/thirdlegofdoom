@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 from tlod.types import Frame
 from tlod.vision.camera import Camera
@@ -58,7 +57,7 @@ class Recorder:
     def close(self) -> None:
         self._meta.close()
 
-    def __enter__(self) -> "Recorder":
+    def __enter__(self) -> Recorder:
         return self
 
     def __exit__(self, *exc) -> None:
