@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tlod"
+version = "0.1.0"
+description = "Third Leg of Doom - tabletop game robot on the SO-ARM101 (SO-101) 5R+gripper arm"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "opencv-python>=4.9",
+]
+
+[project.optional-dependencies]
+# Hand/pose tracking. CPU-only, portable across macOS arm64 and Jetson.
+# mediapipe 1.0.x aborts the process on macOS arm64: the palm-detector
+# subgraph instantiates Metal calculators regardless of the CPU delegate
+# flag and dies with "Check failed: service_ Service is unavailable".
+# 0.10.3x uses the same Tasks API and works everywhere.
+# Version pins differ per platform, both for real reasons:
+#  * macOS arm64: 1.0.x aborts the process (Metal calculators in the palm
+#    detector ignore the CPU delegate). 0.10.3x is fine.
+#  * linux aarch64 (Orange Pi 5): upstream only publishes aarch64 wheels up
+#    to 0.10.18. Newer releases are x86_64/macOS only. 0.10.18 has the same
+#    Tasks API, so the code is identical.
+hands = [
+    "mediapipe>=0.10.30,<1.0 ; sys_platform == 'darwin'",
+    "mediapipe>=0.10.14,<0.10.19 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "mediapipe>=0.10.30 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Rockchip RK3588 NPU (Orange Pi 5). Installed on the board, not on a dev
+# laptop; the wheel is distributed by Rockchip, not PyPI.
+npu = []
+# Real hardware. lerobot pulls torch; only needed on the machine wired to the arm.
+robot = ["lerobot[feetech]>=0.6.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+tlod = "tlod.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
