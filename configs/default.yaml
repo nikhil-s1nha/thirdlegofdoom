@@ -1,0 +1,60 @@
+arm:
+  backend: mock
+  port: ''
+  baudrate: 1000000
+  calibration: ''
+  lerobot_id: ''
+  goal_acceleration: 60
+  torque_limit: 800
+  sim_max_speed: 3.5
+  sim_accel: 25.0
+  sim_latency: 0.004
+safety:
+  max_speed: 2.0
+  strike_speed: 5.0
+  joint_margin: 0.05
+  table_z: 0.0
+  min_height: 0.015
+  max_radius: 0.33
+  min_radius: 0.08
+  max_height: 0.45
+  command_timeout: 0.5
+camera:
+  source: mock
+  index: 0
+  width: 1280
+  height: 720
+  fps: 60
+  fourcc: MJPG
+  latency_offset: 0.035
+  autofocus: false
+  autoexposure: false
+  exposure: null
+  intrinsics: ''
+  extrinsics: ''
+  hfov_deg: 70.0
+  position:
+  - 0.15
+  - -0.45
+  - 0.55
+  look_at:
+  - 0.22
+  - 0.0
+  - 0.0
+vision:
+  detector: mediapipe
+  model_path: models/hand_landmarker.task
+  num_hands: 2
+  min_detection_confidence: 0.5
+  delegate: cpu
+  depth_mode: auto
+  hand_height: 0.06
+  palm_width_m: 0.081
+  detect_objects: false
+  process_noise: 4.0
+  measurement_noise: 0.012
+runtime:
+  control_hz: 100.0
+  perception_max_age: 0.25
+  prediction_horizon: 0.3
+  policy: idle
