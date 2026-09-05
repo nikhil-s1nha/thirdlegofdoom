@@ -479,6 +479,93 @@ def cmd_reach(args) -> int:
     return 0
 
 
+def cmd_probe(args) -> int:
+    """Read the arm without commanding it. The safest first hardware test.
+
+    Torque is disabled, so the arm is limp and you move it by hand while
+    watching the numbers. Nothing is ever commanded, so nothing can lurch.
+    This is what you run before `first-light`, and it answers the
+    questions that otherwise only surface once something is moving under
+    power:
+
+      * does the bus work at all, and do all six motors answer
+      * does each joint read the direction you expect
+      * what range does each joint actually cover
+      * are any of them already hot or under load
+
+    Support the arm before enabling this -- with torque off it will drop
+    under its own weight.
+    """
+    from tlod.types import JOINT_NAMES
+
+    cfg = Config.load(args.config)
+    if args.real:
+        cfg = cfg.with_overrides(arm={"backend": "feetech"})
+    if cfg.arm.backend == "mock" and not args.force:
+        print("  arm.backend is 'mock'. Pass --real for hardware, or --force to rehearse.")
+        return 1
+
+    backend = build_arm(cfg)
+    backend.connect()
+    if not args.keep_torque:
+        backend.set_torque(False)
+        print("  TORQUE OFF - the arm is limp. Support it before letting go.\n")
+    else:
+        print("  torque left ON - the arm will hold position.\n")
+
+    lo = np.full(6, np.inf)
+    hi = np.full(6, -np.inf)
+    seen = np.zeros(6, dtype=bool)
+    start = None
+    period = 1.0 / max(args.rate, 0.5)
+
+    print("  move each joint by hand through its range. Ctrl-C to finish.\n")
+    try:
+        deadline = time.perf_counter() + args.duration
+        while time.perf_counter() < deadline:
+            state = backend.read()
+            q = state.q
+            if start is None:
+                start = q.copy()
+            lo = np.minimum(lo, q)
+            hi = np.maximum(hi, q)
+            seen |= np.abs(q - start) > 0.02
+
+            cells = " ".join(f"{n[:5]}:{v:+.3f}" for n, v in zip(JOINT_NAMES, q, strict=True))
+            print(f"\r  {cells}", end="", flush=True)
+            time.sleep(period)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\n")
+        diagnostics = backend.diagnostics()
+        backend.disconnect()
+
+    print(f"  {'joint':<15} {'min':>8} {'max':>8} {'range':>8}   moved?")
+    for i, name in enumerate(JOINT_NAMES):
+        span = hi[i] - lo[i]
+        mark = "yes" if seen[i] else "NOT SEEN"
+        print(f"  {name:<15} {lo[i]:+8.3f} {hi[i]:+8.3f} {span:8.3f}   {mark}")
+
+    if not seen.all():
+        missing = [n for n, s in zip(JOINT_NAMES, seen, strict=True) if not s]
+        print(f"\n  These never moved: {', '.join(missing)}")
+        print("  Either you did not move them, or that motor is not answering.")
+        print("  Check its 3-pin cable and that its id was set.")
+
+    temps = diagnostics.get("temperature_c")
+    volts = diagnostics.get("voltage_v")
+    if temps:
+        print(f"\n  temperature  {temps} C")
+        if max(temps) > 55:
+            print("  WARNING: a servo is hot. Let it cool before running anything.")
+    if volts:
+        print(f"  voltage      {volts} V")
+        if min(volts) < 10.5:
+            print("  WARNING: low supply voltage. Check the 12 V adapter.")
+    return 0
+
+
 def cmd_calibrate(args) -> int:
     """Measure the lens, then measure where the camera is.
 
@@ -729,6 +816,15 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("reach", help="probe the reachable workspace")
     s.add_argument("--heights", default="0.02,0.05,0.10,0.15,0.20,0.30")
     s.set_defaults(func=cmd_reach)
+
+    s = sub.add_parser("probe", help="read the arm with torque off; safest first test")
+    s.add_argument("--real", action="store_true", help="drive real hardware")
+    s.add_argument("--duration", type=float, default=120.0)
+    s.add_argument("--rate", type=float, default=10.0, help="reads per second")
+    s.add_argument("--keep-torque", action="store_true",
+                   help="do not disable torque (the arm will hold position)")
+    s.add_argument("--force", action="store_true", help="rehearse against the simulator")
+    s.set_defaults(func=cmd_probe)
 
     s = sub.add_parser("calibrate", help="measure the lens, then where the camera is")
     s.add_argument("what", choices=["intrinsics", "extrinsics"])

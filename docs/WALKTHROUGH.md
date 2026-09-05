@@ -185,7 +185,60 @@ class Policy:
 
 ## 3. Hardware bring-up
 
-In order. Each step is cheap to fail.
+### Just the arm — the short version
+
+If all you want is an arm that moves to coordinates, you need **3.0
+through 3.5**. No camera, no game, nothing else plugged in. Budget an
+hour, most of it assembly.
+
+```bash
+tlod ports                          # 1. is the board there?
+lerobot-setup-motors ...            # 2. give each motor an id
+lerobot-calibrate ...               # 3. teach it zero and its limits
+tlod probe --real                   # 4. read it with torque OFF
+tlod first-light                    # 5. move one joint at a time
+tlod move 0.22 0 0.12 --real        # 6. go to a point
+```
+
+Done: the arm goes where you tell it. Everything after 3.5 is the camera
+and the game, and neither is needed for that.
+
+**Before you plug anything in**
+
+- 12 V 5 A supply for the follower arm. Not 5 V — that is the leader.
+- Give it clear space. Nothing fragile, nobody's hands in range.
+- Know where the power switch is. If you have not fitted an inline switch
+  on the 12 V line yet, know which plug you are pulling.
+- Do not skip 3.4 and 3.5. They exist so that a wrong direction sign
+  turns up harmlessly rather than at speed.
+
+### 3.0 Is it alive?
+
+The safest possible first test. Torque off, nothing commanded, you move
+the arm by hand and watch the numbers.
+
+```bash
+tlod ports                # find the adapter, e.g. /dev/ttyACM0
+tlod probe --real
+```
+
+**Support the arm before this runs.** With torque off it is limp and will
+fold under its own weight.
+
+Move every joint through its range. You are checking four things:
+
+| | what good looks like |
+|---|---|
+| the bus works | numbers appear at all |
+| all six motors answer | every joint says `yes` under "moved?", not `NOT SEEN` |
+| directions are sane | each joint's value moves the way you expect |
+| nothing is unwell | temperature under ~40 °C, voltage near 12 V |
+
+`NOT SEEN` on a joint you definitely moved means that motor is not
+answering: check its 3-pin cable and that its id was actually set.
+
+Nothing here commands motion, so nothing can lurch. If something is
+wired wrong, this is where you want to find out.
 
 ### 3.1 Assemble, set motor IDs
 
@@ -236,6 +289,9 @@ offset means calibration centres are off; a scaling error means a wrong
 `sign` or gear ratio.
 
 ### 3.5 Replace estimates with measurements
+
+*(This is the last arm-only step. If you just wanted a working arm, you
+are done — 3.6 onward is the camera and the game.)*
 
 The simulator ships with datasheet servo figures.
 
@@ -498,7 +554,9 @@ how a safety limit fails to apply.
 |---|---|---|
 | arm reaches past things | extrinsics wrong | `tlod touch --view`; skeleton must land on the real arm |
 | constant offset one way | extrinsics | recalibrate; the marker must be the only green thing in frame |
-| a joint moves backwards | inverted `sign` | `tlod first-light`, fix the calibration |
+| a joint moves backwards | inverted `sign` | `tlod probe --real`, move it by hand, check the sign; fix the calibration |
+| a joint reads nothing | motor not answering | check its 3-pin cable and that its id was set |
+| the arm folds when powered | torque is off | expected during `probe`; support it |
 | `IK failures` climbing | target outside workspace | `tlod reach`; check `safety.max_radius` |
 | `safety-guard hits` climbing | unreachable poses requested | not fatal, but the game is being clamped |
 | tracking drops out | lighting, blur, frame edge | fix lighting first; it is usually lighting |

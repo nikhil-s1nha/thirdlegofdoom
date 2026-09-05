@@ -32,6 +32,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `touch` | detect table objects and touch each one |
 | `sim` / `hybrid` | run the loop synthetic / with a real camera |
 | `calibrate intrinsics\|extrinsics` | lens, then camera-to-robot transform |
+| `probe` | read the arm with torque off; safest first hardware test |
 | `first-light` | verify a new arm one joint at a time |
 | `bench` | measure IK, camera and loop latency |
 | `record` / `replay` | capture a session, replay it deterministically |
