@@ -59,11 +59,12 @@ def build_projector(cfg: Config):
     )
 
 
-def build_camera(cfg: Config):
+def build_camera(cfg: Config, scene=None, render: bool = False):
     from tlod.vision.camera import MockCamera, OpenCVCamera
 
     if cfg.camera.source == "mock":
-        return MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps)
+        return MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps,
+                          scene=scene, render=render)
     return OpenCVCamera(
         index=cfg.camera.index,
         width=cfg.camera.width,
@@ -116,13 +117,14 @@ def build_arm(cfg: Config):
     )
 
 
-def build_detector(cfg: Config, camera=None):
-    from tlod.vision.hands import MediaPipeHandDetector, ScriptedHandDetector
+def build_detector(cfg: Config, scene=None):
+    from tlod.vision.hands import MediaPipeHandDetector
+    from tlod.vision.scene import SceneHandDetector
 
     if cfg.vision.detector == "scripted":
-        if camera is not None and hasattr(camera, "truth"):
-            return ScriptedHandDetector(lambda t: camera.truth())
-        return ScriptedHandDetector(lambda t: (640.0, 360.0))
+        if scene is None:
+            raise ValueError("the scripted detector needs a scene")
+        return SceneHandDetector(scene)
     return MediaPipeHandDetector(
         model_path=cfg.vision.model_path,
         num_hands=cfg.vision.num_hands,
@@ -131,15 +133,19 @@ def build_detector(cfg: Config, camera=None):
     )
 
 
-def build_app(cfg: Config):
+def build_app(cfg: Config, render: bool = False):
     from tlod.arm.controller import ArmController, SafetyLimits
     from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
     from tlod.vision.hands import HandLocator
     from tlod.vision.tracking import MultiTracker
 
-    camera = build_camera(cfg)
     projector = build_projector(cfg)
-    detector = build_detector(cfg, camera)
+    scene = None
+    if cfg.vision.detector == "scripted" or cfg.camera.source == "mock":
+        from tlod.vision.scene import SyntheticHandScene
+        scene = SyntheticHandScene(projector)
+    camera = build_camera(cfg, scene=scene, render=render)
+    detector = build_detector(cfg, scene)
     locator = HandLocator(
         projector,
         depth_mode=cfg.vision.depth_mode,

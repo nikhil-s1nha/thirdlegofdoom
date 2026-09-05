@@ -167,12 +167,13 @@ class OpenCVCamera(Camera):
 
 
 class MockCamera(Camera):
-    """Synthetic camera: a moving disc on a plain background.
+    """Synthetic camera driven by a scene.
 
-    Enough to exercise the full perception -> control path, measure loop
-    timing, and run tests in CI, without hardware. The disc moves on a
-    known trajectory so a tracker's prediction can be scored against
-    ground truth.
+    Rate-limited to its configured fps. This matters more than it sounds:
+    an unthrottled mock produced ~1700 fps, and the perception thread
+    spinning that hard starved the control thread badly enough to push
+    loop jitter to 70 ms. A simulator that does not respect frame timing
+    quietly invalidates every timing conclusion drawn from it.
     """
 
     def __init__(
@@ -180,41 +181,53 @@ class MockCamera(Camera):
         width: int = 1280,
         height: int = 720,
         fps: int = 60,
-        speed: float = 1.0,
-        radius: int = 45,
+        scene=None,
+        render: bool = False,
     ) -> None:
         self.width = width
         self.height = height
         self.fps = fps
-        self.speed = speed
-        self.radius = radius
+        self.scene = scene
+        self.render = render
         self._t0 = 0.0
         self._count = 0
         self._running = False
+        self._next_frame = 0.0
+        self._last: Frame | None = None
 
     def start(self) -> None:
         self._t0 = time.perf_counter()
+        self._next_frame = self._t0
         self._running = True
 
     def stop(self) -> None:
         self._running = False
 
-    def truth(self, t: float | None = None) -> tuple[float, float]:
-        """Ground-truth disc centre in pixels at time `t`."""
-        t = (time.perf_counter() - self._t0) if t is None else t
-        cx = self.width / 2 + 0.30 * self.width * np.sin(t * self.speed)
-        cy = self.height / 2 + 0.20 * self.height * np.cos(t * self.speed * 0.7)
-        return float(cx), float(cy)
+    @property
+    def elapsed(self) -> float:
+        return time.perf_counter() - self._t0
 
     def read(self) -> Frame | None:
         if not self._running:
             return None
         now = time.perf_counter()
-        img = np.full((self.height, self.width, 3), 40, dtype=np.uint8)
-        cx, cy = self.truth(now - self._t0)
-        cv2.circle(img, (int(cx), int(cy)), self.radius, (60, 90, 220), -1)
+        if now < self._next_frame:
+            # Not yet due. Hand back the previous frame unchanged; its
+            # index is unchanged too, so consumers skip it.
+            return self._last
+        # Schedule from the timeline, not from now, to avoid drift.
+        period = 1.0 / self.fps
+        self._next_frame = max(self._next_frame + period, now - period)
+
+        t = now - self._t0
+        if self.render and self.scene is not None:
+            img = self.scene.render(t, self.width, self.height)
+        else:
+            # Tier A does not need pixels unless someone is watching.
+            img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         self._count += 1
-        return Frame(image=img, stamp=now, index=self._count)
+        self._last = Frame(image=img, stamp=now, index=self._count)
+        return self._last
 
     @property
     def resolution(self) -> tuple[int, int]:
