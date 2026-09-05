@@ -17,6 +17,7 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -131,6 +132,66 @@ def build_detector(cfg: Config, scene=None):
         min_detection_confidence=cfg.vision.min_detection_confidence,
         delegate=cfg.vision.delegate,
     )
+
+
+
+def cmd_touch(args) -> int:
+    """Detect the objects on the table and touch each one.
+
+    The perception-to-control path on something that is not a hand, and
+    the clearest way to see calibration error: a consistent offset in the
+    same direction on every object means the extrinsics are wrong.
+    """
+    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.mock import MockArm
+    from tlod.arm.model import HOME
+    from tlod.game.touch import TouchObjectsPolicy
+    from tlod.runtime.app import RobotApp
+    from tlod.vision.camera import MockCamera
+    from tlod.vision.hands import HandLocator
+    from tlod.vision.objects import ColorBlobDetector
+    from tlod.vision.scene import SceneHandDetector, SyntheticHandScene
+    from tlod.vision.tracking import MultiTracker
+
+    cfg = Config.load(args.config)
+    projector = build_projector(cfg)
+    scene = SyntheticHandScene(projector)
+    policy = TouchObjectsPolicy()
+    controller = ArmController(
+        MockArm(q0=np.concatenate([HOME, [0.0]]), max_speed=cfg.arm.sim_max_speed,
+                accel=cfg.arm.sim_accel),
+        SafetyLimits(), cfg.runtime.control_hz)
+
+    app = RobotApp(
+        # Objects have to be visible, so this run renders pixels and the
+        # detector actually looks at them -- unlike the hand path, which
+        # short-circuits to scene truth for determinism.
+        camera=MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps,
+                          scene=scene, render=True),
+        detector=SceneHandDetector(scene),
+        locator=HandLocator(projector, depth_mode="size"),
+        controller=controller,
+        policy=policy,
+        tracker=MultiTracker(),
+        object_detector=ColorBlobDetector(projector, min_area_px=150),
+        control_hz=cfg.runtime.control_hz,
+    )
+    app.projector = projector
+    print(f"  scene has {len(scene.objects)} objects: "
+          f"{', '.join(o.label for o in scene.objects)}")
+    _run_for(app, args.duration, view=args.view, projector=projector)
+    print(f"\n  touched {len(policy.visited)}: {', '.join(policy.visited) or 'none'}")
+    if policy.errors:
+        print(f"  placement error: mean {np.mean(policy.errors)*1000:.1f} mm, "
+              f"max {np.max(policy.errors)*1000:.1f} mm")
+        truth = {o.label: np.array(o.position) for o in scene.objects}
+        for det in app.objects:
+            if det.label in truth:
+                err = np.linalg.norm(det.position - truth[det.label])
+                print(f"    {det.label:<6} detected {err*1000:5.1f} mm from true position")
+    return 0
+
+
 
 
 def build_app(cfg: Config, render: bool = False):
@@ -418,6 +479,134 @@ def cmd_reach(args) -> int:
     return 0
 
 
+def cmd_calibrate(args) -> int:
+    """Measure the lens, then measure where the camera is.
+
+    Extrinsics use the arm as the calibration target: it drives to a
+    spread of poses and finds a marker on the gripper in each frame, with
+    forward kinematics supplying the 3D coordinates. That puts the result
+    in exactly the frame the controller commands in.
+    """
+    from tlod.vision.calibrate_flow import run_extrinsics, run_intrinsics
+    from tlod.vision.calibration import Intrinsics
+
+    cfg = Config.load(args.config)
+    out = Path(args.output)
+
+    if args.what == "intrinsics":
+        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera})
+        camera = build_camera(cfg)
+        print(f"  hold a {args.pattern} chessboard (inner corners) with "
+              f"{args.square*1000:.0f} mm squares in view.")
+        print("  move it around: corners, edges, near, far, tilted. Auto-captures.")
+        with camera:
+            time.sleep(1.0)
+            intr = run_intrinsics(
+                camera, pattern=_pattern(args.pattern), square=args.square,
+                views=args.views, timeout=args.timeout,
+                on_progress=lambda n, total, *_: print(f"    view {n}/{total}", flush=True),
+            )
+        intr.save(out)
+        print(f"\n  reprojection RMS {intr.rms:.3f} px  ->  {out}")
+        if intr.rms > 1.0:
+            print("  WARNING: above 1 px is poor. Reshoot with more varied views,")
+            print("  better light, and the board fully flat.")
+        return 0
+
+    # extrinsics
+    if not args.intrinsics:
+        raise SystemExit("extrinsics needs --intrinsics pointing at the .npz from the first step")
+    intr = Intrinsics.load(args.intrinsics)
+
+    from tlod.arm.controller import ArmController, SafetyLimits
+
+    if args.sim:
+        # Rehearsal: a synthetic camera that renders a marker at the true
+        # tool position. Proves the whole procedure end to end -- motion,
+        # detection, solve, residuals -- before it drives real hardware.
+        from tlod.vision.calibration import synthetic_projector
+
+        truth = synthetic_projector((cfg.camera.width, cfg.camera.height),
+                                    cfg.camera.position, cfg.camera.look_at)
+        controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
+        camera = _MarkerCamera(truth, controller, cfg.camera.width, cfg.camera.height)
+        print("  SIMULATED rehearsal: no hardware is moving.")
+    else:
+        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+                                 arm={"backend": "feetech"})
+        camera = build_camera(cfg)
+        controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
+        print("  THE ARM WILL MOVE. Clear the workspace, keep hands away.")
+        print("  Attach a green marker to the gripper, visible from the camera.")
+        input("  press Enter when ready, Ctrl-C to abort... ")
+
+    controller.start()
+    try:
+        with camera:
+            time.sleep(1.0)
+            extr, residuals = run_extrinsics(
+                camera, controller, intr,
+                on_progress=lambda i, n, *_: print(f"    pose {i}/{n}", flush=True),
+            )
+    finally:
+        controller.stop(park=True)
+
+    extr.save(out)
+    residuals = np.array(residuals)
+    print(f"\n  camera at ({extr.t[0]:+.3f}, {extr.t[1]:+.3f}, {extr.t[2]:+.3f}) m in base frame")
+    print(f"  reprojection: RMS {extr.rms:.2f} px, worst point {residuals.max():.2f} px")
+    print(f"  -> {out}")
+    if residuals.max() > 3 * max(extr.rms, 0.5):
+        print("  NOTE: one point is far worse than the rest -- likely a mislocated")
+        print("  marker rather than a bad calibration. Rerun; it should settle.")
+    print("\n  verify with:  tlod touch --view    (the drawn arm must land on the real arm)")
+    return 0
+
+
+def _pattern(text: str) -> tuple[int, int]:
+    cols, rows = text.lower().split("x")
+    return int(cols), int(rows)
+
+
+class _MarkerCamera:
+    """Synthetic camera drawing a marker at the true tool position."""
+
+    def __init__(self, projector, controller, width, height):
+        self.projector = projector
+        self.controller = controller
+        self.width, self.height = width, height
+        self._n = 0
+
+    def start(self): pass
+
+    def stop(self): pass
+
+    def __enter__(self): return self
+
+    def __exit__(self, *exc): pass
+
+    @property
+    def resolution(self): return self.width, self.height
+
+    def read(self):
+        import cv2
+        from tlod.types import Frame
+
+        img = np.full((self.height, self.width, 3), 30, np.uint8)
+        tip = model_fk_tip(self.controller)
+        uv = self.projector.project(tip)
+        if uv is not None:
+            cv2.circle(img, (int(uv[0]), int(uv[1])), 14, (70, 190, 90), -1)
+        self._n += 1
+        return Frame(image=img, stamp=time.perf_counter(), index=self._n)
+
+
+def model_fk_tip(controller):
+    from tlod.arm import model
+
+    return model.fk(controller.state().q[:5])[:3, 3]
+
+
 def cmd_cameras(args) -> int:
     from tlod.vision.camera import list_cameras
 
@@ -520,6 +709,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--view", action="store_true")
     s.set_defaults(func=cmd_replay)
 
+    s = sub.add_parser("touch", help="detect table objects and touch each one")
+    s.add_argument("--duration", type=float, default=25.0)
+    s.add_argument("--view", action="store_true")
+    s.set_defaults(func=cmd_touch)
+
     s = sub.add_parser("move", help="move the tool to a position")
     s.add_argument("x", type=float, nargs="?", default=0.22)
     s.add_argument("y", type=float, nargs="?", default=0.0)
@@ -535,6 +729,18 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("reach", help="probe the reachable workspace")
     s.add_argument("--heights", default="0.02,0.05,0.10,0.15,0.20,0.30")
     s.set_defaults(func=cmd_reach)
+
+    s = sub.add_parser("calibrate", help="measure the lens, then where the camera is")
+    s.add_argument("what", choices=["intrinsics", "extrinsics"])
+    s.add_argument("-o", "--output", default="calib/intrinsics.npz")
+    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
+    s.add_argument("--square", type=float, default=0.025, help="square size, metres")
+    s.add_argument("--views", type=int, default=15)
+    s.add_argument("--timeout", type=float, default=180.0)
+    s.add_argument("--intrinsics", default="", help="extrinsics: path to the intrinsics .npz")
+    s.add_argument("--sim", action="store_true", help="rehearse without hardware")
+    s.set_defaults(func=cmd_calibrate)
 
     s = sub.add_parser("cameras", help="list camera indices")
     s.set_defaults(func=cmd_cameras)

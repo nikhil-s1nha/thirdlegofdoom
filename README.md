@@ -3,15 +3,38 @@
 A tabletop game robot on an SO-ARM101 (SO-101) arm. It watches your hand
 through a camera and plays games against you — hand slap first.
 
-**Status: milestone 1 complete.** The whole loop runs in simulation with no
-hardware. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Status: playable in simulation, M1–M5 complete.** No hardware required
+for any of it.
+
+### 👉 New here? Start with [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)
+
+A start-to-finish guide: run it in five minutes with no hardware, how the
+code is laid out, bring-up for a real arm step by step, how to change
+things, and what to do when it breaks. Everything below is summary.
+
+See also [docs/ROADMAP.md](docs/ROADMAP.md) for what is and is not built.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[hands,dev]"
-tlod sim              # fully synthetic run
-pytest                # 79 tests
+
+tlod move 0.22 0 0.12         # move the arm to a point
+tlod sim --view               # the whole loop, synthetic
+tlod hybrid --view            # your real webcam and hand, simulated arm
+tlod touch --view             # detect table objects and touch each one
+tlod calibrate --help         # measure the lens, then where the camera is
+pytest                        # 114 tests
+
+# the game lives on the `gamification` branch:
+#   git checkout gamification && tlod play --view
 ```
+
+## Branches
+
+| branch | what it is |
+|---|---|
+| `main` / `arm-core` | **you are here** — the arm, vision, calibration. No game. |
+| `gamification` | + hand slap, opponent, feints, scoring |
 
 ## The problem this robot has
 
@@ -31,50 +54,17 @@ Human visual reaction is ~200–250 ms *plus* hand travel. A robot that
 reacts to what it saw is late every time, and no amount of optimisation
 closes that gap — the servo alone eats the budget.
 
-**So the robot does not react. It predicts.** A Kalman filter estimates
-hand velocity, and the arm aims where the hand *will be* when it arrives.
-Measured: **4.8× better aim** at a 300 ms horizon (34.8 cm → 7.3 cm error).
-Everything else here exists to keep that loop fast, honestly timed, and
-safe.
+**Two answers, and the second one matters more.**
 
-## Three ways to run it
+*Predict, don't react.* A Kalman filter estimates hand velocity so the arm
+aims where the hand *will be*. Measured: **4.8× better aim** at a 300 ms
+horizon (34.8 cm → 7.3 cm error).
 
-Hardware is not required for most of the work.
-
-| | camera | hand | arm | command |
-|---|---|---|---|---|
-| **A** sim | synthetic | scripted | simulated | `tlod sim` |
-| **B** hybrid | **your webcam** | **your hand** | simulated | `tlod hybrid` |
-| **C** hardware | mounted | real | real | `tlod first-light` |
-
-Tier B is the useful one before the parcel arrives: real photons, real
-hands, real detection, real prediction — only the arm is simulated.
-
-## What's here
-
-```
-src/tlod/
-  types.py            values crossing module boundaries; every observation
-                      carries the timestamp of the physical event
-  arm/
-    model.py          FK + IK from the official URDF
-    backend.py        the interface MockArm and FeetechArm both satisfy
-    mock.py           simulator with finite slew rate, not a teleporter
-    feetech.py        STS3215 bus over the Feetech SDK  [unverified on hw]
-    controller.py     safety guards, e-stop, min-jerk trajectories
-  vision/
-    camera.py         low-latency capture (grab-and-discard threading)
-    calibration.py    intrinsics, extrinsics, pixel ↔ robot frame
-    hands.py          MediaPipe Tasks + 3D localisation
-    tracking.py       Kalman prediction — the thing that wins games
-    objects.py        colour segmentation baseline
-    scene.py          synthetic hand defined in the workspace
-  runtime/
-    signal.py         one-slot mailbox between threads (not a queue)
-    loop.py           drift-free fixed-rate loop, latency statistics
-    app.py            perception thread + control thread + policy
-  cli.py              tlod sim | hybrid | bench | first-light | ...
-```
+*And: let the robot go first.* Latency taxes only the **responder**. With
+the robot as slapper and the human as dodger, the whole pipeline delay is
+spent *before* the strike, where nobody is waiting on it — and a hand
+waiting to be slapped is nearly stationary, so a stale estimate is still
+a correct one. An 8 cm strike lands in ~210 ms.
 
 ## What has actually been verified
 
@@ -90,7 +80,7 @@ touched the arm.
 | record → replay, real camera | 146 frames, 0 failures, deterministic |
 | object touching | 0.2 mm mean placement error |
 | **7-minute soak** | **RSS flat, +17 gc objects, latency drift −0.7 ms** |
-| tests | 135 passing, ruff clean |
+| tests | 114 passing, ruff clean |
 
 Every CLI path has been executed at least once, including `first-light`
 rehearsed in simulation.
@@ -140,6 +130,16 @@ Acting confidently on a 400 ms old estimate is worse than acting on none.
 
 **The simulator models finite slew rate.** A backend that teleports gives
 the reassuring, useless answer "the arm always gets there in time".
+
+**Strike safety is structural, not advisory.** The drop is capped, the
+commanded depth never goes below the target plane (so a wrong height
+estimate stalls rather than presses), torque is lowered for the duration,
+and IK is solved once so a fast move cannot switch branches halfway down.
+
+**The real e-stop is a microcontroller.** Software e-stop stops working in
+exactly the case you need it: a hung loop, a crashed process, a pulled
+cable. The Pico cuts servo power in its interrupt handler and reports
+afterwards.
 
 ## Gotchas already hit, so you don't
 
