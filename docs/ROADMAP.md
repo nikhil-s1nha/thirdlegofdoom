@@ -27,6 +27,29 @@ own timing, and safe.
 
 ---
 
+## Three fidelity tiers
+
+Hardware is not in hand, so the plan is ordered to squeeze everything
+possible out of the tiers that need none of it. Hardware handoff is last.
+
+| tier | camera | hand | arm | what it proves |
+|---|---|---|---|---|
+| **A — full sim** | synthetic | scripted | simulated | logic, timing, IK, determinism. Runs in CI. |
+| **B — hybrid** | **your real webcam** | **your real hand** | simulated | the entire perception stack, for real. Playable. |
+| **C — hardware** | mounted camera | real hand | real arm | servos, calibration, true latency |
+
+Tier B is the important one and is often skipped. Real hands blur, get
+occluded, and enter frame at bad angles in ways no synthetic trajectory
+reproduces — and none of that needs the arm to exist. Almost every
+perception and game question can be answered and *played* on a laptop
+before the parcel arrives.
+
+What genuinely cannot be done before hardware, and nothing else:
+servo sign conventions, real slew rate and command latency,
+camera-to-base extrinsics for the physical mount, and NPU benchmarks.
+
+---
+
 ## M0 — Research and architecture — **done**
 
 Established the facts the rest depends on:
@@ -38,7 +61,7 @@ Established the facts the rest depends on:
 - Servo control table verified against the STS3215 datasheet.
 - MediaPipe platform landmines identified (see M6).
 
-## M1 — Infrastructure — **in progress**
+## M1 — Infrastructure — **in progress** *(tier A)*
 
 The skeleton everything hangs on. Runs end-to-end in simulation with no
 hardware, so all later work is testable before the arm arrives.
@@ -54,118 +77,118 @@ hardware, so all later work is testable before the arm arrives.
 | calibration: intrinsics, extrinsics, pixel↔robot frame | done |
 | MediaPipe hand detection (19 ms @720p) + 3D localisation | done |
 | Kalman tracking and prediction | done |
-| **runtime: perception/control threads, timing instrumentation** | todo |
+| runtime: threads, mailbox, fixed-rate loop, latency accounting | done |
 | **config system, CLI, object detection baseline** | todo |
 | **tests, docs** | todo |
 
-**Exit criteria:** `tlod sim` runs a full perception→prediction→IK→arm loop
-against a synthetic hand, reports per-stage latency, and the test suite
-passes. No hardware required.
+**Exit:** `tlod sim` runs a full perception→prediction→IK→arm loop against
+a synthetic hand, reports per-stage latency, and the tests pass.
 
-## M2 — Hardware bring-up
+## M2 — Simulation you can watch *(tier A)*
 
-Blocked on the arm arriving. Everything here is verification, not design.
+A loop that only prints numbers cannot be debugged by eye, and every
+behaviour question from here on is a question about motion.
 
-- Motor ID assignment and calibration (`lerobot-setup-motors`, or ours)
-- **`tlod arm first-light`** — energise one joint at a time, confirm
-  direction signs and limits before anything moves at speed
-- Validate the Feetech backend against real servos; fix the sign and
-  calibration conventions that cannot be checked in simulation
-- **Measure the real numbers** that are currently estimates: servo slew
-  rate, command-to-motion latency, camera pipeline latency, achievable
-  control rate. The simulator gets retuned to match.
-- Physical camera mount, then extrinsic calibration using the arm itself
-  as the calibration target
+- Digital twin: render the arm from FK link frames, the tracked hand, the
+  prediction horizon, and the safety volumes
+- Playback and record: capture a session and replay it deterministically,
+  so a bug seen once can be re-run exactly
+- Synthetic scene generator — hands entering from varied angles at varied
+  speeds, for repeatable stress tests
+- Simulator fidelity: tune the mock arm's slew and latency to the
+  datasheet, and mark clearly which numbers are estimates awaiting M6
 
-**Exit criteria:** the arm moves to a commanded Cartesian point within a
-few mm, and every latency figure in the table above is measured rather
-than estimated.
+**Exit:** watch the robot play, in a window, and replay any run.
 
-## M3 — Perception in the real world
+## M3 — Real perception, simulated arm *(tier B)*
 
-Synthetic hands are easy. Real ones are not.
+The laptop webcam becomes the sensor. Everything from photons to a
+predicted 3D hand position is now real; only the arm is simulated.
 
-- Hand tracking validated across the actual workspace, lighting, and skin
-  tones — including the failure modes: motion blur on a fast slap,
-  occlusion by the arm itself, hands entering frame at the edge
-- Depth: validate palm-width ranging against ground truth; decide whether
-  the plane assumption is good enough for the game
-- Object detection: color/contour baseline first, learned model if needed
-- Retune the Kalman filter on **recorded real hand motion** rather than a
-  synthetic trajectory
+- Real hand tracking through its actual failure modes: motion blur on a
+  fast slap, occlusion, edge-of-frame entry, varied lighting and skin tones
+- Validate palm-width depth ranging against measured ground truth, and
+  decide whether the plane assumption suffices
+- **Retune the Kalman filter on recorded real hand motion** rather than a
+  synthetic trajectory — the current tuning is a placeholder
+- Measure the true webcam pipeline latency and set the prediction horizon
+  from data
+- Object detection: colour/contour baseline, learned model if needed
 
-**Exit criteria:** hand position tracked to a few cm across the workspace
-at full frame rate, with measured prediction error at the real latency
-horizon.
+**Exit:** real hand tracked to a few cm at full frame rate, with
+prediction error measured at the real latency horizon.
 
-## M4 — Vision and control fused
+## M4 — Vision and control fused *(tier B)*
 
 The point of the project: closed-loop visual servoing with latency
-compensation.
+compensation, driven by a real hand.
 
-- Continuous visual servoing — arm tracks a moving hand in real time
-- Latency compensation wired end to end: aim at `predict(measured_latency)`
+- Arm tracks a real moving hand in real time, in the viewer
+- Latency compensation wired end to end: aim at
+  `predict(measured_latency)` using the M3 number
 - Motion primitives: **strike**, **retract**, **hover**, **track**, **grasp**
-- Reachability and timing gating: given where the hand is going and how
-  fast the arm is, decide *whether the swing is winnable* before starting
-- Safety hardened: this machine moves quickly toward a human hand, so
-  speed limits, keep-out volumes, and the e-stop get real scrutiny here
+- Winnability gating: given where the hand is going and how fast the arm
+  is, decide *whether a swing can land* before committing to it
+- Safety hardened here, while the consequences are still pixels
 
-**Exit criteria:** the arm reliably intercepts a moving hand, and refuses
+**Exit:** simulated arm reliably intercepts your real hand, and declines
 swings it cannot win instead of flailing.
 
-## M5 — The games
+## M5 — The games *(tier B — playable)*
 
-- **Hand slap** — both roles. As slapper: predict the dodge, commit late.
-  As dodger: detect the incoming strike and retract. These are different
-  problems and the dodger is the easier one to make good.
+- **Hand slap**, both roles. As slapper: predict the dodge, commit late.
+  As dodger: detect the strike and retract. Different problems; the
+  dodger is easier to make good.
 - Difficulty tuning — a robot that always wins is not fun. Deliberate,
-  tunable reaction handicap.
-- Additional games reusing the same primitives: rock-paper-scissors
-  (needs landmarks, not just boxes), quick-draw reaction, cup shuffle,
-  pick-and-place challenges
-- Game-agnostic scoring, rounds, and state machine
+  tunable handicap.
+- More games on the same primitives: rock-paper-scissors (needs
+  landmarks, not boxes), quick-draw, cup shuffle, pick-and-place
+- Game-agnostic scoring, rounds, state machine
 
-**Exit criteria:** a person can walk up and play a full game without an
-operator.
+**Exit:** you can play a full game against the on-screen robot with your
+real hand, and it is fun.
 
-## M6 — Standalone deployment
+## M6 — Hardware handoff *(tier C — last)*
 
-Take the laptop out of the loop.
+Everything above is done and proven. This milestone is verification and
+deployment, not design.
 
-- Port to **Orange Pi 5** (RK3588S, 6 TOPS NPU). It can run the whole
-  stack — vision, IK, and the servo bus over USB — as a self-contained
-  robot.
-  - Detection models converted with `rknn-toolkit2` (YOLOv5n ~58 fps on
-    this NPU); MediaPipe pinned to 0.10.18, the newest aarch64 wheel
-  - Re-measure everything: A76 cores are slower than an M-series laptop,
-    and the NPU path has its own latency profile
-- **Raspberry Pi Pico as an I/O sidecar** — the right job for it, since it
+**Arm bring-up**
+- Motor ID assignment and calibration
+- `tlod arm first-light` — energise one joint at a time, confirm direction
+  signs and limits before anything moves at speed
+- Validate the Feetech backend; fix sign and calibration conventions that
+  cannot be checked in simulation
+- **Replace every estimated number with a measured one**: servo slew rate,
+  command-to-motion latency, achievable control rate. Retune the simulator
+  to match, so tier A stays trustworthy.
+- Mount the camera; extrinsic calibration using the arm as its own target
+- Re-verify the games against the real latency, which will differ
+
+**Standalone deployment**
+- Port to **Orange Pi 5** (RK3588S, 6 TOPS NPU) — vision, IK, and the
+  servo bus over USB, self-contained
+  - Detection converted with `rknn-toolkit2` (YOLOv5n ~58 fps); MediaPipe
+    pinned to 0.10.18, the newest aarch64 wheel
+  - Re-measure: A76 cores are slower than an M-series laptop
+- **Raspberry Pi Pico as I/O sidecar** — the right job for a chip that
   cannot do vision:
-  - **Piezo impact detection** for scoring. Microsecond timestamps on a
-    real hit, versus vision guessing at 20 ms granularity.
-  - **Hardware e-stop** that cuts servo torque independently of whether
+  - **Piezo impact detection** for scoring. Microsecond hit timestamps
+    versus vision guessing at 20 ms granularity.
+  - **Hardware e-stop** cutting servo torque independently of whether
     Python is responsive. Real safety needs this.
   - Score display, LEDs, buzzer, start button
 - Autostart, crash recovery, watchdog
 
-**Exit criteria:** power it on and it plays, with no computer attached.
+**Exit:** power it on and it plays, with no computer attached.
 
 ---
 
-## What can proceed in parallel
+## Why this order
 
-The hardware-independent work is deliberately the majority, so waiting on
-shipping costs as little as possible.
-
-| can be done now, no hardware | needs the arm | needs the Orange Pi |
-|---|---|---|
-| all of M1 | M2 entirely | RKNN conversion |
-| game logic and state machines (M5) | Feetech validation | on-device benchmarks |
-| prediction tuning on recorded video | real latency numbers | autostart/deploy |
-| object detection on still images | extrinsic calibration | |
-| difficulty and scoring design | | |
-
-The backend interface is what makes this work: `MockArm` and `FeetechArm`
-satisfy the same contract, so game code written against the simulator runs
-unchanged on the real arm.
+Every milestone before M6 produces something testable today. The backend
+interface is what makes it work: `MockArm` and `FeetechArm` satisfy the
+same contract, so game code written against the simulator runs unchanged
+on the real arm. The risk this ordering accepts is that hardware surprises
+arrive late; the risk it avoids is a project that cannot progress at all
+until a parcel shows up.
