@@ -39,8 +39,8 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 
 | | |
 |---|---|
-| `main`, `arm-core` | **you are here** — arm, vision, calibration |
-| `gamification` | the above plus hand slap |
+| `main`, `arm-core` | arm, vision, calibration. No game. |
+| `gamification` | **you are here** — the above plus hand slap |
 
 ## Layout
 
