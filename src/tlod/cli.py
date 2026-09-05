@@ -167,7 +167,7 @@ def build_app(cfg: Config, render: bool = False):
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
     policy = policies.get(cfg.runtime.policy, IdlePolicy)()
 
-    return RobotApp(
+    app = RobotApp(
         camera=camera,
         detector=detector,
         locator=locator,
@@ -181,6 +181,8 @@ def build_app(cfg: Config, render: bool = False):
         perception_max_age=cfg.runtime.perception_max_age,
         prediction_horizon=cfg.runtime.prediction_horizon,
     )
+    app.projector = projector
+    return app
 
 
 # --------------------------------------------------------------------------
@@ -188,12 +190,21 @@ def build_app(cfg: Config, render: bool = False):
 # --------------------------------------------------------------------------
 
 
-def _run_for(app, duration: float) -> None:
+def _run_for(app, duration: float, view: bool = False, projector=None) -> None:
     with app:
-        deadline = time.perf_counter() + duration
         try:
-            while time.perf_counter() < deadline:
-                time.sleep(0.2)
+            if view:
+                # The window must own the main thread; on macOS a cv2
+                # window created from a worker thread does nothing or
+                # crashes. RobotApp already keeps its work on other
+                # threads, so the main thread is free for exactly this.
+                from tlod.viz.viewer import Viewer
+
+                Viewer(app, projector).run(duration=duration)
+            else:
+                deadline = time.perf_counter() + duration
+                while time.perf_counter() < deadline:
+                    time.sleep(0.2)
         except KeyboardInterrupt:
             print("\ninterrupted")
         print(app.latency_report())
@@ -212,7 +223,8 @@ def cmd_sim(args) -> int:
     )
     print(f"tier A simulation: synthetic camera, scripted hand, simulated arm "
           f"[policy={args.policy}]")
-    _run_for(build_app(cfg), args.duration)
+    app = build_app(cfg, render=args.view)
+    _run_for(app, args.duration, view=args.view, projector=app.projector)
     return 0
 
 
@@ -227,7 +239,8 @@ def cmd_hybrid(args) -> int:
     print(f"tier B hybrid: real camera {args.camera}, real hand, simulated arm "
           f"[policy={args.policy}]")
     print("wave your hand in front of the camera.")
-    _run_for(build_app(cfg), args.duration)
+    app = build_app(cfg)
+    _run_for(app, args.duration, view=args.view, projector=app.projector)
     return 0
 
 
@@ -284,6 +297,45 @@ def cmd_bench(args) -> int:
             print(app.latency_report())
             print(f"\n  measured shutter->command: {app.measured_latency*1e3:.1f} ms")
             print(f"  set runtime.prediction_horizon to about this, plus servo travel.")
+    return 0
+
+
+def cmd_record(args) -> int:
+    """Capture a camera session to disk for repeatable offline tuning."""
+    from tlod.vision.recording import Recorder
+
+    cfg = Config.load(args.config).with_overrides(
+        camera={"source": "opencv", "index": args.camera})
+    camera = build_camera(cfg)
+    print(f"  recording to {args.output} for {args.duration:.0f}s ...")
+    with camera, Recorder(args.output) as rec:
+        last = -1
+        deadline = time.perf_counter() + args.duration
+        try:
+            while time.perf_counter() < deadline:
+                frame = camera.read()
+                if frame is not None and frame.index != last:
+                    last = frame.index
+                    rec.add(frame)
+                else:
+                    time.sleep(0.001)
+        except KeyboardInterrupt:
+            print("\n  stopped")
+        print(f"  wrote {rec.count} frames")
+    return 0
+
+
+def cmd_replay(args) -> int:
+    """Re-run a recording through the full pipeline, deterministically."""
+    from tlod.vision.recording import ReplayCamera
+
+    cfg = Config.load(args.config).with_overrides(
+        vision={"detector": "mediapipe"}, arm={"backend": "mock"},
+        runtime={"policy": args.policy})
+    app = build_app(cfg)
+    app.camera = ReplayCamera(args.path, realtime=not args.fast, loop=args.loop)
+    print(f"  replaying {len(app.camera)} frames from {args.path}")
+    _run_for(app, args.duration, view=args.view, projector=app.projector)
     return 0
 
 
@@ -357,12 +409,14 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("sim", help="tier A: fully synthetic run")
     s.add_argument("--duration", type=float, default=5.0)
     s.add_argument("--policy", default="track_hand")
+    s.add_argument("--view", action="store_true", help="open a window")
     s.set_defaults(func=cmd_sim)
 
     s = sub.add_parser("hybrid", help="tier B: real camera and hand, simulated arm")
     s.add_argument("--duration", type=float, default=30.0)
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--policy", default="track_hand")
+    s.add_argument("--view", action="store_true", help="open a window")
     s.set_defaults(func=cmd_hybrid)
 
     s = sub.add_parser("bench", help="measure what is currently estimated")
@@ -371,6 +425,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_bench)
+
+    s = sub.add_parser("record", help="capture a camera session to disk")
+    s.add_argument("-o", "--output", default="recordings/session")
+    s.add_argument("--duration", type=float, default=20.0)
+    s.add_argument("--camera", type=int, default=0)
+    s.set_defaults(func=cmd_record)
+
+    s = sub.add_parser("replay", help="re-run a recording through the pipeline")
+    s.add_argument("path")
+    s.add_argument("--duration", type=float, default=60.0)
+    s.add_argument("--policy", default="track_hand")
+    s.add_argument("--fast", action="store_true", help="ignore original timing")
+    s.add_argument("--loop", action="store_true")
+    s.add_argument("--view", action="store_true")
+    s.set_defaults(func=cmd_replay)
 
     s = sub.add_parser("cameras", help="list camera indices")
     s.set_defaults(func=cmd_cameras)
