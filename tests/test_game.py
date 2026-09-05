@@ -308,3 +308,60 @@ def test_opponent_integration_is_frame_rate_independent():
         return float(np.linalg.norm(hand.position - hand.home))
 
     assert travel(0.008) == pytest.approx(travel(0.004), rel=0.15)
+
+
+# -- servo-load contact ----------------------------------------------------
+
+def test_servo_load_contact_fires_on_a_load_spike():
+    """Contact from the servos' own torque feedback -- no extra hardware."""
+    from tlod.game.contact import ServoLoadContactSensor
+    from tlod.types import JointState
+
+    load = np.zeros(6)
+    state = lambda: JointState(q=np.zeros(6), stamp=0.0, load=load.copy())
+    sensor = ServoLoadContactSensor(state, threshold=0.12)
+    sensor.arm()
+    assert sensor.poll() is None            # resting
+    load[2] = 0.30                          # elbow resists
+    event = sensor.poll()
+    assert event is not None and event.source == "servo_load"
+    assert sensor.poll() is None            # once per arming
+
+
+def test_servo_load_baseline_ignores_posture():
+    """A loaded resting pose must not read as a hit.
+
+    Resting load depends on configuration -- an extended arm holds more of
+    its own weight -- so the baseline is captured at arm(), not assumed.
+    """
+    from tlod.game.contact import ServoLoadContactSensor
+    from tlod.types import JointState
+
+    load = np.array([0.0, 0.45, 0.40, 0.35, 0.0, 0.0])   # heavy but static
+    state = lambda: JointState(q=np.zeros(6), stamp=0.0, load=load.copy())
+    sensor = ServoLoadContactSensor(state, threshold=0.12)
+    sensor.arm()
+    assert sensor.poll() is None, "static posture load registered as contact"
+
+
+def test_servo_load_ignores_pan_and_roll():
+    """Joints orthogonal to a downward strike mostly report noise."""
+    from tlod.game.contact import ServoLoadContactSensor
+    from tlod.types import JointState
+
+    load = np.zeros(6)
+    state = lambda: JointState(q=np.zeros(6), stamp=0.0, load=load.copy())
+    sensor = ServoLoadContactSensor(state, threshold=0.12)
+    sensor.arm()
+    load[0] = 0.9      # shoulder_pan
+    load[4] = 0.9      # wrist_roll
+    assert sensor.poll() is None
+
+
+def test_servo_load_handles_backends_without_load():
+    from tlod.game.contact import ServoLoadContactSensor
+    from tlod.types import JointState
+
+    sensor = ServoLoadContactSensor(lambda: JointState(q=np.zeros(6), stamp=0.0))
+    sensor.arm()
+    assert sensor.poll() is None

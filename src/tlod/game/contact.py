@@ -15,12 +15,19 @@ So contact detection is an interface with three implementations:
   ProximityContactSensor   tier B, real hand and simulated arm. Infers
                            contact from tracked hand position versus the
                            virtual tool. Honest about being an estimate.
-  SerialContactSensor      hardware. A piezo disc on the target pad, read
-                           by a microcontroller that timestamps the impact
-                           in microseconds and cannot be occluded.
+  ServoLoadContactSensor   hardware, no extra parts. Every STS3215
+                           reports Present_Load, and the driver already
+                           fetches those bytes in the same sync-read as
+                           position -- so contact detection costs nothing
+                           and needs no sidecar board.
 
-The first two exist so the game is fully playable before the hardware
-does. The third is the one that will be trusted.
+The first two exist so the game is fully playable before hardware does.
+The third is what runs on the real arm.
+
+A piezo disc on a microcontroller would time an impact more precisely
+(microseconds, versus one control tick here). It is not worth a whole
+extra board: at 100 Hz the load spike lands within 10 ms, and a slap is
+scored per round, not per millisecond.
 """
 
 from __future__ import annotations
@@ -97,6 +104,61 @@ class ProximityContactSensor(GeometricContactSensor):
         return event
 
 
+class ServoLoadContactSensor(ContactSensor):
+    """Detect contact from the servos' own torque feedback.
+
+    When the paddle meets a hand, the joints resisting the motion see
+    their load rise sharply. The STS3215 reports this on Present_Load,
+    and `FeetechArm.read()` already pulls it in the same bus transaction
+    as position and speed, so this is free: no piezo, no microcontroller,
+    no wiring.
+
+    Only the pitch joints are watched. Shoulder pan and wrist roll are
+    roughly orthogonal to a downward strike and mostly report noise.
+
+    The baseline is captured at `arm()` rather than assumed, because
+    resting load depends on the arm's configuration -- an extended arm
+    holds more of its own weight than a folded one, and a fixed threshold
+    would fire on posture instead of on contact.
+    """
+
+    # shoulder_lift, elbow_flex, wrist_flex
+    STRIKE_JOINTS: tuple[int, ...] = (1, 2, 3)
+
+    def __init__(
+        self,
+        state_source,
+        threshold: float = 0.12,
+        joints: tuple[int, ...] | None = None,
+    ) -> None:
+        self.state_source = state_source
+        self.threshold = threshold
+        self.joints = joints or self.STRIKE_JOINTS
+        self._baseline: np.ndarray | None = None
+        self._fired = False
+
+    def arm(self) -> None:
+        self._fired = False
+        state = self.state_source()
+        self._baseline = (
+            np.abs(state.load[list(self.joints)]) if state.load is not None else None
+        )
+
+    def poll(self, **kwargs) -> ContactEvent | None:
+        if self._fired:
+            return None
+        state = self.state_source()
+        if state.load is None:
+            return None
+        current = np.abs(state.load[list(self.joints)])
+        baseline = self._baseline if self._baseline is not None else np.zeros_like(current)
+        rise = float(np.max(current - baseline))
+        if rise < self.threshold:
+            return None
+        self._fired = True
+        return ContactEvent(time.perf_counter(), "servo_load", strength=min(rise, 1.0))
+
+
 class SerialContactSensor(ContactSensor):
     """Piezo impact detector on a microcontroller.
 
@@ -104,9 +166,11 @@ class SerialContactSensor(ContactSensor):
     board. Read on a background thread because the game loop must never
     block on a serial read.
 
+    Kept for anyone who does add a sidecar, but it is no longer the
+    recommended path -- ServoLoadContactSensor gets the same answer with
+    no extra hardware.
+
       !! UNVERIFIED AGAINST HARDWARE !!
-      Written alongside firmware/pico_sidecar.py. The protocol is fixed
-      but neither end has run on a real board.
     """
 
     def __init__(self, port: str, baudrate: int = 115200, threshold: float = 0.0) -> None:

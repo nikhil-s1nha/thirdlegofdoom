@@ -170,6 +170,8 @@ class FeetechArm(ArmBackend):
         # One sync read covering position+speed+load in a single bus
         # transaction: 3 registers x 6 motors in ~1 ms instead of 18 round
         # trips. At 100 Hz that difference is most of the loop budget.
+        # Load comes along free in the same 6 bytes, and is what makes
+        # contact detection possible without any extra hardware.
         self._sync_read = scs.GroupSyncRead(
             self._port_handler, self._packet_handler, ADDR_PRESENT_POSITION, 6
         )
@@ -232,17 +234,23 @@ class FeetechArm(ArmBackend):
 
         counts = np.empty(NUM_JOINTS)
         speeds = np.empty(NUM_JOINTS)
+        loads = np.empty(NUM_JOINTS)
         for i, mid in enumerate(self.motor_ids):
             counts[i] = self._sync_read.getData(mid, ADDR_PRESENT_POSITION, 2)
+            # Speed and load are both sign-magnitude: bit 15 is direction,
+            # not two's complement. Reading either as signed gives nonsense
+            # in one direction only, which is a confusing way to find out.
             raw_speed = int(self._sync_read.getData(mid, ADDR_PRESENT_SPEED, 2))
-            # Speed is sign-magnitude: bit 15 is direction, not two's complement.
-            magnitude = raw_speed & 0x7FFF
-            speeds[i] = -magnitude if raw_speed & 0x8000 else magnitude
+            speeds[i] = -(raw_speed & 0x7FFF) if raw_speed & 0x8000 else (raw_speed & 0x7FFF)
+            raw_load = int(self._sync_read.getData(mid, ADDR_PRESENT_LOAD, 2))
+            magnitude = (raw_load & 0x3FF) / 1000.0
+            loads[i] = -magnitude if raw_load & 0x400 else magnitude
 
         return JointState(
             q=self.calib.to_rad(counts),
             stamp=stamp,
             dq=self.calib.sign * speeds * RAD_PER_COUNT,
+            load=loads,
         )
 
     def write(self, q: np.ndarray) -> None:

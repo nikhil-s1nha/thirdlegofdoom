@@ -40,9 +40,13 @@ through occlusion and edge-of-frame entry.
 
 **M6 — hardware.** Bring-up order is in [deployment.md](deployment.md).
 Arm: motor IDs, calibrate, `first-light`, verify reach, measure real
-latencies, mount and calibrate the camera. Then Orange Pi 5 (RK3588S
-NPU, `rknn-toolkit2`) and the Pico sidecar (piezo scoring, hardware
-e-stop).
+latencies, mount and calibrate the camera. Then the Orange Pi 5
+(RK3588S NPU, `rknn-toolkit2`).
+
+No sidecar microcontroller. The servos carry torque and overload limits
+in their own firmware, an inline switch on the 12 V line is a better
+e-stop than any chip, and contact is read from `Present_Load` over the
+bus already in use.
 
 ## Ideas, not commitments
 

@@ -52,7 +52,6 @@ src/tlod/
   runtime/        signal (mailbox), loop (fixed rate), app (threads + Policy)
   game/           handslap, opponent, contact, touch
   viz/            overlay and viewer
-firmware/         pico_sidecar.py — hardware e-stop + piezo scoring
 ```
 
 Perception and control run on separate threads joined by a one-slot
@@ -79,5 +78,5 @@ Seeed SO-ARM101 Pro. Kinematics come from the official URDF, vendored at
 
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — setup, usage, modification
 - [docs/hardware.md](docs/hardware.md) — servo control table, wiring
-- [docs/deployment.md](docs/deployment.md) — Orange Pi 5 + Pico
+- [docs/deployment.md](docs/deployment.md) — Orange Pi 5, standalone
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is and isn't built

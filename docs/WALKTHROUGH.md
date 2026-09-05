@@ -162,15 +162,12 @@ src/tlod/
   game/
     handslap.py     commit timing, feints, scoring
     opponent.py     a simulated human, so you can test without one
-    contact.py      did it land? geometric / proximity / piezo
+    contact.py      did it land? geometric / proximity / servo load
     touch.py        visit each detected object. Good calibration check.
     base.py         state machine that is also a Policy
 
   viz/              overlay and viewer (main thread, always)
   cli.py            every command
-
-firmware/
-  pico_sidecar.py   hardware e-stop + piezo scoring   [unverified]
 ```
 
 ### The class you subclass
@@ -532,10 +529,12 @@ Non-negotiable, on top of the software guards:
    1 m/s into something soft is ~15 N over 10 ms; into something rigid,
    ~150 N over 1 ms.
 2. **Padded target pad.** A hand on a bare table has nowhere to go.
-3. **Hardware e-stop, tested.** A Pico button cutting servo power in its
-   interrupt handler. Software e-stop stops working exactly when you need
-   it — a hung loop, a crashed process. Press it mid-strike and confirm
-   the arm goes limp *before* playing.
+3. **An inline switch on the 12 V supply, tested.** Normally closed, in
+   series with the servo power, so it cuts through copper with no
+   software in the path. Software e-stop (`Torque_Enable = 0`) stops
+   working exactly when you need it — a hung loop, a crashed process, a
+   pulled cable. Flip the switch mid-strike and confirm the arm goes limp
+   *before* playing.
 4. **Keep `max_drop` small** (~8 cm).
 5. **Keep `torque_limit` low for strikes**, so the servo yields on
    unexpected contact.
@@ -559,5 +558,5 @@ None of that replaces item 3.
 
 - [slap-analysis.md](slap-analysis.md) — why it slaps rather than dodges
 - [hardware.md](hardware.md) — servo control table, wiring
-- [deployment.md](deployment.md) — Orange Pi 5 + Pico
+- [deployment.md](deployment.md) — Orange Pi 5, standalone
 - [ROADMAP.md](ROADMAP.md) — what is and isn't built

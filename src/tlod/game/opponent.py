@@ -9,10 +9,25 @@ measurable win rate, and makes `reaction_time` a dial to sweep.
 The model is deliberately simple and slightly generous to the human:
 
   rest        small drift around a home position
-  notice      the tool is close and descending faster than a threshold
+  notice      the tool has started descending
+  judge       is this a real strike, or a feint?
   react       after `reaction_time`, begin withdrawing
-  withdraw    accelerate away, up and back
+  withdraw    accelerate away and back
   return      come back to rest after a pause
+
+The judgement is the interesting part, and an earlier version of this
+model did not have it. Withdrawal was triggered by mere motion, so the
+only thing separating a flinch from a hold was whether the human happened
+to be fast enough to move during the feint window -- which made *faster*
+simulated humans flinch more, exactly backwards. A slow one "held" by
+being too sluggish to react at all, not by deciding anything, and the
+game degenerated into a coin flip on feint frequency with no skill in it.
+
+`commit_fraction` fixes that by being the actual skill: how far the tool
+must descend, as a fraction of the hover gap, before the human believes
+it and bolts. Twitchy players (low) escape real strikes but flinch at
+feints. Patient players (high) hold through feints but get caught. That
+tradeoff is the game.
 
 Human numbers for reference: simple visual reaction 150-250 ms, hand
 withdrawal 80-150 ms. `reaction_time` here covers the first; the second
@@ -36,6 +51,7 @@ class DodgingHand:
     withdraw_distance: float = 0.18
     trigger_height: float = 0.14      # notice the tool below this
     trigger_displacement: float = 0.004   # metres of descent that reads as motion
+    commit_fraction: float = 0.35     # how convinced before bolting; the skill dial
     drift: float = 0.012              # idle wander, metres
     return_delay: float = 0.45
     seed: int | None = None
@@ -56,6 +72,7 @@ class DodgingHand:
         self._escape_dir /= np.linalg.norm(self._escape_dir)
         self._rest_tool_z: float | None = None
         self._last_update: float | None = None
+        self._hover_gap: float | None = None
         self.dodges = 0
         self.times_hit = 0
 
@@ -107,12 +124,17 @@ class DodgingHand:
             if tool is not None:
                 horizontal = float(np.linalg.norm(tool[:2] - self.position[:2]))
                 above = float(tool[2] - self.position[2])
-                threatened = (
-                    horizontal < 0.12
-                    and -0.02 < above < self.trigger_height
-                    and descent > self.trigger_displacement
-                )
-                if threatened and self._noticed_at is None:
+                near = horizontal < 0.12 and -0.02 < above < self.trigger_height
+
+                # Remember how high it was hovering; the judgement is
+                # relative to that gap, not to an absolute distance.
+                if near and descent < self.trigger_displacement:
+                    self._hover_gap = above
+
+                gap = self._hover_gap or self.trigger_height
+                convinced = descent > max(gap * self.commit_fraction,
+                                          self.trigger_displacement)
+                if near and convinced and self._noticed_at is None:
                     self._noticed_at = t
                 if self._noticed_at is not None and (t - self._noticed_at) >= self.reaction_time:
                     self.state = "withdraw"
