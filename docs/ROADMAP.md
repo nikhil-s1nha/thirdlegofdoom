@@ -74,7 +74,7 @@ Established the facts the rest depends on:
 - Servo control table verified against the STS3215 datasheet.
 - MediaPipe platform landmines identified (see M6).
 
-## M1 — Infrastructure — **in progress** *(tier A)*
+## M1 — Infrastructure — **done** *(tier A)*
 
 The skeleton everything hangs on. Runs end-to-end in simulation with no
 hardware, so all later work is testable before the arm arrives.
@@ -91,13 +91,13 @@ hardware, so all later work is testable before the arm arrives.
 | MediaPipe hand detection (19 ms @720p) + 3D localisation | done |
 | Kalman tracking and prediction | done |
 | runtime: threads, mailbox, fixed-rate loop, latency accounting | done |
-| **config system, CLI, object detection baseline** | todo |
-| **tests, docs** | todo |
+| config system, CLI, object detection baseline | done |
+| tests, docs | done |
 
 **Exit:** `tlod sim` runs a full perception→prediction→IK→arm loop against
 a synthetic hand, reports per-stage latency, and the tests pass.
 
-## M2 — Simulation you can watch *(tier A)*
+## M2 — Simulation you can watch — **done** *(tier A)*
 
 A loop that only prints numbers cannot be debugged by eye, and every
 behaviour question from here on is a question about motion.
@@ -113,7 +113,7 @@ behaviour question from here on is a question about motion.
 
 **Exit:** watch the robot play, in a window, and replay any run.
 
-## M3 — Real perception, simulated arm *(tier B)*
+## M3 — Real perception, simulated arm — **ready, needs a human** *(tier B)*
 
 The laptop webcam becomes the sensor. Everything from photons to a
 predicted 3D hand position is now real; only the arm is simulated.
@@ -133,7 +133,14 @@ predicted 3D hand position is now real; only the arm is simulated.
 **Exit:** real hand tracked to a few cm at full frame rate, with
 prediction error measured at the real latency horizon.
 
-## M4 — Strike primitives and safety *(tier B)*
+**Status:** everything needed is built and untested against a real hand,
+because that needs a person in front of the camera. `tlod record` captures
+a session, `tlod replay` re-runs it deterministically, and
+`tlod play --real-hand` plays live. The Kalman tuning currently in the
+code was fitted to a synthetic trajectory and should be refitted on a
+recording of a real hand — that is the first thing to do here.
+
+## M4 — Strike primitives and safety — **done**
 
 Reshaped by the slap analysis: the robot initiates, so this milestone is
 about *striking well and safely* rather than about chasing.
@@ -159,7 +166,7 @@ about *striking well and safely* rather than about chasing.
 measured speed and force envelopes, and refuses to strike when the
 preconditions are not met.
 
-## M5 — Timing intelligence and the games *(tier B — playable)*
+## M5 — Timing intelligence and the games — **done, playable**
 
 The hard problem is no longer reaction speed. It is *when* to commit.
 
@@ -194,7 +201,13 @@ The hard problem is no longer reaction speed. It is *when* to commit.
 **Exit:** you can play a full game against the on-screen robot with your
 real hand, and it is fun — and close.
 
-## M6 — Hardware handoff *(tier C — last)*
+**Achieved.** `tlod play --view` plays against a simulated opponent;
+`tlod play --real-hand --view` plays against yours. Difficulty is
+calibrated by measurement (`tlod eval`): normal is an even match across
+the whole 180–350 ms human reaction range. `tlod touch` exercises the
+same stack on objects rather than hands, at 0.2 mm placement error.
+
+## M6 — Hardware handoff — **written, unverified** *(tier C — last)*
 
 Everything above is done and proven. This milestone is verification and
 deployment, not design.
@@ -227,6 +240,11 @@ deployment, not design.
 - Autostart, crash recovery, watchdog
 
 **Exit:** power it on and it plays, with no computer attached.
+
+**Status:** the Orange Pi 5 and Pico paths are written and marked
+unverified — `firmware/pico_sidecar.py`, `tlod/vision/rknn.py`, and
+[deployment.md](deployment.md), which orders bring-up so each step fails
+cheaply. Nothing here has run on a board.
 
 ---
 

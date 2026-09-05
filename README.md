@@ -3,15 +3,28 @@
 A tabletop game robot on an SO-ARM101 (SO-101) arm. It watches your hand
 through a camera and plays games against you — hand slap first.
 
-**Status: milestone 1 complete.** The whole loop runs in simulation with no
-hardware. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Status: playable in simulation, M1–M5 complete.** No hardware required
+for any of it. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[hands,dev]"
-tlod sim              # fully synthetic run
-pytest                # 79 tests
+
+tlod play --view              # play hand slap against a simulated human
+tlod play --real-hand --view  # play it with YOUR hand, via the webcam
+tlod move 0.22 0 0.12         # just move the arm to a point
+tlod touch --view             # detect table objects and touch each one
+tlod eval                     # measure the robot's win rate
+pytest                        # 130 tests
 ```
+
+## Branches
+
+| branch | what it is |
+|---|---|
+| `main` | infrastructure through M2 |
+| `arm-core` | + motion primitives, `tlod move`, `tlod reach` — the arm on its own |
+| `gamification` | + hand slap, opponent, scoring — branched from `arm-core` |
 
 ## The problem this robot has
 
@@ -31,11 +44,58 @@ Human visual reaction is ~200–250 ms *plus* hand travel. A robot that
 reacts to what it saw is late every time, and no amount of optimisation
 closes that gap — the servo alone eats the budget.
 
-**So the robot does not react. It predicts.** A Kalman filter estimates
-hand velocity, and the arm aims where the hand *will be* when it arrives.
-Measured: **4.8× better aim** at a 300 ms horizon (34.8 cm → 7.3 cm error).
-Everything else here exists to keep that loop fast, honestly timed, and
-safe.
+**Two answers, and the second one matters more.**
+
+*Predict, don't react.* A Kalman filter estimates hand velocity so the arm
+aims where the hand *will be*. Measured: **4.8× better aim** at a 300 ms
+horizon (34.8 cm → 7.3 cm error).
+
+*And: let the robot go first.* Latency taxes only the **responder**. With
+the robot as slapper and the human as dodger, the whole pipeline delay is
+spent *before* the strike, where nobody is waiting on it — and a hand
+waiting to be slapped is nearly stationary, so a stale estimate is still
+a correct one. An 8 cm strike lands in ~210 ms.
+
+## Then the measurements said the game was wrong
+
+Making the robot fast enough to win turned out to be easy, and useless.
+Measured against a simulated 250 ms human with feints off:
+
+| strike | robot win |
+|---|---|
+| 180–350 ms | **100%** |
+| 450 ms | **17%** |
+| 550 ms+ | **0%** |
+
+That is a step function, not a difficulty curve. The human's usable
+window is only ~45% of the strike duration — contact fires at ~70% of the
+travel, and motion onset costs the first ~25%. Beating an 8 cm strike
+needs a sub-70 ms reaction. Slowing the arm to compensate takes ~650 ms
+per strike, which stops reading as a slap, and striking from further away
+is *both* slower and harder-hitting.
+
+So the game changed instead of the arm. Real hand-slap is slapper-favoured
+too; what makes it fun is that **the dodger is punished for flinching**:
+
+| event | point to |
+|---|---|
+| strike lands | robot |
+| strike dodged | human |
+| feint draws a flinch | robot |
+| feint held through | human |
+
+Now the human reads intent instead of racing physics, difficulty becomes
+a smooth dial (feint frequency), and safety stops fighting game design.
+Calibrated result — **normal is an even match across the whole human
+range**:
+
+| preset | vs 180 ms | vs 250 ms | vs 350 ms |
+|---|---|---|---|
+| easy | 21% | 0% | 0% |
+| **normal** | **57%** | **43%** | **50%** |
+| hard | 86% | 79% | 64% |
+
+Full reasoning in [docs/slap-analysis.md](docs/slap-analysis.md).
 
 ## Three ways to run it
 
@@ -62,6 +122,15 @@ src/tlod/
     mock.py           simulator with finite slew rate, not a teleporter
     feetech.py        STS3215 bus over the Feetech SDK  [unverified on hw]
     controller.py     safety guards, e-stop, min-jerk trajectories
+  game/
+    handslap.py       the game: commit timing, feints, flinch scoring
+    opponent.py       a simulated human that dodges, for testing without one
+    contact.py        did it land? geometric / proximity / piezo
+    touch.py          detect objects and visit each one
+    base.py           state machine that is also a Policy
+  viz/
+    overlay.py        arm, hand, prediction and limits drawn on the frame
+    viewer.py         the window (main thread, always)
   vision/
     camera.py         low-latency capture (grab-and-discard threading)
     calibration.py    intrinsics, extrinsics, pixel ↔ robot frame
@@ -69,11 +138,15 @@ src/tlod/
     tracking.py       Kalman prediction — the thing that wins games
     objects.py        colour segmentation baseline
     scene.py          synthetic hand defined in the workspace
+    recording.py      record once, replay a thousand times
+    rknn.py           RK3588 NPU detector          [unverified on hw]
   runtime/
     signal.py         one-slot mailbox between threads (not a queue)
     loop.py           drift-free fixed-rate loop, latency statistics
     app.py            perception thread + control thread + policy
-  cli.py              tlod sim | hybrid | bench | first-light | ...
+  cli.py              tlod play | move | touch | sim | hybrid | eval | ...
+firmware/
+  pico_sidecar.py     hardware e-stop + piezo scoring  [unverified on hw]
 ```
 
 ## Design decisions worth knowing
@@ -98,6 +171,16 @@ Acting confidently on a 400 ms old estimate is worse than acting on none.
 
 **The simulator models finite slew rate.** A backend that teleports gives
 the reassuring, useless answer "the arm always gets there in time".
+
+**Strike safety is structural, not advisory.** The drop is capped, the
+commanded depth never goes below the target plane (so a wrong height
+estimate stalls rather than presses), torque is lowered for the duration,
+and IK is solved once so a fast move cannot switch branches halfway down.
+
+**The real e-stop is a microcontroller.** Software e-stop stops working in
+exactly the case you need it: a hung loop, a crashed process, a pulled
+cable. The Pico cuts servo power in its interrupt handler and reports
+afterwards.
 
 ## Gotchas already hit, so you don't
 
