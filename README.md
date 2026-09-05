@@ -64,10 +64,9 @@ hardware are the same code path.
 
 - **The arm is 5-DOF, not 6.** Six motors, one drives the gripper. You get
   position + tool pitch + roll; yaw is fixed by the base pan.
-- **Sense-to-motion is ~200–370 ms**, slower than human reaction. The arm
-  aims where the hand *will* be, and it slaps rather than dodges —
-  latency only taxes whoever is responding. See
-  [docs/slap-analysis.md](docs/slap-analysis.md).
+- **Sense-to-motion is ~200–370 ms**, slower than human reaction. So the
+  robot slaps and you dodge — latency only taxes whoever is responding.
+  See [docs/slap-analysis.md](docs/slap-analysis.md).
 - **`mediapipe` 1.0 removed `mp.solutions`** and crashes on macOS arm64.
   Pinned per platform; arm64 Linux caps at 0.10.18.
 - **`cv2.read()` returns the oldest queued frame** when your loop lags.
