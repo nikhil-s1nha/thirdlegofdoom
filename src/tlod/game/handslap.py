@@ -71,7 +71,6 @@ class Difficulty:
     """
 
     hover_height: float = 0.08        # further away = more warning = easier
-    commit_delay: float = 0.0         # deliberate handicap before striking
     strike_duration: float = 0.21     # slower strike = easier
     feint_probability: float = 0.45   # the human's main scoring opportunity
     mean_wait: float = 1.8            # seconds of expected hesitation
@@ -87,10 +86,10 @@ class Difficulty:
             # whereas a robot that feints more is genuinely easier to
             # score against and reads as a more cautious opponent.
             # These must be re-tuned against real people in tier B.
-            "easy": cls(hover_height=0.12, commit_delay=0.10, strike_duration=0.32,
+            "easy": cls(hover_height=0.12, strike_duration=0.32,
                         feint_probability=0.65, mean_wait=2.4, settle_bonus=1.4),
             "normal": cls(),
-            "hard": cls(hover_height=0.06, commit_delay=0.0, strike_duration=0.17,
+            "hard": cls(hover_height=0.06, strike_duration=0.17,
                         feint_probability=0.25, mean_wait=1.3, settle_bonus=3.5),
         }[name]
 

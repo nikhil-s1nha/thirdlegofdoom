@@ -55,7 +55,7 @@ class CameraConfig:
     height: int = 720
     fps: int = 60
     fourcc: str = "MJPG"
-    latency_offset: float = 0.035         # shutter -> grab(); measure it
+    latency_offset: float | None = None   # None = estimate from frame period
     autofocus: bool = False
     autoexposure: bool = False
     exposure: float | None = None

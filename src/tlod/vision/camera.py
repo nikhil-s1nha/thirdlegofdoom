@@ -33,6 +33,11 @@ from tlod.types import Frame
 
 log = logging.getLogger(__name__)
 
+# Added to one frame period to estimate shutter-to-grab latency. Covers
+# USB transfer and MJPEG decode. Rough; `tlod bench camera` explains how
+# to measure the real thing.
+TRANSFER_DECODE_ESTIMATE = 0.015
+
 
 class Camera(abc.ABC):
     @abc.abstractmethod
@@ -65,7 +70,7 @@ class OpenCVCamera(Camera):
         height: int = 720,
         fps: int = 60,
         fourcc: str = "MJPG",
-        latency_offset: float = 0.035,
+        latency_offset: float | None = None,
         autofocus: bool = False,
         autoexposure: bool = False,
         exposure: float | None = None,
@@ -76,7 +81,14 @@ class OpenCVCamera(Camera):
         self.height = height
         self.fps = fps
         self.fourcc = fourcc
-        self.latency_offset = latency_offset
+        # None means estimate it from the measured frame period. A fixed
+        # constant was wrong in a way that hid itself: the default of
+        # 35 ms was *below* one frame period on a camera actually
+        # delivering 29.6 fps (33.5 ms), so every timestamp claimed the
+        # shutter opened more recently than it possibly could have. The
+        # prediction horizon rides directly on this number.
+        self._fixed_offset = latency_offset
+        self.latency_offset = latency_offset if latency_offset is not None else 0.05
         self.autofocus = autofocus
         self.autoexposure = autoexposure
         self.exposure = exposure
@@ -119,6 +131,20 @@ class OpenCVCamera(Camera):
             log.warning("camera gave %dx%d, asked for %dx%d", *actual, self.width, self.height)
         self.width, self.height = actual
 
+        # Frame rate is negotiated too, and silently. A camera that
+        # accepts fps=60 and delivers 30 halves the perception rate while
+        # the config still claims 60, which then quietly invalidates the
+        # prediction horizon. Measured on a MacBook's built-in camera:
+        # asked 60, got 29. Warn loudly; `measured_fps` is the truth.
+        reported = cap.get(cv2.CAP_PROP_FPS)
+        if reported > 0 and abs(reported - self.fps) > 1.0:
+            log.warning(
+                "camera reports %.0f fps, asked for %d. Check measured_fps "
+                "after starting; the configured value is a request, not a promise",
+                reported, self.fps,
+            )
+        self.reported_fps = reported
+
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="camera")
         self._thread.start()
@@ -139,6 +165,16 @@ class OpenCVCamera(Camera):
             if len(self._intervals) > 120:
                 self._intervals.pop(0)
             last = now
+
+            if self._fixed_offset is None and len(self._intervals) >= 30:
+                # grab() returns once a frame has landed, so the shutter
+                # opened at least one frame period earlier, plus transfer
+                # and decode. This is a lower bound, not a measurement --
+                # a true figure needs an external reference (film a
+                # millisecond timer). It is, at least, a bound that
+                # cannot be below the physically possible.
+                period = float(np.median(self._intervals))
+                self.latency_offset = period + TRANSFER_DECODE_ESTIMATE
             frame = Frame(image=image, stamp=now - self.latency_offset, index=self._count)
             with self._lock:
                 self._frame = frame
