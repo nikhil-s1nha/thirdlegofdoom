@@ -46,6 +46,7 @@ class JointState:
     q: np.ndarray                 # shape (6,), radians
     stamp: float                  # perf_counter of the encoder read
     dq: np.ndarray | None = None  # shape (6,), rad/s, if the backend reports it
+    load: np.ndarray | None = None  # shape (6,), -1..1 of rated torque
 
     def __post_init__(self) -> None:
         if self.q.shape != (NUM_JOINTS,):

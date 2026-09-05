@@ -1,26 +1,28 @@
-# Deployment: Orange Pi 5 + Pico
+# Deployment: Orange Pi 5
 
 Target is a robot you switch on with no laptop attached. The Orange Pi 5
-(RK3588S, 6 TOPS NPU) runs vision, kinematics and the servo bus over USB.
-The Pico does the two things a computer running Python is bad at: cutting
-power instantly, and timestamping an impact.
+(RK3588S, 6 TOPS NPU) runs everything: vision, kinematics, and the servo
+bus over USB.
 
 Nothing here has run on a board.
 
-## Division of labour
+## What you actually need
 
-| | Orange Pi 5 | Pico |
-|---|---|---|
-| hand + object detection | yes, NPU | no — ~1000× short |
-| kinematics, control loop | yes | no |
-| servo bus | yes | — |
-| hardware e-stop | can hang | **yes, the real one** |
-| impact detection | occluded, 33 ms granularity | **yes, microseconds** |
-| LEDs, buzzer, display | possible | yes, off the critical path |
+| | |
+|---|---|
+| SO-ARM101 + its bus adapter | in the kit |
+| 12 V 5 A supply | in the kit |
+| **inline switch on the 12 V line** | the physical e-stop. A few dollars. |
+| camera | fixed mount, angled down |
+| Orange Pi 5 | the brain |
 
-Software e-stop is a convenience; it stops working in exactly the case
-you need it — a deadlocked loop, a crashed process, a pulled cable. The
-Pico cuts servo power in its interrupt handler, before it reports.
+That is the whole bill of materials. There is no sidecar
+microcontroller: the servos carry torque and overload limits themselves,
+a mechanical switch is a better e-stop than any chip, and contact is
+detected from servo load over the bus you already have.
+
+The adapter's 5 V buck is specified for a Raspberry Pi. An Orange Pi 5
+can draw up to 4 A, so give it its own supply rather than backfeeding.
 
 ## Orange Pi 5
 
@@ -59,30 +61,6 @@ tlod bench all
 tlod sim --duration 20
 ```
 
-## Pico
-
-Flash MicroPython, copy `firmware/pico_sidecar.py` as `main.py`.
-
-```bash
-mpremote connect /dev/ttyACM1 fs cp firmware/pico_sidecar.py :main.py
-mpremote connect /dev/ttyACM1 reset
-```
-
-| pin | to |
-|---|---|
-| GP26 / ADC0 | piezo disc, 1 MΩ bleed to GND, clamp diodes to 3V3 and GND |
-| GP15 | e-stop button to GND (internal pull-up) |
-| GP14 | servo power relay / MOSFET gate, active high |
-| GP16/17/18 | LEDs: ready, hit, e-stop |
-| GP19 | passive buzzer |
-
-The clamp diodes are not optional. A piezo struck sharply outputs tens of
-volts and will destroy the ADC input.
-
-`HIT_THRESHOLD` must be set by observation: watch the raw stream with the
-pad tapped and with the table knocked nearby. Too low and footsteps
-score; too high and a glancing slap does not. `HIT_DEBOUNCE_US` covers
-the ringing.
 
 ## Order
 
@@ -94,9 +72,8 @@ the ringing.
 6. `tlod bench all` — replace estimates with measurements, retune `MockArm`
 7. mount camera, `tlod calibrate intrinsics` then `extrinsics`
 8. verify with `tlod touch --view` — drawn skeleton must land on the real arm
-9. Pico: confirm `READY`, test the e-stop **before any game runs with torque on**
-10. tune `HIT_THRESHOLD`
-11. `tlod play --difficulty easy`, staying out of reach
+9. test the inline power switch mid-motion, **before any game runs**
+10. `tlod play --difficulty easy`, staying out of reach
 
 ## Autostart
 
@@ -118,6 +95,6 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-`Restart=on-failure` is not a substitute for the hardware e-stop. A
-process that restarts cleanly every five seconds while swinging at
-someone is still swinging at someone.
+`Restart=on-failure` is not a substitute for the power switch. A process
+that restarts cleanly every five seconds while swinging at someone is
+still swinging at someone.

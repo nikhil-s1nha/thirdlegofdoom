@@ -23,6 +23,40 @@ tool yaw. This is why the arm is 5-DOF despite six motors.
 Limits come from `assets/so101_new_calib.urdf`. Regenerate with
 `scripts/extract_urdf.py` if the upstream model changes.
 
+## The bus adapter board is a bridge, not a controller
+
+The board in the kit does three things: converts USB-C to the half-duplex
+TTL bus the servos speak, distributes 12 V down the chain, and offers a
+5 V buck that can power a Raspberry Pi over UART. It does no kinematics,
+no trajectory planning, and no coordination.
+
+The control loops live **inside each servo**. Every STS3215 has its own
+MCU, magnetic encoder and PID loop. The host sends target positions at
+100 Hz; each servo closes its own loop.
+
+What that means in practice: several safety features you might expect to
+build are already there, in servo firmware.
+
+| | register |
+|---|---|
+| torque cap | 48 `Torque Limit` — the driver sets this |
+| overload shutdown | 34 `Protection Torque`, 36 `Overload Torque` |
+| protection delay | 35 `Protection Time` |
+| thermal cutout | 13 `Max Temp Limit` |
+| go limp | 40 `Torque Enable` = 0 — a software e-stop over the existing bus |
+
+What the board does *not* give you: any analog input, any e-stop input,
+any spare GPIO. So it cannot read a sensor or stop the arm on its own.
+
+**The physical e-stop is a normally-closed switch in series with the 12 V
+supply.** It cuts power through copper with no software in the path,
+which is better than any microcontroller and costs a few dollars.
+
+Contact detection needs no extra hardware either: `Present_Load` (reg 60)
+rises sharply when the paddle meets a hand, and the driver already reads
+those bytes in the same sync transaction as position. See
+`ServoLoadContactSensor`.
+
 ## STS3215 control table
 
 4096 counts/revolution, 0.088°/count.
