@@ -4,7 +4,15 @@ A tabletop game robot on an SO-ARM101 (SO-101) arm. It watches your hand
 through a camera and plays games against you — hand slap first.
 
 **Status: playable in simulation, M1–M5 complete.** No hardware required
-for any of it. See [docs/ROADMAP.md](docs/ROADMAP.md).
+for any of it.
+
+### 👉 New here? Start with [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)
+
+A start-to-finish guide: run it in five minutes with no hardware, how the
+code is laid out, bring-up for a real arm step by step, how to change
+things, and what to do when it breaks. Everything below is summary.
+
+See also [docs/ROADMAP.md](docs/ROADMAP.md) for what is and is not built.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
