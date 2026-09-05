@@ -109,3 +109,63 @@ stays within 6% of the Cartesian straight line (15.9 cm vs 15.0 cm for a
 size and does not need Cartesian path planning. This was checked rather
 than assumed, because a joint-space interpolation that wandered would be
 a serious hazard for a striking robot.
+
+---
+
+# Addendum: dodging alone is a cliff, not a curve
+
+Measured after building the game, against a simulated opponent with a
+250 ms reaction time, feints disabled so only the strike is in play:
+
+| hover | strike duration | robot win rate |
+|---|---|---|
+| 6 cm | 180 ms | 100% |
+| 8 cm | 250 ms | 100% |
+| 8 cm | 350 ms | 100% |
+| 10 cm | 450 ms | **17%** |
+| 12 cm | 550 ms | 0% |
+| 15 cm | 900 ms | 0% |
+
+The transition from *always wins* to *never wins* happens inside 100 ms.
+That is not a difficulty curve, it is a step function, and no amount of
+parameter tuning will turn it into a game. Either the human's reaction
+fits inside the window and they escape every single time, or it does not
+and they never do.
+
+Why the window is so much smaller than the nominal strike duration:
+
+* contact fires at roughly **70%** of the strike travel, because the
+  paddle reaches the hand before the motion ends
+* motion onset costs the human the first **~25%**: min-jerk spends a
+  quarter of its duration covering the first few millimetres, and the
+  servo's own acceleration limit adds more
+
+So the human's usable window is about **45% of the strike duration**.
+Beating an 8 cm strike would need a reaction under ~70 ms. Restoring
+fairness by slowing the arm takes ~650 ms per strike, which no longer
+reads as a slap; restoring it by striking from further away is both
+slower *and* harder-hitting, which is the wrong direction on safety.
+
+## What actually makes it a game
+
+Real hand-slap is slapper-favoured too. What makes it fun is that the
+dodger is punished for flinching. So:
+
+| event | point to |
+|---|---|
+| strike lands | robot |
+| strike dodged | human |
+| **feint draws a flinch** | **robot** |
+| **feint held through** | **human** |
+
+Now the human's task is reading intent, which is a decision rather than a
+reflex, and it does not require beating physics. Difficulty becomes
+`feint_probability` -- how often the robot offers a scoring chance --
+which is a smooth dial rather than a cliff. The arm keeps striking short,
+fast and softly, so the safety argument and the game design stop pulling
+against each other.
+
+This is why difficulty is tuned by feint frequency rather than by
+crippling the arm: a slower arm hits softer but feels broken, whereas a
+robot that feints more genuinely gives more ground and reads as a more
+cautious opponent.

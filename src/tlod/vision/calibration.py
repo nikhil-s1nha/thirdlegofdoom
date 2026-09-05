@@ -32,7 +32,6 @@ side view.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,12 +51,12 @@ class Intrinsics:
         np.savez(path, K=self.K, dist=self.dist, resolution=np.array(self.resolution), rms=self.rms)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Intrinsics":
+    def load(cls, path: str | Path) -> Intrinsics:
         d = np.load(path)
         return cls(d["K"], d["dist"], tuple(int(v) for v in d["resolution"]), float(d["rms"]))
 
     @classmethod
-    def approximate(cls, resolution: tuple[int, int], hfov_deg: float = 70.0) -> "Intrinsics":
+    def approximate(cls, resolution: tuple[int, int], hfov_deg: float = 70.0) -> Intrinsics:
         """A plausible pinhole model from the advertised field of view.
 
         For bring-up only, so the pipeline runs end to end before you have
@@ -90,7 +89,7 @@ class Extrinsics:
         np.savez(path, R=self.R, t=self.t, rms=self.rms)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Extrinsics":
+    def load(cls, path: str | Path) -> Extrinsics:
         d = np.load(path)
         return cls(d["R"], d["t"], float(d["rms"]))
 

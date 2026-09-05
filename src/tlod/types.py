@@ -15,7 +15,7 @@ works and one that is mysteriously always slightly late.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -52,10 +52,10 @@ class JointState:
             raise ValueError(f"q must be shape ({NUM_JOINTS},), got {self.q.shape}")
 
     def as_dict(self) -> dict[str, float]:
-        return {n: float(v) for n, v in zip(JOINT_NAMES, self.q)}
+        return {n: float(v) for n, v in zip(JOINT_NAMES, self.q, strict=True)}
 
     @staticmethod
-    def from_dict(d: dict[str, float], stamp: float) -> "JointState":
+    def from_dict(d: dict[str, float], stamp: float) -> JointState:
         return JointState(np.array([d[n] for n in JOINT_NAMES], dtype=float), stamp)
 
 
@@ -89,10 +89,10 @@ class Pose:
         return np.array([self.x, self.y, self.z, self.pitch, self.roll], dtype=float)
 
     @staticmethod
-    def from_vec(v: Sequence[float]) -> "Pose":
+    def from_vec(v: Sequence[float]) -> Pose:
         return Pose(float(v[0]), float(v[1]), float(v[2]), float(v[3]), float(v[4]))
 
-    def offset(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0) -> "Pose":
+    def offset(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0) -> Pose:
         return replace(self, x=self.x + dx, y=self.y + dy, z=self.z + dz)
 
 

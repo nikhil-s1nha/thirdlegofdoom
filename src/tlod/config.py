@@ -55,7 +55,7 @@ class CameraConfig:
     height: int = 720
     fps: int = 60
     fourcc: str = "MJPG"
-    latency_offset: float = 0.035         # shutter -> grab(); measure it
+    latency_offset: float | None = None   # None = estimate from frame period
     autofocus: bool = False
     autoexposure: bool = False
     exposure: float | None = None
@@ -100,14 +100,14 @@ class Config:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> "Config":
+    def load(cls, path: str | Path | None = None) -> Config:
         if path is None:
             return cls()
         data = yaml.safe_load(Path(path).read_text()) or {}
         return cls.from_dict(data)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Config":
+    def from_dict(cls, data: dict[str, Any]) -> Config:
         sections = {
             "arm": ArmConfig,
             "safety": SafetyConfig,
@@ -131,7 +131,7 @@ class Config:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(yaml.safe_dump(asdict(self), sort_keys=False))
 
-    def with_overrides(self, **sections: dict[str, Any]) -> "Config":
+    def with_overrides(self, **sections: dict[str, Any]) -> Config:
         data = asdict(self)
         for name, values in sections.items():
             data[name].update(values)

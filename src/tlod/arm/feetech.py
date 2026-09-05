@@ -84,13 +84,13 @@ class Calibration:
         Path(path).write_text(
             json.dumps(
                 {n: {"center": float(c), "sign": float(s)}
-                 for n, c, s in zip(JOINT_NAMES, self.center, self.sign)},
+                 for n, c, s in zip(JOINT_NAMES, self.center, self.sign, strict=True)},
                 indent=2,
             )
         )
 
     @classmethod
-    def load(cls, path: str | os.PathLike) -> "Calibration":
+    def load(cls, path: str | os.PathLike) -> Calibration:
         data = json.loads(Path(path).read_text())
         if all(k in data for k in JOINT_NAMES) and "center" in next(iter(data.values())):
             center = np.array([data[n]["center"] for n in JOINT_NAMES], float)
@@ -99,7 +99,7 @@ class Calibration:
         return cls.from_lerobot(data)
 
     @classmethod
-    def from_lerobot(cls, data: dict) -> "Calibration":
+    def from_lerobot(cls, data: dict) -> Calibration:
         """Adapt a calibration file written by `lerobot-calibrate`.
 
         LeRobot stores, per motor, a `homing_offset` such that the joint
@@ -228,7 +228,7 @@ class FeetechArm(ArmBackend):
         stamp = time.perf_counter()
         result = self._sync_read.txRxPacket()
         if result != 0:
-            raise IOError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
+            raise OSError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
 
         counts = np.empty(NUM_JOINTS)
         speeds = np.empty(NUM_JOINTS)
@@ -252,11 +252,15 @@ class FeetechArm(ArmBackend):
         counts = self.calib.to_counts(q)
 
         self._sync_write.clearParam()
-        for mid, c in zip(self.motor_ids, counts):
+        # strict=True: a length mismatch here would silently command only
+        # some of the servos and leave the rest holding their previous
+        # goal, which on a moving arm is a half-executed motion rather
+        # than an obvious failure.
+        for mid, c in zip(self.motor_ids, counts, strict=True):
             self._sync_write.addParam(int(mid), [int(c) & 0xFF, (int(c) >> 8) & 0xFF])
         result = self._sync_write.txPacket()
         if result != 0:
-            raise IOError(f"sync write failed: {self._packet_handler.getTxRxResult(result)}")
+            raise OSError(f"sync write failed: {self._packet_handler.getTxRxResult(result)}")
 
     def diagnostics(self) -> dict[str, object]:
         self._require()

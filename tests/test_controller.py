@@ -138,7 +138,7 @@ def test_minimum_jerk_endpoints_and_monotonicity():
     assert minimum_jerk(-5.0) == 0.0 and minimum_jerk(5.0) == 1.0
     xs = np.linspace(0, 1, 50)
     ys = [minimum_jerk(x) for x in xs]
-    assert all(b >= a - 1e-12 for a, b in zip(ys, ys[1:])), "must not reverse"
+    assert all(b >= a - 1e-12 for a, b in zip(ys, ys[1:], strict=False)), "must not reverse"
     # Zero velocity at both ends is the point of min-jerk.
     assert minimum_jerk(0.01) < 0.001
     assert minimum_jerk(0.99) > 0.999

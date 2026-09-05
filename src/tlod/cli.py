@@ -248,7 +248,6 @@ def cmd_bench(args) -> int:
     from tlod.arm.model import HOME, ik_position
 
     if args.what in ("ik", "all"):
-        rng = np.random.default_rng(0)
         q = HOME.copy()
         times, ok = [], 0
         for i in range(400):
@@ -296,7 +295,7 @@ def cmd_bench(args) -> int:
             time.sleep(args.duration)
             print(app.latency_report())
             print(f"\n  measured shutter->command: {app.measured_latency*1e3:.1f} ms")
-            print(f"  set runtime.prediction_horizon to about this, plus servo travel.")
+            print("  set runtime.prediction_horizon to about this, plus servo travel.")
     return 0
 
 
@@ -406,7 +405,7 @@ def cmd_reach(args) -> int:
     from tlod.arm.model import HOME, ik_position
 
     zs = [float(v) for v in args.heights.split(",")]
-    print(f"  reachable radius by height (tool pointing freely)\n")
+    print("  reachable radius by height (tool pointing freely)\n")
     for z in zs:
         radii = []
         for r in np.arange(0.05, 0.42, 0.005):

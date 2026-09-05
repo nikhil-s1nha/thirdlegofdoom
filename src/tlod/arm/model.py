@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tlod.types import ARM_JOINTS, Pose
+from tlod.types import Pose
 
 # --------------------------------------------------------------------------
 # Chain, transcribed from so101_new_calib.urdf.
@@ -127,7 +127,7 @@ def fk(q: np.ndarray) -> np.ndarray:
     """Forward kinematics. `q` is 5 arm joint angles; returns the 4x4 TCP pose."""
     T = np.eye(4)
     qi = 0
-    for static, revolute in zip(_STATIC, _IS_REVOLUTE):
+    for static, revolute in zip(_STATIC, _IS_REVOLUTE, strict=True):
         T = T @ static
         if revolute:
             T = T @ _rot_z(float(q[qi]))
@@ -141,7 +141,7 @@ def fk_all(q: np.ndarray) -> list[np.ndarray]:
     frames = []
     T = np.eye(4)
     qi = 0
-    for static, revolute in zip(_STATIC, _IS_REVOLUTE):
+    for static, revolute in zip(_STATIC, _IS_REVOLUTE, strict=True):
         T = T @ static
         if revolute:
             T = T @ _rot_z(float(q[qi]))
@@ -280,7 +280,7 @@ def _solve_from(
     cost = float(np.sum((W @ err) ** 2))
     eye = np.eye(5)
     it = 0
-    for it in range(1, max_iter + 1):
+    for it in range(1, max_iter + 1):  # noqa: B007 - `it` is the returned iteration count
         if np.linalg.norm(err[:3]) < pos_tol and np.max(np.abs(err[3:])) < ori_tol:
             break
         J = W @ jacobian(q, base=goal - err)

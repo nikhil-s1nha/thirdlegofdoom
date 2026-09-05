@@ -139,7 +139,6 @@ def test_sequence_runs_in_order(controller):
 
 
 def test_sequence_abort_stops_everything(controller):
-    limits = StrikeLimits()
     seq = Sequence([Hold(5.0), Hold(5.0)])
     seq.start(controller)
     seq.step(controller, 0.005)
