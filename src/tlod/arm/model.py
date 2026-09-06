@@ -294,6 +294,7 @@ def _solve_from(
     ori_tol: float,
     max_iter: int,
     lam: float,
+    orientation_rows: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """One Levenberg-Marquardt run. Returns (q, task residual, iterations).
 
@@ -307,13 +308,20 @@ def _solve_from(
     helps, so it behaves like gradient descent in the hard regions and like
     Gauss-Newton in the easy ones.
     """
+    rows = [3, 4] if orientation_rows is None else orientation_rows
     q = q0.copy()
     err = task_error(_task_vec(q), goal)
     cost = float(np.sum((W @ err) ** 2))
     eye = np.eye(5)
+
+    def converged(e: np.ndarray) -> bool:
+        if np.linalg.norm(e[:3]) >= pos_tol:
+            return False
+        return all(abs(e[i]) < ori_tol for i in rows)
+
     it = 0
     for it in range(1, max_iter + 1):  # noqa: B007 - `it` is the returned iteration count
-        if np.linalg.norm(err[:3]) < pos_tol and np.max(np.abs(err[3:])) < ori_tol:
+        if converged(err):
             break
         J = W @ jacobian(q, base=goal - err)
         e = W @ err
@@ -372,17 +380,30 @@ def ik(
     W = np.diag(weights)
     goal = target.as_vec()
 
+    # Judge success only on the rows the objective was actually given.
+    # Scoring an unweighted row meant a solve that satisfied everything
+    # asked of it still reported failure: ik_position(pitch=...) leaves
+    # roll unweighted, yet the residual on that ignored roll target --
+    # over a radian, since nothing was steering it -- was counted against
+    # the result. Callers then saw ok=False on a perfect solution, and
+    # ArmController counted it as an IK failure and refused to move.
+    orientation_rows = [i for i in (3, 4) if weights[i] > 0]
+
     q0 = HOME.copy() if seed is None else clamp_to_limits(np.asarray(seed, float)[:5].copy())
 
     rng = np.random.default_rng(0)  # deterministic: identical inputs give identical motion
     total_iters = 0
     best: tuple[float, np.ndarray, np.ndarray] | None = None
 
+    def orientation_error(e: np.ndarray) -> float:
+        return float(max((abs(e[i]) for i in orientation_rows), default=0.0))
+
     for attempt in range(restarts + 1):
-        q, err, it = _solve_from(q0, goal, W, pos_tol, ori_tol, max_iter, damping)
+        q, err, it = _solve_from(q0, goal, W, pos_tol, ori_tol, max_iter, damping,
+                                 orientation_rows)
         total_iters += it
         pos_err = float(np.linalg.norm(err[:3]))
-        ori_err = float(np.max(np.abs(err[3:])))
+        ori_err = orientation_error(err)
         score = float(np.sum((W @ err) ** 2))
         if best is None or score < best[0]:
             best = (score, q, err)
@@ -394,9 +415,8 @@ def ik(
 
     assert best is not None
     _, q, err = best
-    pos_err = float(np.linalg.norm(err[:3]))
-    ori_err = float(np.max(np.abs(err[3:])))
-    return IKResult(q, False, err, total_iters, pos_err, ori_err)
+    return IKResult(q, False, err, total_iters,
+                    float(np.linalg.norm(err[:3])), orientation_error(err))
 
 
 def _solve_position(
