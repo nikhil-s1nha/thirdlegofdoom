@@ -436,7 +436,7 @@ def _solve_position(
     cost = float(err @ err)
     eye = np.eye(3)
     it = 0
-    for it in range(1, max_iter + 1):
+    for it in range(1, max_iter + 1):  # noqa: B007 - `it` is the returned iteration count
         if np.linalg.norm(err) < pos_tol:
             break
         J = position_jacobian(q)
@@ -492,7 +492,6 @@ def ik_position(
             if best is None or pos_err < best[0]:
                 best = (pos_err, q, err)
             if pos_err < pos_tol and within_limits(q):
-                full = np.zeros(5)
                 return IKResult(q, True, np.concatenate([err, [0.0, 0.0]]), total, pos_err, 0.0)
             q0 = clamp_to_limits(HOME + rng.normal(0.0, 0.5 * (attempt + 1), 5))
         pos_err, q, err = best
