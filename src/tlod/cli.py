@@ -602,6 +602,131 @@ def cmd_reach(args) -> int:
     return 0
 
 
+class _NullCamera:
+    """Stands in for a camera on the control board, which has none."""
+
+    def __init__(self, width=1280, height=720):
+        self.width, self.height = width, height
+
+    def start(self): pass
+
+    def stop(self): pass
+
+    def read(self): return None
+
+    @property
+    def resolution(self): return self.width, self.height
+
+
+def cmd_vision_serve(args) -> int:
+    """Vision board: detect and publish. Runs on the Orange Pi 5."""
+    from tlod.net.publisher import VisionPublisher
+    from tlod.vision.hands import HandLocator
+    from tlod.vision.objects import ColorBlobDetector
+    from tlod.vision.tracking import MultiTracker
+
+    cfg = Config.load(args.config)
+    if args.sim:
+        # Synthetic camera AND synthetic detector. Running MediaPipe over
+        # rendered frames would measure the model, not the link, and on
+        # unrendered frames it finds nothing at all.
+        cfg = cfg.with_overrides(camera={"source": "mock"}, vision={"detector": "scripted"})
+    else:
+        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+                                 vision={"detector": "mediapipe"})
+
+    projector = build_projector(cfg)
+    scene = None
+    if cfg.vision.detector == "scripted" or cfg.camera.source == "mock":
+        from tlod.vision.scene import SyntheticHandScene
+        scene = SyntheticHandScene(projector)
+
+    publisher = VisionPublisher(
+        camera=build_camera(cfg, scene=scene),
+        detector=build_detector(cfg, scene),
+        locator=HandLocator(projector, depth_mode=cfg.vision.depth_mode,
+                            hand_height=cfg.vision.hand_height,
+                            palm_width_m=cfg.vision.palm_width_m),
+        tracker=MultiTracker(process_noise=cfg.vision.process_noise,
+                             measurement_noise=cfg.vision.measurement_noise),
+        object_detector=ColorBlobDetector(projector) if args.objects else None,
+        targets=[(host, args.port) for host in args.to.split(",")],
+        clock_port=args.clock_port,
+    )
+    print(f"  vision board: publishing to {args.to}:{args.port}, "
+          f"clock on :{args.clock_port}")
+    if not cfg.camera.extrinsics:
+        print("  WARNING: no extrinsics configured. Positions will be in a guessed")
+        print("  camera frame and the arm will reach to the wrong place.")
+    with publisher:
+        try:
+            deadline = time.perf_counter() + args.duration if args.duration else None
+            while deadline is None or time.perf_counter() < deadline:
+                time.sleep(2.0)
+                print(f"\r  frames {publisher.frames}  published {publisher.sent}",
+                      end="", flush=True)
+        except KeyboardInterrupt:
+            pass
+    print("\n" + publisher.report())
+    return 0
+
+
+def cmd_control(args) -> int:
+    """Control board: consume detections, run the loop. Runs on the Pi."""
+    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.net.subscriber import VisionSubscriber
+    from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
+    from tlod.vision.tracking import MultiTracker
+
+    cfg = Config.load(args.config)
+    if args.real:
+        cfg = cfg.with_overrides(arm={"backend": "feetech"})
+
+    subscriber = VisionSubscriber(
+        host=args.vision_host, port=args.port, clock_port=args.clock_port,
+        require_clock=not args.no_clock,
+    )
+    print(f"  control board: listening on :{args.port}, clock from "
+          f"{args.vision_host or '(none)'}")
+    subscriber.start()
+    if subscriber.clock:
+        print(f"  clock offset {subscriber.clock.offset*1e3:+.2f} ms "
+              f"(+/-{subscriber.clock.uncertainty*1e3:.2f} ms)")
+
+    limits = SafetyLimits(
+        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
+        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
+        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
+        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
+    )
+    policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
+    app = RobotApp(
+        camera=_NullCamera(),
+        detector=None,
+        locator=None,
+        controller=ArmController(build_arm(cfg), limits, cfg.runtime.control_hz),
+        policy=policies.get(args.policy, IdlePolicy)(),
+        tracker=MultiTracker(),
+        control_hz=cfg.runtime.control_hz,
+        perception_max_age=cfg.runtime.perception_max_age,
+        prediction_horizon=cfg.runtime.prediction_horizon,
+        perception_source=subscriber.perception,
+    )
+    try:
+        with app:
+            deadline = time.perf_counter() + args.duration
+            while time.perf_counter() < deadline:
+                time.sleep(0.25)
+    except KeyboardInterrupt:
+        print("\n  interrupted")
+    finally:
+        subscriber.stop()
+    print(app.latency_report())
+    print("\n  network")
+    print(subscriber.report())
+    return 0
+
+
 def cmd_probe(args) -> int:
     """Read the arm without commanding it. The safest first hardware test.
 
@@ -960,6 +1085,28 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("reach", help="probe the reachable workspace")
     s.add_argument("--heights", default="0.02,0.05,0.10,0.15,0.20,0.30")
     s.set_defaults(func=cmd_reach)
+
+    s = sub.add_parser("vision-serve", help="vision board: detect and publish (Orange Pi)")
+    s.add_argument("--to", default="255.255.255.255", help="control board host(s), comma separated")
+    s.add_argument("--port", type=int, default=45800)
+    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
+    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--objects", action="store_true", help="also publish table objects")
+    s.add_argument("--duration", type=float, default=0.0, help="0 = run until stopped")
+    s.add_argument("--sim", action="store_true", help="synthetic camera, for testing the link")
+    s.set_defaults(func=cmd_vision_serve)
+
+    s = sub.add_parser("control", help="control board: consume detections, run the loop (Pi)")
+    s.add_argument("--vision-host", default="", dest="vision_host",
+                   help="vision board address, for clock sync")
+    s.add_argument("--port", type=int, default=45800)
+    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
+    s.add_argument("--policy", default="track_hand")
+    s.add_argument("--duration", type=float, default=60.0)
+    s.add_argument("--real", action="store_true", help="drive real servos")
+    s.add_argument("--no-clock", action="store_true", dest="no_clock",
+                   help="run without a clock offset (freshness checks become meaningless)")
+    s.set_defaults(func=cmd_control)
 
     s = sub.add_parser("probe", help="read the arm with torque off; safest first test")
     s.add_argument("--real", action="store_true", help="drive real hardware")

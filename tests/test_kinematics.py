@@ -139,3 +139,47 @@ def test_pose_has_no_yaw():
     """The arm cannot span SE(3); the type must not imply otherwise."""
     assert not hasattr(Pose(0, 0, 0), "yaw")
     assert len(Pose(0, 0, 0).as_vec()) == 5
+
+
+def test_analytic_position_jacobian_matches_finite_difference():
+    """The fast path must agree with the slow one it replaces.
+
+    Position-only IK uses an analytic Jacobian -- one FK pass instead of
+    six -- which is what lets a Raspberry Pi Zero hold the control loop.
+    Speed is only worth having if it is the same answer.
+    """
+    rng = np.random.default_rng(0)
+    for _ in range(100):
+        q = rng.uniform(model.JOINT_LIMITS[:, 0] * 0.8, model.JOINT_LIMITS[:, 1] * 0.8)
+        analytic = model.position_jacobian(q)
+        numeric = model.jacobian(q)[:3, :]
+        assert np.allclose(analytic, numeric, atol=1e-4), np.abs(analytic - numeric).max()
+
+
+def test_analytic_jacobian_is_exact_at_singular_configurations():
+    """Finite differences degrade near singularities; the analytic form
+    does not, which is part of the point."""
+    for q in (np.zeros(5), np.array([0.0, 0.0, 0.0, 0.0, 1.5])):
+        J = model.position_jacobian(q)
+        assert np.all(np.isfinite(J))
+
+
+def test_position_only_ik_still_converges_after_the_fast_path():
+    q = model.HOME.copy()
+    errors = []
+    for i in range(200):
+        t = i * 0.01
+        p = np.array([0.22 + 0.05 * np.sin(t * 3), 0.10 * np.sin(t * 2),
+                      0.12 + 0.05 * np.cos(t * 2.5)])
+        r = model.ik_position(p, q)
+        assert r.ok, f"failed at step {i}"
+        errors.append(r.pos_error)
+        q = r.q
+    assert np.mean(errors) < 5e-4
+
+
+def test_position_ik_with_a_pitch_constraint_uses_the_full_solver():
+    """Asking for a tool angle must still work; it just takes the slow path."""
+    r = model.ik_position([0.24, 0.05, 0.14], model.HOME, pitch=-0.6)
+    assert r.ok
+    assert abs(model.tool_pose(r.q).pitch - (-0.6)) < 0.06

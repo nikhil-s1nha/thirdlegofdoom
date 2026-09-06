@@ -214,6 +214,38 @@ def jacobian(q: np.ndarray, base: np.ndarray | None = None, eps: float = 1e-6) -
     return J
 
 
+def position_jacobian(q: np.ndarray) -> np.ndarray:
+    """Exact 3x5 position Jacobian from one forward-kinematics pass.
+
+    For a revolute joint with world axis z_i through point p_i, moving the
+    joint sweeps the tool around that axis, so the tool's velocity
+    contribution is z_i x (p_e - p_i). That is exact, not an
+    approximation, and it needs the joint frames -- which one fk_all()
+    call already produces.
+
+    The finite-difference path costs six FK evaluations per Jacobian.
+    This costs one. On a laptop that difference is irrelevant; on a
+    Raspberry Pi Zero running the control loop it is the difference
+    between fitting in the tick budget and not.
+
+    Only position. Tool pitch and roll still go through finite
+    differences, because their analytic derivatives are long and easy to
+    get subtly wrong -- and position-only IK, which is what the games
+    actually use, never needs them.
+    """
+    frames = fk_all(np.asarray(q, float))
+    p_e = frames[-1][:3, 3]
+    J = np.empty((3, 5))
+    qi = 0
+    for frame, revolute in zip(frames, _IS_REVOLUTE, strict=True):
+        if not revolute:
+            continue
+        axis = frame[:3, 2]                 # joint's own z, in world
+        J[:, qi] = np.cross(axis, p_e - frame[:3, 3])
+        qi += 1
+    return J
+
+
 def clamp_to_limits(q: np.ndarray) -> np.ndarray:
     return np.clip(q, JOINT_LIMITS[:, 0], JOINT_LIMITS[:, 1])
 
@@ -262,6 +294,7 @@ def _solve_from(
     ori_tol: float,
     max_iter: int,
     lam: float,
+    orientation_rows: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """One Levenberg-Marquardt run. Returns (q, task residual, iterations).
 
@@ -275,13 +308,20 @@ def _solve_from(
     helps, so it behaves like gradient descent in the hard regions and like
     Gauss-Newton in the easy ones.
     """
+    rows = [3, 4] if orientation_rows is None else orientation_rows
     q = q0.copy()
     err = task_error(_task_vec(q), goal)
     cost = float(np.sum((W @ err) ** 2))
     eye = np.eye(5)
+
+    def converged(e: np.ndarray) -> bool:
+        if np.linalg.norm(e[:3]) >= pos_tol:
+            return False
+        return all(abs(e[i]) < ori_tol for i in rows)
+
     it = 0
     for it in range(1, max_iter + 1):  # noqa: B007 - `it` is the returned iteration count
-        if np.linalg.norm(err[:3]) < pos_tol and np.max(np.abs(err[3:])) < ori_tol:
+        if converged(err):
             break
         J = W @ jacobian(q, base=goal - err)
         e = W @ err
@@ -340,17 +380,30 @@ def ik(
     W = np.diag(weights)
     goal = target.as_vec()
 
+    # Judge success only on the rows the objective was actually given.
+    # Scoring an unweighted row meant a solve that satisfied everything
+    # asked of it still reported failure: ik_position(pitch=...) leaves
+    # roll unweighted, yet the residual on that ignored roll target --
+    # over a radian, since nothing was steering it -- was counted against
+    # the result. Callers then saw ok=False on a perfect solution, and
+    # ArmController counted it as an IK failure and refused to move.
+    orientation_rows = [i for i in (3, 4) if weights[i] > 0]
+
     q0 = HOME.copy() if seed is None else clamp_to_limits(np.asarray(seed, float)[:5].copy())
 
     rng = np.random.default_rng(0)  # deterministic: identical inputs give identical motion
     total_iters = 0
     best: tuple[float, np.ndarray, np.ndarray] | None = None
 
+    def orientation_error(e: np.ndarray) -> float:
+        return float(max((abs(e[i]) for i in orientation_rows), default=0.0))
+
     for attempt in range(restarts + 1):
-        q, err, it = _solve_from(q0, goal, W, pos_tol, ori_tol, max_iter, damping)
+        q, err, it = _solve_from(q0, goal, W, pos_tol, ori_tol, max_iter, damping,
+                                 orientation_rows)
         total_iters += it
         pos_err = float(np.linalg.norm(err[:3]))
-        ori_err = float(np.max(np.abs(err[3:])))
+        ori_err = orientation_error(err)
         score = float(np.sum((W @ err) ** 2))
         if best is None or score < best[0]:
             best = (score, q, err)
@@ -362,9 +415,50 @@ def ik(
 
     assert best is not None
     _, q, err = best
-    pos_err = float(np.linalg.norm(err[:3]))
-    ori_err = float(np.max(np.abs(err[3:])))
-    return IKResult(q, False, err, total_iters, pos_err, ori_err)
+    return IKResult(q, False, err, total_iters,
+                    float(np.linalg.norm(err[:3])), orientation_error(err))
+
+
+def _solve_position(
+    goal_xyz: np.ndarray,
+    q0: np.ndarray,
+    pos_tol: float,
+    max_iter: int,
+    lam: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Levenberg-Marquardt on position alone, analytic Jacobian.
+
+    The hot path. Everything the games do -- hovering, striking,
+    pointing, reaching for an object -- only cares where the tip is.
+    """
+    q = q0.copy()
+    err = goal_xyz - fk(q)[:3, 3]
+    cost = float(err @ err)
+    eye = np.eye(3)
+    it = 0
+    for it in range(1, max_iter + 1):  # noqa: B007 - `it` is the returned iteration count
+        if np.linalg.norm(err) < pos_tol:
+            break
+        J = position_jacobian(q)
+        try:
+            dq = J.T @ np.linalg.solve(J @ J.T + (lam**2) * eye, err)
+        except np.linalg.LinAlgError:
+            lam = min(lam * 4.0, 10.0)
+            continue
+        step = float(np.linalg.norm(dq))
+        if step > 0.35:
+            dq *= 0.35 / step
+        q_try = clamp_to_limits(q + dq)
+        err_try = goal_xyz - fk(q_try)[:3, 3]
+        cost_try = float(err_try @ err_try)
+        if cost_try < cost:
+            q, err, cost = q_try, err_try, cost_try
+            lam = max(lam * 0.5, 1e-4)
+        else:
+            lam = min(lam * 3.0, 10.0)
+            if lam >= 10.0:
+                break
+    return q, err, it
 
 
 def ik_position(
@@ -378,7 +472,32 @@ def ik_position(
     spent on hitting the point.
     """
     xyz = np.asarray(xyz, dtype=float)
-    p = Pose(float(xyz[0]), float(xyz[1]), float(xyz[2]), 0.0 if pitch is None else pitch, 0.0)
-    w = np.array([1.0, 1.0, 1.0, 0.4 if pitch is not None else 0.0, 0.0])
-    kw.setdefault("ori_tol", np.inf if pitch is None else 5e-2)
+
+    if pitch is None:
+        # Fast path: no orientation constraint at all, so the analytic
+        # position Jacobian is sufficient and the whole finite-difference
+        # machinery can be skipped.
+        pos_tol = kw.get("pos_tol", 1e-3)
+        max_iter = kw.get("max_iter", 60)
+        damping = kw.get("damping", 1e-2)
+        restarts = kw.get("restarts", 3)
+        q0 = HOME.copy() if seed is None else clamp_to_limits(np.asarray(seed, float)[:5].copy())
+        rng = np.random.default_rng(0)
+        best = None
+        total = 0
+        for attempt in range(restarts + 1):
+            q, err, it = _solve_position(xyz, q0, pos_tol, max_iter, damping)
+            total += it
+            pos_err = float(np.linalg.norm(err))
+            if best is None or pos_err < best[0]:
+                best = (pos_err, q, err)
+            if pos_err < pos_tol and within_limits(q):
+                return IKResult(q, True, np.concatenate([err, [0.0, 0.0]]), total, pos_err, 0.0)
+            q0 = clamp_to_limits(HOME + rng.normal(0.0, 0.5 * (attempt + 1), 5))
+        pos_err, q, err = best
+        return IKResult(q, False, np.concatenate([err, [0.0, 0.0]]), total, pos_err, 0.0)
+
+    p = Pose(float(xyz[0]), float(xyz[1]), float(xyz[2]), pitch, 0.0)
+    w = np.array([1.0, 1.0, 1.0, 0.4, 0.0])
+    kw.setdefault("ori_tol", 5e-2)
     return ik(p, seed, weights=w, **kw)

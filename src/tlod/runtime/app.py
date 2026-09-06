@@ -131,6 +131,7 @@ class RobotApp:
         control_hz: float = 100.0,
         perception_max_age: float = 0.25,
         prediction_horizon: float = 0.30,
+        perception_source: Latest[Perception] | None = None,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -150,10 +151,18 @@ class RobotApp:
         self.perception_max_age = perception_max_age
         self.prediction_horizon = prediction_horizon
 
-        self.perception: Latest[Perception] = Latest()
+        # When perception arrives over the network, the mailbox is filled
+        # by the subscriber instead of a local thread. Everything
+        # downstream -- the policy, the controller, the IK -- reads the
+        # same object either way and cannot tell which it is. That is the
+        # whole benefit of having made the boundary a mailbox rather than
+        # a function call.
+        self.perception: Latest[Perception] = perception_source or Latest()
+        self.remote_perception = perception_source is not None
         self._running = False
         self._threads: list[threading.Thread] = []
         self._last_frame_index = -1
+        self._last_remote_stamp = -1.0
 
         self.t_detect = Timing("vision.detect")
         self.t_locate = Timing("vision.locate+track")
@@ -166,11 +175,15 @@ class RobotApp:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
-        self.camera.start()
+        if not self.remote_perception:
+            self.camera.start()
         self.controller.start()
         self.policy.start(self)
         self._running = True
-        for target, name in ((self._perception_loop, "perception"), (self._control_loop, "control")):
+        loops = [(self._control_loop, "control")]
+        if not self.remote_perception:
+            loops.insert(0, (self._perception_loop, "perception"))
+        for target, name in loops:
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
@@ -220,9 +233,10 @@ class RobotApp:
         try:
             self.policy.stop(self)
         finally:
-            self.camera.stop()
+            if not self.remote_perception:
+                self.camera.stop()
+                self.detector.close()
             self.controller.stop(park=park)
-            self.detector.close()
 
     def __enter__(self) -> RobotApp:
         self.start()
@@ -306,6 +320,8 @@ class RobotApp:
             last = now
 
             snapshot = self.perception.get_fresh(self.perception_max_age)
+            if self.remote_perception and snapshot is not None:
+                self._track_remote(snapshot)
             t0 = time.perf_counter()
             try:
                 self.policy.update(self, snapshot, dt)
@@ -317,6 +333,26 @@ class RobotApp:
 
             if snapshot is not None:
                 self.t_end_to_end.add(time.perf_counter() - snapshot.stamp)
+
+    def _track_remote(self, snapshot: Perception) -> None:
+        """Feed the local tracker from detections that arrived over the wire.
+
+        Policies ask `robot.tracker.best()`; when perception is remote,
+        nothing was filling that tracker and every policy quietly saw no
+        hands at all. The publisher runs a tracker of its own, but its
+        estimate is not what the control loop needs: packets arrive at
+        camera rate and the control loop ticks faster, so the local
+        filter is also what interpolates between them and carries a
+        velocity estimate across a dropped datagram.
+
+        Guarded on stamp so a snapshot is only ingested once, however
+        many control ticks read the same mailbox.
+        """
+        if snapshot.stamp == self._last_remote_stamp:
+            return
+        self._last_remote_stamp = snapshot.stamp
+        self.tracker.update([h.position for h in snapshot.hands], snapshot.stamp)
+        self.perception_frames += 1
 
     # -- reporting ---------------------------------------------------------
     def latency_report(self) -> str:
