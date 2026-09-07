@@ -80,6 +80,7 @@ Seeed SO-ARM101 Pro. Kinematics come from the official URDF, vendored at
 `assets/so101_new_calib.urdf`.
 
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — setup, usage, modification
+- [docs/headless.md](docs/headless.md) — verifying vision with no screen
 - [docs/hardware.md](docs/hardware.md) — servo control table, wiring
 - [docs/deployment.md](docs/deployment.md) — Orange Pi 5, standalone
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is and isn't built

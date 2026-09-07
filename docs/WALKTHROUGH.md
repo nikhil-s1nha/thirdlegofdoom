@@ -660,6 +660,7 @@ None of that replaces item 3.
 
 ---
 
+- [headless.md](headless.md) — verifying vision on a board with no screen
 - [slap-analysis.md](slap-analysis.md) — why it slaps rather than dodges
 - [hardware.md](hardware.md) — servo control table, wiring
 - [deployment.md](deployment.md) — Orange Pi 5, standalone
