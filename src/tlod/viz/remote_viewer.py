@@ -18,6 +18,18 @@ UDP instead of read from `app.controller`.
 There is no camera image to draw over, so the background is the same
 plain fill `Viewer` falls back to when it has no frame -- this window
 never has one.
+
+**Latency.** `TelemetryPacket.shutter`/`.stamp` are both in the control
+board's clock. `capture -> command` (shutter to the arm-state sample
+behind it) is a same-clock subtraction and needs no translation --
+that's the same number `RobotApp.latency_report()` already prints on
+the control board itself, just visible here too. `command -> display`
+(that sample to this laptop drawing it) crosses machines, so it only
+means anything once `ArmTelemetrySubscriber` has a clock offset -- see
+`net.telemetry` for why that's a second, independent sync from the
+vision->control one. Without an offset both legs still render, just
+with `command -> display` reported as reception age instead of true
+latency, and the HUD says so.
 """
 
 from __future__ import annotations
@@ -80,8 +92,10 @@ class RemoteArmViewer:
             f"packets   {self.subscriber.received}  "
             f"bad {self.subscriber.dropped_bad}  stale-dropped {self.subscriber.dropped_stale}",
             f"age       {'no data' if packet is None else f'{age * 1e3:5.1f} ms'}",
-            f"view      {self._fps:.0f} fps",
+            f"clock     {self._clock_line()}",
         ]
+        hud += self._latency_lines(packet)
+        hud.append(f"view      {self._fps:.0f} fps")
         if packet is not None and packet.estopped:
             hud.append("*** E-STOP ***")
         self.overlay.draw_hud(img, hud)
@@ -92,6 +106,38 @@ class RemoteArmViewer:
             self.overlay.draw_banner(img, "STALE -- control board may have stopped")
 
         return img
+
+    def _clock_line(self) -> str:
+        clock = self.subscriber.clock
+        if clock is None:
+            return "NOT SYNCED (reception age only)"
+        return f"offset {clock.offset * 1e3:+.2f} ms  +/-{clock.uncertainty * 1e3:.2f} ms"
+
+    def _latency_lines(self, packet) -> list[str]:
+        if packet is None:
+            return ["latency   n/a"]
+        if packet.shutter is None:
+            return ["latency   n/a (no vision data reaching the control board)"]
+
+        # Same clock on both ends -- a plain subtraction, no offset needed.
+        capture_to_command = (packet.stamp - packet.shutter) * 1e3
+
+        if self.subscriber.clock is None:
+            return [
+                f"capture->command   {capture_to_command:6.1f} ms",
+                "command->display   n/a (no clock sync to the control board)",
+            ]
+
+        # Cross-machine: translate the control board's clock into ours,
+        # then measure elapsed time in our own clock.
+        command_local = self.subscriber.to_local(packet.stamp)
+        command_to_display = (time.perf_counter() - command_local) * 1e3
+        total = capture_to_command + command_to_display
+        return [
+            f"capture->command   {capture_to_command:6.1f} ms",
+            f"command->display   {command_to_display:6.1f} ms",
+            f"total (shutter->screen) {total:6.1f} ms",
+        ]
 
     def run(self, duration: float | None = None, fps: float = 30.0) -> None:
         """Block until the window closes or time runs out. q/Esc to quit."""

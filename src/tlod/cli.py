@@ -618,10 +618,12 @@ def cmd_control(args) -> int:
             controller=controller,
             targets=[(host, args.telemetry_port) for host in args.telemetry_to.split(",")],
             perception=subscriber.perception,
+            clock_port=args.telemetry_clock_port,
         )
         telemetry.start()
-        print(f"  arm telemetry -> {args.telemetry_to}:{args.telemetry_port} "
-              "(watch with `tlod arm-viewer`)")
+        print(f"  arm telemetry -> {args.telemetry_to}:{args.telemetry_port}, "
+              f"clock on :{args.telemetry_clock_port} "
+              f"(watch with `tlod arm-viewer --control-host <this board's IP>`)")
 
     try:
         with app:
@@ -650,13 +652,26 @@ def cmd_arm_viewer(args) -> int:
     `--telemetry-to` at this machine when starting `tlod control`, then
     run this here to see the skeleton move instead of only reading the
     text report at the end.
+
+    Pass `--control-host` (the control board's own IP) to also measure
+    the clock offset to it -- without that, the HUD can only report how
+    long a packet sat in this laptop's socket after arriving, not the
+    true shutter-to-screen latency across the whole stack.
     """
     from tlod.net.telemetry import ArmTelemetrySubscriber
     from tlod.viz.remote_viewer import RemoteArmViewer
 
-    subscriber = ArmTelemetrySubscriber(port=args.port)
+    subscriber = ArmTelemetrySubscriber(
+        port=args.port, host=args.control_host, clock_port=args.clock_port,
+    )
     subscriber.start()
     print(f"  listening for arm telemetry on :{args.port} ...")
+    if subscriber.clock:
+        print(f"  clock offset {subscriber.clock.offset * 1e3:+.2f} ms "
+              f"(+/-{subscriber.clock.uncertainty * 1e3:.2f} ms)")
+    elif args.control_host:
+        print("  WARNING: no clock response -- latency numbers will be reception "
+              "age only, not true end-to-end")
     try:
         RemoteArmViewer(subscriber).run(duration=args.duration or None)
     finally:
@@ -1126,10 +1141,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="stream this arm's joint state to host(s) (comma separated) "
                         "for `tlod arm-viewer`, e.g. your laptop's IP")
     s.add_argument("--telemetry-port", type=int, default=45900, dest="telemetry_port")
+    s.add_argument("--telemetry-clock-port", type=int, default=45901, dest="telemetry_clock_port",
+                   help="answers clock pings from `tlod arm-viewer --control-host`, "
+                        "so it can report true end-to-end latency")
     s.set_defaults(func=cmd_control)
 
     s = sub.add_parser("arm-viewer", help="watch a control board's arm telemetry (laptop)")
     s.add_argument("--port", type=int, default=45900)
+    s.add_argument("--control-host", default="", dest="control_host",
+                   help="control board's IP, to measure clock offset for true "
+                        "end-to-end latency (optional; falls back to reception age)")
+    s.add_argument("--clock-port", type=int, default=45901, dest="clock_port")
     s.add_argument("--duration", type=float, default=0.0, help="0 = run until the window closes")
     s.set_defaults(func=cmd_arm_viewer)
 
