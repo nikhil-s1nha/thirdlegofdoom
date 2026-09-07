@@ -46,6 +46,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 |---|---|
 | `main`, `arm-core` | **you are here** — arm, vision, calibration |
 | `gamification` | the above plus hand slap |
+| `UartComm` | main plus uart not ip based comms |
 
 ## Layout
 
