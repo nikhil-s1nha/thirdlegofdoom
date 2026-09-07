@@ -95,7 +95,6 @@ def test_depth_spread_is_informational_unless_asserted():
 
 def test_accuracy_against_kinematics_passes_with_a_good_camera():
     """The check that actually validates calibration."""
-    projector = synthetic_projector()
     controller = ArmController(MockArm(q0=np.concatenate([model.HOME, [0.0]]), max_speed=8.0),
                                SafetyLimits(), control_hz=200.0)
     controller.start()
