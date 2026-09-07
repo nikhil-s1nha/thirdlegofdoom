@@ -56,11 +56,16 @@ def test_datagram_fits_one_packet():
 
 
 def test_clock_offset_is_applied_to_timestamps():
-    """The whole point: their clock translated into ours."""
+    """The whole point: their clock translated into ours.
+
+    offset is their clock minus ours (see tlod.net.clock), so a sender
+    5s ahead of us means their stamp must come down by 5s to land in our
+    terms.
+    """
     packet = encode_perception(sample_perception(1000.0), seq=1, sent=1000.0)
     back = decode_perception(packet, clock_offset=+5.0)
-    assert back.stamp == pytest.approx(1005.0)
-    assert back.hands[0].stamp == pytest.approx(1005.0)
+    assert back.stamp == pytest.approx(995.0)
+    assert back.hands[0].stamp == pytest.approx(995.0)
 
 
 def test_malformed_and_wrong_version_are_rejected():

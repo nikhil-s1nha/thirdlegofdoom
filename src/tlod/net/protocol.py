@@ -106,13 +106,15 @@ def encode_perception(perception: Perception, seq: int, sent: float) -> Packet:
 def decode_perception(packet: Packet, clock_offset: float = 0.0) -> Perception:
     """Rebuild a Perception, translating the sender's clock into ours.
 
-    `clock_offset` is added to the shutter timestamp. Without it every age
-    computed downstream is wrong by the difference between two machines'
-    clocks -- and wrong silently, which is worse than wrong loudly.
+    `clock_offset` (sender's clock minus ours, see `tlod.net.clock`) is
+    subtracted from the shutter timestamp to bring it into our terms.
+    Without it every age computed downstream is wrong by the difference
+    between two machines' clocks -- and wrong silently, which is worse
+    than wrong loudly.
     """
     from tlod.types import Detection
 
-    stamp = packet.stamp + clock_offset
+    stamp = packet.stamp - clock_offset
     hands = [
         HandObservation(
             position=np.array(h["p"], float),

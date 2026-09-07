@@ -19,8 +19,9 @@ The measurement is the NTP one, without the daemon:
     offset = t1 - (t0 + t3) / 2
     rtt    = t3 - t0
 
-Assuming a symmetric path, offset is what to add to their timestamps to
-put them in our terms. The assumption fails when the path is congested,
+Assuming a symmetric path, offset is their clock minus ours -- subtract
+it from their timestamps to put them in our terms. The assumption fails
+when the path is congested,
 so we take the sample with the **smallest round trip** out of several
 rather than averaging: the least-delayed exchange is the one least
 distorted, and averaging just mixes good samples with bad.
@@ -43,7 +44,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ClockEstimate:
-    offset: float          # add this to their timestamps to get ours
+    offset: float          # their clock minus ours; subtract from their timestamps
     rtt: float             # round trip of the sample used
     samples: int
     stamp: float           # when this was measured, our clock
