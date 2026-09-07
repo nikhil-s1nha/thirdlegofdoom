@@ -529,6 +529,8 @@ def cmd_vision_serve(args) -> int:
         object_detector=ColorBlobDetector(projector) if args.objects else None,
         targets=[(host, args.port) for host in args.to.split(",")],
         clock_port=args.clock_port,
+        serial_port=args.serial_port or None,
+        serial_baudrate=args.baudrate,
     )
     preview = None
     if args.preview:
@@ -540,6 +542,8 @@ def cmd_vision_serve(args) -> int:
 
     print(f"  vision board: publishing to {args.to}:{args.port}, "
           f"clock on :{args.clock_port}")
+    if args.serial_port:
+        print(f"  also publishing over UART: {args.serial_port} @ {args.baudrate}")
     if not cfg.camera.extrinsics:
         print("  WARNING: no extrinsics configured. Positions will be in a guessed")
         print("  camera frame and the arm will reach to the wrong place.")
@@ -572,9 +576,14 @@ def cmd_control(args) -> int:
     subscriber = VisionSubscriber(
         host=args.vision_host, port=args.port, clock_port=args.clock_port,
         require_clock=not args.no_clock,
+        serial_port=args.serial_port or None,
+        serial_baudrate=args.baudrate,
     )
-    print(f"  control board: listening on :{args.port}, clock from "
-          f"{args.vision_host or '(none)'}")
+    if args.serial_port:
+        print(f"  control board: listening on {args.serial_port} @ {args.baudrate} (UART)")
+    else:
+        print(f"  control board: listening on :{args.port}, clock from "
+              f"{args.vision_host or '(none)'}")
     subscriber.start()
     if subscriber.clock:
         print(f"  clock offset {subscriber.clock.offset*1e3:+.2f} ms "
@@ -587,11 +596,12 @@ def cmd_control(args) -> int:
         min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
     )
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
+    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
     app = RobotApp(
         camera=_NullCamera(),
         detector=None,
         locator=None,
-        controller=ArmController(build_arm(cfg), limits, cfg.runtime.control_hz),
+        controller=controller,
         policy=policies.get(args.policy, IdlePolicy)(),
         tracker=MultiTracker(),
         control_hz=cfg.runtime.control_hz,
@@ -599,6 +609,20 @@ def cmd_control(args) -> int:
         prediction_horizon=cfg.runtime.prediction_horizon,
         perception_source=subscriber.perception,
     )
+
+    telemetry = None
+    if args.telemetry_to:
+        from tlod.net.telemetry import ArmTelemetryPublisher
+
+        telemetry = ArmTelemetryPublisher(
+            controller=controller,
+            targets=[(host, args.telemetry_port) for host in args.telemetry_to.split(",")],
+            perception=subscriber.perception,
+        )
+        telemetry.start()
+        print(f"  arm telemetry -> {args.telemetry_to}:{args.telemetry_port} "
+              "(watch with `tlod arm-viewer`)")
+
     try:
         with app:
             deadline = time.perf_counter() + args.duration
@@ -607,10 +631,38 @@ def cmd_control(args) -> int:
     except KeyboardInterrupt:
         print("\n  interrupted")
     finally:
+        if telemetry is not None:
+            telemetry.stop()
         subscriber.stop()
     print(app.latency_report())
     print("\n  network")
     print(subscriber.report())
+    if telemetry is not None:
+        print(f"\n  telemetry sent {telemetry.sent}")
+    return 0
+
+
+def cmd_arm_viewer(args) -> int:
+    """Watch a control board's arm telemetry. Runs on a laptop, not a board.
+
+    For the arm-less HIL test: the control board (`tlod control`, no
+    `--real`) drives `MockArm` and has no screen either way. Point
+    `--telemetry-to` at this machine when starting `tlod control`, then
+    run this here to see the skeleton move instead of only reading the
+    text report at the end.
+    """
+    from tlod.net.telemetry import ArmTelemetrySubscriber
+    from tlod.viz.remote_viewer import RemoteArmViewer
+
+    subscriber = ArmTelemetrySubscriber(port=args.port)
+    subscriber.start()
+    print(f"  listening for arm telemetry on :{args.port} ...")
+    try:
+        RemoteArmViewer(subscriber).run(duration=args.duration or None)
+    finally:
+        subscriber.stop()
+    print(f"  packets: {subscriber.received} received, "
+          f"{subscriber.dropped_bad} malformed, {subscriber.dropped_stale} reordered")
     return 0
 
 
@@ -1049,6 +1101,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--sim", action="store_true", help="synthetic camera, for testing the link")
     s.add_argument("--preview", type=int, default=0, metavar="PORT",
                    help="serve an annotated MJPEG view on this port (e.g. 8081)")
+    s.add_argument("--serial-port", default="", dest="serial_port",
+                   help="also publish over this UART device (e.g. /dev/ttyS4). "
+                        "Learning/testing link -- see docs/deployment.md")
+    s.add_argument("--baudrate", type=int, default=115200)
     s.set_defaults(func=cmd_vision_serve)
 
     s = sub.add_parser("control", help="control board: consume detections, run the loop (Pi)")
@@ -1061,7 +1117,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--real", action="store_true", help="drive real servos")
     s.add_argument("--no-clock", action="store_true", dest="no_clock",
                    help="run without a clock offset (freshness checks become meaningless)")
+    s.add_argument("--serial-port", default="", dest="serial_port",
+                   help="receive perception over this UART device instead of UDP "
+                        "(e.g. /dev/ttyAMA0). Learning/testing link, mutually "
+                        "exclusive with --vision-host/--port")
+    s.add_argument("--baudrate", type=int, default=115200)
+    s.add_argument("--telemetry-to", default="", dest="telemetry_to",
+                   help="stream this arm's joint state to host(s) (comma separated) "
+                        "for `tlod arm-viewer`, e.g. your laptop's IP")
+    s.add_argument("--telemetry-port", type=int, default=45900, dest="telemetry_port")
     s.set_defaults(func=cmd_control)
+
+    s = sub.add_parser("arm-viewer", help="watch a control board's arm telemetry (laptop)")
+    s.add_argument("--port", type=int, default=45900)
+    s.add_argument("--duration", type=float, default=0.0, help="0 = run until the window closes")
+    s.set_defaults(func=cmd_arm_viewer)
 
     s = sub.add_parser("vision-check", help="verify vision numerically; for headless boards")
     s.add_argument("--duration", type=float, default=20.0)
