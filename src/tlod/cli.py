@@ -653,6 +653,14 @@ def cmd_vision_serve(args) -> int:
         targets=[(host, args.port) for host in args.to.split(",")],
         clock_port=args.clock_port,
     )
+    preview = None
+    if args.preview:
+        from tlod.vision.preview import PreviewServer
+        preview = PreviewServer(port=args.preview)
+        preview.start()
+        publisher.preview = preview
+        print(f"  preview: open http://<this board>:{args.preview}/ from any browser")
+
     print(f"  vision board: publishing to {args.to}:{args.port}, "
           f"clock on :{args.clock_port}")
     if not cfg.camera.extrinsics:
@@ -667,6 +675,8 @@ def cmd_vision_serve(args) -> int:
                       end="", flush=True)
         except KeyboardInterrupt:
             pass
+    if preview is not None:
+        preview.stop()
     print("\n" + publisher.report())
     return 0
 
@@ -725,6 +735,93 @@ def cmd_control(args) -> int:
     print("\n  network")
     print(subscriber.report())
     return 0
+
+
+def cmd_vision_check(args) -> int:
+    """Verify the vision stack numerically. For boards with no screen.
+
+    Two kinds of check, and the difference matters: precision (stable and
+    self-consistent) needs only a camera, while accuracy (actually right)
+    needs ground truth, which only the arm can provide.
+    """
+    from tlod.vision.calibrate_flow import calibration_poses, find_marker
+    from tlod.vision.check import Thresholds, check_against_arm, check_precision
+    from tlod.vision.hands import HandLocator
+
+    cfg = Config.load(args.config)
+    if args.sim:
+        # Synthetic camera and synthetic detector together. MediaPipe on
+        # unrendered mock frames finds nothing, which looks like a broken
+        # pipeline rather than a misconfigured test.
+        cfg = cfg.with_overrides(camera={"source": "mock"}, vision={"detector": "scripted"})
+    else:
+        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+                                 vision={"detector": "mediapipe"})
+
+    projector = build_projector(cfg)
+    scene = None
+    if cfg.vision.detector == "scripted" or cfg.camera.source == "mock":
+        from tlod.vision.scene import SyntheticHandScene
+        scene = SyntheticHandScene(projector)
+    camera = build_camera(cfg, scene=scene)
+    locator = HandLocator(projector, depth_mode=cfg.vision.depth_mode,
+                          hand_height=cfg.vision.hand_height,
+                          palm_width_m=cfg.vision.palm_width_m)
+    thresholds = Thresholds()
+
+    if not cfg.camera.extrinsics:
+        print("  WARNING: no extrinsics configured. Precision checks are still")
+        print("  meaningful; accuracy is not, because positions are in a guessed frame.\n")
+
+    print(f"  precision check: {args.duration:.0f}s. Put a hand in view and move it")
+    print("  slowly across the frame, keeping it about the same distance away.\n")
+    with camera:
+        time.sleep(1.0)
+        report = check_precision(
+            camera, build_detector(cfg, scene), locator,
+            duration=args.duration, thresholds=thresholds, save_dir=args.save_frames,
+            fixed_distance=args.fixed_distance,
+            on_progress=lambda r: print(
+                f"\r  {r.frames} frames, {r.detections} detections", end="", flush=True),
+        )
+        print()
+
+        if args.with_arm:
+            from tlod.arm.controller import ArmController, SafetyLimits
+
+            print("\n  accuracy check: THE ARM WILL MOVE. Clear the workspace.")
+            print("  A green marker must be on the gripper.")
+            if not args.yes:
+                input("  press Enter when ready, Ctrl-C to abort... ")
+            controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
+            controller.start()
+            try:
+                def locate(image):
+                    uv = find_marker(image)
+                    if uv is None:
+                        return None
+                    depth_plane = projector.pixel_to_plane(uv[0], uv[1], 0.0)
+                    # Resolve the marker the same way a hand would be, so
+                    # the check exercises the real path rather than a
+                    # shortcut around it.
+                    return locator.projector.pixel_to_plane(uv[0], uv[1],
+                                                            controller.pose().z) or depth_plane
+                report = check_against_arm(
+                    camera, controller, locate, calibration_poses(args.poses),
+                    report, thresholds,
+                )
+            finally:
+                controller.stop(park=True)
+        else:
+            report.notes.append(
+                "accuracy NOT checked -- pass --with-arm to score against kinematics"
+            )
+
+    print(report.text())
+    if args.json:
+        report.save(args.json)
+        print(f"\n  wrote {args.json}")
+    return 0 if report.passed else 2
 
 
 def cmd_probe(args) -> int:
@@ -1094,6 +1191,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--objects", action="store_true", help="also publish table objects")
     s.add_argument("--duration", type=float, default=0.0, help="0 = run until stopped")
     s.add_argument("--sim", action="store_true", help="synthetic camera, for testing the link")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="serve an annotated MJPEG view on this port (e.g. 8081)")
     s.set_defaults(func=cmd_vision_serve)
 
     s = sub.add_parser("control", help="control board: consume detections, run the loop (Pi)")
@@ -1107,6 +1206,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-clock", action="store_true", dest="no_clock",
                    help="run without a clock offset (freshness checks become meaningless)")
     s.set_defaults(func=cmd_control)
+
+    s = sub.add_parser("vision-check", help="verify vision numerically; for headless boards")
+    s.add_argument("--duration", type=float, default=20.0)
+    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--with-arm", action="store_true", dest="with_arm",
+                   help="also score accuracy against forward kinematics (moves the arm)")
+    s.add_argument("--poses", type=int, default=8)
+    s.add_argument("--save-frames", default="", dest="save_frames",
+                   help="write annotated JPEGs here for later inspection")
+    s.add_argument("--json", default="", help="write the report as JSON")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    s.add_argument("--fixed-distance", action="store_true", dest="fixed_distance",
+                   help="you held the hand at a constant distance; enforce depth stability")
+    s.add_argument("--sim", action="store_true")
+    s.set_defaults(func=cmd_vision_check)
 
     s = sub.add_parser("probe", help="read the arm with torque off; safest first test")
     s.add_argument("--real", action="store_true", help="drive real hardware")

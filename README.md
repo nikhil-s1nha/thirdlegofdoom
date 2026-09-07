@@ -34,6 +34,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `bench` | measure IK, camera and loop latency |
 | `record` / `replay` | capture a session, replay it deterministically |
 | `vision-serve` / `control` | split across two boards: vision on one, kinematics on the other |
+| `vision-check` | verify vision numerically \+ MJPEG preview; for headless boards |
 | `probe` | read the arm with torque off; safest first hardware test |
 | `cameras` / `ports` / `config` | discovery and setup |
 
