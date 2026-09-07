@@ -495,13 +495,42 @@ class _NullCamera:
     def resolution(self): return self.width, self.height
 
 
-def cmd_vision_serve(args) -> int:
-    """Vision board: detect and publish. Runs on the Orange Pi 5."""
-    from tlod.net.publisher import VisionPublisher
+def _build_vision_publisher(args, cfg, projector, scene):
+    """Pick the transport: UDP/Ethernet (default) or a direct UART line.
+
+    Both classes expose the same start/stop/publish/report shape, so
+    everything above this point -- camera, detector, locator, tracker --
+    is built identically either way and has no idea which was chosen.
+    """
     from tlod.vision.hands import HandLocator
     from tlod.vision.objects import ColorBlobDetector
     from tlod.vision.tracking import MultiTracker
 
+    common = dict(
+        camera=build_camera(cfg, scene=scene),
+        detector=build_detector(cfg, scene),
+        locator=HandLocator(projector, depth_mode=cfg.vision.depth_mode,
+                            hand_height=cfg.vision.hand_height,
+                            palm_width_m=cfg.vision.palm_width_m),
+        tracker=MultiTracker(process_noise=cfg.vision.process_noise,
+                             measurement_noise=cfg.vision.measurement_noise),
+        object_detector=ColorBlobDetector(projector) if args.objects else None,
+    )
+
+    if args.transport == "uart":
+        from tlod.net.uart_publisher import UartVisionPublisher
+        return UartVisionPublisher(port=args.uart_port, baud=args.uart_baud, **common)
+
+    from tlod.net.publisher import VisionPublisher
+    return VisionPublisher(
+        targets=[(host, args.port) for host in args.to.split(",")],
+        clock_port=args.clock_port,
+        **common,
+    )
+
+
+def cmd_vision_serve(args) -> int:
+    """Vision board: detect and publish. Runs on the Orange Pi 5."""
     cfg = Config.load(args.config)
     if args.sim:
         # Synthetic camera AND synthetic detector. Running MediaPipe over
@@ -518,20 +547,12 @@ def cmd_vision_serve(args) -> int:
         from tlod.vision.scene import SyntheticHandScene
         scene = SyntheticHandScene(projector)
 
-    publisher = VisionPublisher(
-        camera=build_camera(cfg, scene=scene),
-        detector=build_detector(cfg, scene),
-        locator=HandLocator(projector, depth_mode=cfg.vision.depth_mode,
-                            hand_height=cfg.vision.hand_height,
-                            palm_width_m=cfg.vision.palm_width_m),
-        tracker=MultiTracker(process_noise=cfg.vision.process_noise,
-                             measurement_noise=cfg.vision.measurement_noise),
-        object_detector=ColorBlobDetector(projector) if args.objects else None,
-        targets=[(host, args.port) for host in args.to.split(",")],
-        clock_port=args.clock_port,
-    )
-    print(f"  vision board: publishing to {args.to}:{args.port}, "
-          f"clock on :{args.clock_port}")
+    publisher = _build_vision_publisher(args, cfg, projector, scene)
+    if args.transport == "uart":
+        print(f"  vision board: publishing on {args.uart_port} @ {args.uart_baud} baud")
+    else:
+        print(f"  vision board: publishing to {args.to}:{args.port}, "
+              f"clock on :{args.clock_port}")
     if not cfg.camera.extrinsics:
         print("  WARNING: no extrinsics configured. Positions will be in a guessed")
         print("  camera frame and the arm will reach to the wrong place.")
@@ -548,10 +569,30 @@ def cmd_vision_serve(args) -> int:
     return 0
 
 
+def _build_vision_subscriber(args):
+    """Pick the transport: UDP/Ethernet (default) or a direct UART line.
+
+    Both classes fill the same `Latest[Perception]` mailbox and expose
+    the same start/stop/report/.perception/.clock/.offset shape, so
+    `RobotApp` below never has to know which one it was handed.
+    """
+    if args.transport == "uart":
+        from tlod.net.uart_subscriber import UartVisionSubscriber
+        return UartVisionSubscriber(
+            port=args.uart_port, baud=args.uart_baud,
+            require_clock=not args.no_clock,
+        )
+
+    from tlod.net.subscriber import VisionSubscriber
+    return VisionSubscriber(
+        host=args.vision_host, port=args.port, clock_port=args.clock_port,
+        require_clock=not args.no_clock,
+    )
+
+
 def cmd_control(args) -> int:
     """Control board: consume detections, run the loop. Runs on the Pi."""
     from tlod.arm.controller import ArmController, SafetyLimits
-    from tlod.net.subscriber import VisionSubscriber
     from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
     from tlod.vision.tracking import MultiTracker
 
@@ -559,12 +600,12 @@ def cmd_control(args) -> int:
     if args.real:
         cfg = cfg.with_overrides(arm={"backend": "feetech"})
 
-    subscriber = VisionSubscriber(
-        host=args.vision_host, port=args.port, clock_port=args.clock_port,
-        require_clock=not args.no_clock,
-    )
-    print(f"  control board: listening on :{args.port}, clock from "
-          f"{args.vision_host or '(none)'}")
+    subscriber = _build_vision_subscriber(args)
+    if args.transport == "uart":
+        print(f"  control board: listening on {args.uart_port} @ {args.uart_baud} baud")
+    else:
+        print(f"  control board: listening on :{args.port}, clock from "
+              f"{args.vision_host or '(none)'}")
     subscriber.start()
     if subscriber.clock:
         print(f"  clock offset {subscriber.clock.offset*1e3:+.2f} ms "
@@ -943,9 +984,15 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_reach)
 
     s = sub.add_parser("vision-serve", help="vision board: detect and publish (Orange Pi)")
-    s.add_argument("--to", default="255.255.255.255", help="control board host(s), comma separated")
-    s.add_argument("--port", type=int, default=45800)
-    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
+    s.add_argument("--transport", choices=["udp", "uart"], default="udp",
+                   help="udp: Ethernet, fan-out, default. uart: one direct "
+                        "serial line, no network gear, one listener only")
+    s.add_argument("--to", default="255.255.255.255", help="control board host(s), comma separated [udp]")
+    s.add_argument("--port", type=int, default=45800, help="[udp]")
+    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port", help="[udp]")
+    s.add_argument("--uart-port", default="/dev/ttyS4", dest="uart_port",
+                   help="serial device, e.g. /dev/ttyS4 [uart]")
+    s.add_argument("--uart-baud", type=int, default=115200, dest="uart_baud", help="[uart]")
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--objects", action="store_true", help="also publish table objects")
     s.add_argument("--duration", type=float, default=0.0, help="0 = run until stopped")
@@ -953,10 +1000,15 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_vision_serve)
 
     s = sub.add_parser("control", help="control board: consume detections, run the loop (Pi)")
+    s.add_argument("--transport", choices=["udp", "uart"], default="udp",
+                   help="must match the vision board's --transport")
     s.add_argument("--vision-host", default="", dest="vision_host",
-                   help="vision board address, for clock sync")
-    s.add_argument("--port", type=int, default=45800)
-    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
+                   help="vision board address, for clock sync [udp]")
+    s.add_argument("--port", type=int, default=45800, help="[udp]")
+    s.add_argument("--clock-port", type=int, default=45801, dest="clock_port", help="[udp]")
+    s.add_argument("--uart-port", default="/dev/ttyAMA0", dest="uart_port",
+                   help="serial device, e.g. /dev/ttyAMA0 [uart]")
+    s.add_argument("--uart-baud", type=int, default=115200, dest="uart_baud", help="[uart]")
     s.add_argument("--policy", default="track_hand")
     s.add_argument("--duration", type=float, default=60.0)
     s.add_argument("--real", action="store_true", help="drive real servos")

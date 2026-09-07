@@ -58,6 +58,17 @@ class Packet:
             d = json.loads(data)
         except (ValueError, UnicodeDecodeError):
             return None
+        return Packet.from_dict(d)
+
+    @staticmethod
+    def from_dict(d: dict) -> Packet | None:
+        """Rebuild from an already-parsed dict.
+
+        Split out of `decode` so a transport that must parse the line for
+        its own reasons first -- the UART link reads a "k" kind tag
+        before it knows whether a line is a `Packet` at all -- can reuse
+        the same field mapping without decoding the JSON twice.
+        """
         if d.get("v") != PROTOCOL_VERSION:
             return None
         return Packet(

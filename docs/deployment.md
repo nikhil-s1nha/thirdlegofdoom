@@ -1,7 +1,12 @@
 # Deployment: two boards
 
 Vision on the **Orange Pi 5**, control on the **Raspberry Pi**, joined by
-UDP over a wired link.
+UDP over a wired link. A direct UART line is also supported, for when
+the two boards sit close enough together not to need a network at all
+-- see [Alternative link: direct UART](#alternative-link-direct-uart).
+Read the UDP section first either way: the reasoning about push-not-pull,
+ordering and the clock offset applies to both transports. UART only
+changes what carries the bytes, not the design around them.
 
 ```
 Orange Pi 5                       Raspberry Pi
@@ -68,6 +73,70 @@ tlod control --vision-host 127.0.0.1
 Measured across two processes on one machine: 12.8 ms shutter-to-servo,
 against ~10 ms in-process. Expect wired ethernet to add well under a
 millisecond.
+
+## Alternative link: direct UART
+
+For two boards mounted close enough together to run a wire between their
+UART pins directly -- no switch, no IP configuration, one cable class
+instead of two. Trades away UDP's fan-out (exactly one listener, ever)
+and its lack of a fixed rate ceiling (baud rate caps how fast a ~150-300
+byte line can go out) for a link that needs nothing but three wires.
+
+Every reason given above for push-not-pull, sequence numbers and a
+measured clock offset still applies -- `--transport uart` changes
+`tlod.net.uart_publisher`/`uart_subscriber` under the hood, not the
+`RobotApp`, the game or the IK, which never learn which transport they
+got. What UART does not need that UDP does: two sockets. A UART link is
+one shared wire, so detection data and clock probes are multiplexed onto
+it with a one-character tag read before anything else about a line is
+interpreted -- see `tlod/net/uart_protocol.py`.
+
+**Wiring.** Cross TX and RX -- the Orange Pi's TX goes to the Pi's RX and
+back, not TX-to-TX -- and tie the grounds together. Confirm both boards'
+UART pins are 3.3 V logic (they are, on both an Orange Pi 5 and a
+Raspberry Pi) before connecting anything; a 5 V TTL line into a 3.3 V
+input pin does not fail gracefully.
+
+**Requires:**
+
+```bash
+pip install -e ".[uart]"      # pulls in pyserial; on both boards
+```
+
+**Running it** -- same shape as the UDP commands, with a device path and
+baud rate instead of an address:
+
+```bash
+# Orange Pi
+tlod vision-serve --transport uart --uart-port /dev/ttyS4 --uart-baud 115200
+
+# Raspberry Pi
+tlod control --transport uart --uart-port /dev/ttyAMA0 --uart-baud 115200 \
+    --real --policy track_hand
+```
+
+Test the link before any hardware is involved, exactly like the UDP
+path -- `--sim` still works, since only the transport changed:
+
+```bash
+tlod vision-serve --transport uart --sim --uart-port /dev/ttyS4 &
+tlod control --transport uart --uart-port /dev/ttyAMA0
+```
+
+115200 baud is the default because it's the rate most USB-TTL adapters
+and SBC UARTs agree on with zero extra configuration; raise it if both
+ends support a higher rate reliably. A direct board-to-board TTL link,
+loopback-tested, measured **avg 5.89 ms round trip** (min 5.65, max
+7.62) -- comparable to the ~12.8 ms shutter-to-servo figure measured
+above over two UDP processes on one machine, and with no switch or IP
+stack in the way.
+
+Pick UDP if you might ever add a second consumer of the vision stream,
+if the boards are far enough apart that running a serial cable is
+awkward, or if you'd rather lean on ordinary networking tools
+(`tcpdump`, `ping`) to debug the link. Pick UART if the boards are
+already mounted inches apart, you'd rather not configure IP addresses on
+a robot, or you want one fewer class of cable in the build.
 
 ## What you need
 

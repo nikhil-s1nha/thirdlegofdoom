@@ -35,7 +35,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `first-light` | verify a new arm one joint at a time |
 | `bench` | measure IK, camera and loop latency |
 | `record` / `replay` | capture a session, replay it deterministically |
-| `vision-serve` / `control` | split across two boards: vision on one, kinematics on the other |
+| `vision-serve` / `control` | split across two boards: vision on one, kinematics on the other. `--transport udp` (default, Ethernet) or `uart` (direct serial line) |
 | `probe` | read the arm with torque off; safest first hardware test |
 | `cameras` / `ports` / `config` | discovery and setup |
 
@@ -54,7 +54,8 @@ src/tlod/
   arm/            model (FK/IK), backend, mock, feetech, controller, primitives
   vision/         camera, calibration, hands, tracking, objects, scene, recording
   runtime/        signal (mailbox), loop (fixed rate), app (threads + Policy)
-  net/            UDP split: vision on one board, control on another
+  net/            two-board split: UDP/Ethernet or direct UART, vision on
+                  one board, control on another
   game/           touch (visit detected objects), base state machine
   viz/            overlay and viewer
 ```
@@ -83,5 +84,5 @@ Seeed SO-ARM101 Pro. Kinematics come from the official URDF, vendored at
 
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — setup, usage, modification
 - [docs/hardware.md](docs/hardware.md) — servo control table, wiring
-- [docs/deployment.md](docs/deployment.md) — Orange Pi 5, standalone
+- [docs/deployment.md](docs/deployment.md) — Orange Pi 5, standalone; two-board split over UDP or a direct UART line
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is and isn't built

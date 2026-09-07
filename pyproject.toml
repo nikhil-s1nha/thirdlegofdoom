@@ -36,6 +36,12 @@ hands = [
 npu = []
 # Real hardware. lerobot pulls torch; only needed on the machine wired to the arm.
 robot = ["lerobot[feetech]>=0.6.0"]
+# `vision-serve --transport uart` / `control --transport uart`: a direct
+# TTL serial line between the two boards instead of UDP over Ethernet.
+# Only needed on whichever machines actually use that transport; the udp
+# path (the default, and what docs/deployment.md recommends) has no
+# extra dependency at all.
+uart = ["pyserial>=3.5"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
