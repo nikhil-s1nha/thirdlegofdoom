@@ -1,0 +1,9 @@
+# Perf tuning for the vision board. Only overrides what's listed here --
+# Config.from_dict falls back to the normal dataclass defaults
+# (configs/default.yaml) for everything else, including camera/arm/safety.
+#
+# num_hands: 1 -- the landmark model reruns once per detected hand, so if
+# only one hand is ever tracked, finding a second one is wasted inference.
+# Drop this back to 2 if a game ever needs both hands.
+vision:
+  num_hands: 1
