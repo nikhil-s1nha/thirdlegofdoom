@@ -69,6 +69,19 @@ Measured across two processes on one machine: 12.8 ms shutter-to-servo,
 against ~10 ms in-process. Expect wired ethernet to add well under a
 millisecond.
 
+## Checking it without a screen
+
+```bash
+tlod vision-check --duration 30            # precision: camera only
+tlod vision-check --with-arm --json r.json # accuracy: scored against kinematics
+tlod vision-serve --preview 8081 ...       # watch from a browser elsewhere
+```
+
+The camera-only checks cannot detect a bad extrinsic — they measure
+consistency, not correctness. Only `--with-arm` does, because forward
+kinematics is the only ground truth on the robot. Non-zero exit on
+failure, so it runs from cron.
+
 ## What you need
 
 | | |

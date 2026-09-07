@@ -352,6 +352,50 @@ tlod touch --view
 The drawn skeleton must land on the real arm. If it is offset, extrinsics
 are wrong and nothing downstream will fix it.
 
+### 3.6b Verifying vision on a headless board
+
+If the vision board has no screen you cannot check the boxes by eye. Two
+tools cover that, and the difference between them matters.
+
+```bash
+tlod vision-check --duration 30 --save-frames /tmp/frames
+```
+
+**Precision** — detection rate, jitter, teleports, depth stability.
+Camera only. Tells you the pipeline is stable and self-consistent. It
+does **not** tell you the answer is right: a badly calibrated camera
+gives beautifully precise, consistently wrong positions.
+
+```bash
+tlod vision-check --with-arm --duration 20 --json report.json
+```
+
+**Accuracy** — drives the arm to known configurations and compares what
+vision reports against forward kinematics. This is the only check that
+catches a bad extrinsic, because the arm is the only ground truth
+available. Green marker on the gripper, workspace clear.
+
+Exits non-zero on failure, so it can run from cron:
+
+```bash
+tlod vision-check --with-arm --yes --json /var/log/tlod-vision.json || notify
+```
+
+Add `--fixed-distance` only if you actually held your hand at a constant
+distance; otherwise depth stability is reported but not enforced, because
+that precondition is an instruction to you, not something the code can
+verify.
+
+**To see what it sees**, from any other machine:
+
+```bash
+tlod vision-serve --preview 8081 --to <control board>
+```
+
+Then open `http://<vision board>:8081/` in a browser. Plain MJPEG, no
+player needed. It is throttled and runs on its own thread, but it is a
+diagnostic — leave it off in normal operation.
+
 ### 3.7 Play
 
 ```bash
@@ -559,7 +603,9 @@ how a safety limit fails to apply.
 | the arm folds when powered | torque is off | expected during `probe`; support it |
 | `IK failures` climbing | target outside workspace | `tlod reach`; check `safety.max_radius` |
 | `safety-guard hits` climbing | unreachable poses requested | not fatal, but the game is being clamped |
-| tracking drops out | lighting, blur, frame edge | fix lighting first; it is usually lighting |
+| tracking drops out | lighting, blur, frame edge | `tlod vision-check`; fix lighting first, it is usually lighting |
+| no screen on the vision board | — | `tlod vision-check` for numbers, `--preview 8081` to watch from a browser |
+| vision precise but arm reaches wrong | bad extrinsics | `tlod vision-check --with-arm`; camera-only checks cannot see this |
 | hand seen as a red object | skin reads red to colour segmenters | handled by hand suppression; widen the radius |
 | jitter high, overruns >10% | CPU starved | lower `control_hz` or camera resolution |
 | latency worse than expected | camera gave 30 fps, not 60 | `tlod bench camera --force` |
