@@ -5,6 +5,8 @@ fail silently if wrong -- clock translation, ordering, and the freshness
 gate -- because none of them raise when they misbehave.
 """
 
+import json
+import socket
 import threading
 import time
 
@@ -97,6 +99,49 @@ def test_clock_offset_measured_over_loopback():
 
 def test_clock_measurement_fails_cleanly_with_no_responder():
     assert measure_offset("127.0.0.1", 45992, samples=2, timeout=0.05) is None
+
+
+def test_offset_sign_is_correct_against_a_genuinely_different_clock():
+    """A same-process loopback (test_clock_offset_measured_over_loopback,
+    above) can never catch a sign error in the offset formula: both sides
+    share one `perf_counter()`, so the true offset is always ~0 and a
+    flipped sign is indistinguishable from a correct one (-0 == +0). This
+    fakes a responder whose clock reads a large, known amount *ahead* --
+    the two-real-boards scenario (independent perf_counter() epochs,
+    plausibly hours apart) that actually exposed the bug this pins down.
+    """
+    known_ahead = 137.5  # seconds; the fake responder's clock reads this much larger
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 46000))
+    sock.settimeout(0.2)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                data, addr = sock.recvfrom(256)
+            except (OSError, TimeoutError):
+                continue
+            if b"ping" not in data:
+                continue
+            sock.sendto(json.dumps({"t": time.perf_counter() + known_ahead}).encode(), addr)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        estimate = measure_offset("127.0.0.1", 46000, samples=5, gap=0.004)
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+        sock.close()
+
+    assert estimate is not None
+    # `their_timestamp + offset` must land back near our own clock -- so
+    # offset has to be approximately *negative* known_ahead, the opposite
+    # sign from how far ahead their raw reading looked.
+    assert estimate.offset == pytest.approx(-known_ahead, abs=max(estimate.rtt, 0.05))
 
 
 def test_subscriber_refuses_to_run_without_a_clock():
