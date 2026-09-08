@@ -51,10 +51,56 @@ ADDR_PRESENT_SPEED = 58
 ADDR_PRESENT_LOAD = 60
 ADDR_PRESENT_VOLTAGE = 62
 ADDR_PRESENT_TEMPERATURE = 63
+ADDR_ERROR_STATUS = 65
+ADDR_PRESENT_CURRENT = 69
 
 COUNTS_PER_REV = 4096
 RAD_PER_COUNT = 2.0 * np.pi / COUNTS_PER_REV
 CENTER_COUNT = 2048
+
+# Present_Current (addr 69) is reported in 6.5 mA steps.
+AMPS_PER_CURRENT_COUNT = 0.0065
+
+# Goal_Acceleration (addr 41) is an acceleration, in steps/s^2 / 100 --
+# equivalently 8.7 deg/s^2 per count at the output shaft, since one
+# position step is 0.087 deg. So the register converts to SI as:
+RAD_S2_PER_ACC_COUNT = 100.0 * RAD_PER_COUNT   # ~0.1534 rad/s^2 per count
+
+# Bits of the error/status register at addr 65. Undervoltage is the one
+# that matters on an undersized supply: the servo latches it, drops
+# torque, and the arm goes limp until the rail recovers.
+ERROR_BITS: tuple[tuple[int, str], ...] = (
+    (0x01, "voltage"),
+    (0x02, "angle"),
+    (0x04, "overheat"),
+    (0x08, "overelectric"),
+    (0x20, "overload"),
+)
+
+
+def acc_counts(rad_s2: float) -> int:
+    """Convert an acceleration limit to a Goal_Acceleration register value.
+
+    Register 41 holds the *magnitude* of the servo's internal trapezoidal
+    ramp, so a bigger number is a harsher start, and 0 disables the ramp
+    altogether and gives maximum acceleration. It does not mean "how much
+    smoothing" -- 0 and 254 are the two harshest settings, not opposite
+    ends of a smoothness scale, and the gentlest useful values are small
+    and non-zero.
+
+    This is easy to get backwards, and getting it backwards is expensive:
+    winding the register to 254 to "smooth" a brownout in fact asks for
+    ~39 rad/s^2, four times the ~9 rad/s^2 that the value of 60 it replaced
+    was asking for, and so roughly four times the accelerating current at
+    the start of every move. The unit conversion here exists so that
+    callers state an acceleration in rad/s^2 and never have to hold the
+    polarity in their heads.
+    """
+    return int(np.clip(round(rad_s2 / RAD_S2_PER_ACC_COUNT), 1, 254))
+
+
+def decode_errors(status: int) -> list[str]:
+    return [name for bit, name in ERROR_BITS if status & bit]
 
 # Motor ids 1..6 in JOINT_NAMES order, as set by `lerobot-setup-motors`.
 MOTOR_IDS: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
@@ -130,7 +176,11 @@ class FeetechArm(ArmBackend):
         baudrate: int = 1_000_000,
         calibration: Calibration | None = None,
         motor_ids: tuple[int, ...] = MOTOR_IDS,
-        goal_acceleration: int = 60,   # 0 = instant (harsh), 254 = very smooth
+        # Acceleration of the servo's own ramp. Higher is harsher; 0 turns
+        # the ramp off entirely, which is harsher still. See acc_counts().
+        # 60 counts is ~9.2 rad/s^2, a moderate ramp that keeps the current
+        # step at the start of a move well away from the supply's limit.
+        goal_acceleration: int = 60,
         goal_speed: int = 0,           # 0 = maximum
         torque_limit: int = 800,       # of 1000; leaves headroom before stall
         protocol_end: int = 0,         # STS/SMS little-endian
@@ -231,7 +281,7 @@ class FeetechArm(ArmBackend):
             raise RuntimeError("arm not connected; call connect() first")
 
     # -- io ----------------------------------------------------------------
-    def read(self, retries: int = 5) -> JointState:
+    def read(self, retries: int = 3, backoff: float = 0.001) -> JointState:
         self._require()
         stamp = time.perf_counter()
         # Half-duplex bus: a burst of writes (e.g. the interpolated steps of
@@ -241,6 +291,18 @@ class FeetechArm(ArmBackend):
         # which is why waiting longer between retries alone never helped.
         # Flushing before each attempt discards that leftover backlog so
         # the read starts clean.
+        #
+        # Which is also why the delay between attempts is short and flat.
+        # It was an escalating 10/20/30/40/50 ms, from before the flush was
+        # understood to be the actual fix, and that is up to 150 ms spent
+        # inside ArmController's lock -- on a thread that is usually the
+        # telemetry poller, not the control loop, but holding the lock the
+        # control loop needs to issue its next command. Fifteen control
+        # ticks would go missing, the following tick would arrive with a
+        # correspondingly huge dt, and the arm would lurch. A failing read
+        # during motion could therefore cause the jitter it was diagnosing.
+        # One millisecond is comfortably longer than a transaction at
+        # 1 Mbaud, which is all the flush needs to have something to flush.
         for attempt in range(retries + 1):
             self._port_handler.clearPort()
             result = self._sync_read.txRxPacket()
@@ -248,7 +310,7 @@ class FeetechArm(ArmBackend):
                 break
             if attempt == retries:
                 raise OSError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
-            time.sleep(0.01 * (attempt + 1))
+            time.sleep(backoff)
 
         counts = np.empty(NUM_JOINTS)
         speeds = np.empty(NUM_JOINTS)
@@ -289,14 +351,38 @@ class FeetechArm(ArmBackend):
             raise OSError(f"sync write failed: {self._packet_handler.getTxRxResult(result)}")
 
     def diagnostics(self) -> dict[str, object]:
+        """Health of every servo: temperature, rail voltage, current, faults.
+
+        Current and error status are read here rather than in `read()` on
+        purpose. `read()` is on the control path and pays for exactly one
+        bus transaction; these are six round trips per register and belong
+        to whoever is willing to wait for them -- the power diagnostic, a
+        telemetry publisher, a health check between moves.
+
+        Each servo reports the voltage at its own terminals, so the spread
+        across the six is itself the measurement: a supply that is fine at
+        the plug and low at the far end of the daisy chain is a wiring
+        problem, and one that is uniformly low is the supply.
+        """
         self._require()
-        temps, volts = [], []
+        temps, volts, currents, faults = [], [], [], []
         for mid in self.motor_ids:
             t, _, _ = self._packet_handler.read1ByteTxRx(self._port_handler, mid, ADDR_PRESENT_TEMPERATURE)
             v, _, _ = self._packet_handler.read1ByteTxRx(self._port_handler, mid, ADDR_PRESENT_VOLTAGE)
+            i, _, _ = self._packet_handler.read2ByteTxRx(self._port_handler, mid, ADDR_PRESENT_CURRENT)
+            e, _, _ = self._packet_handler.read1ByteTxRx(self._port_handler, mid, ADDR_ERROR_STATUS)
             temps.append(int(t))
             volts.append(int(v) / 10.0)
-        return {"temperature_c": temps, "voltage_v": volts}
+            currents.append(int(i) * AMPS_PER_CURRENT_COUNT)
+            faults.append(decode_errors(int(e)))
+        return {
+            "temperature_c": temps,
+            "voltage_v": volts,
+            "current_a": currents,
+            "total_current_a": float(sum(currents)),
+            "min_voltage_v": min(volts) if volts else 0.0,
+            "faults": faults,
+        }
 
 
 def find_ports() -> list[str]:
