@@ -109,13 +109,42 @@ def build_arm(cfg: Config):
     elif cfg.arm.lerobot_id:
         calib = Calibration.load(default_lerobot_calibration(cfg.arm.lerobot_id))
 
+    from tlod.arm.feetech import acc_counts
+
     return FeetechArm(
         port=port,
         baudrate=cfg.arm.baudrate,
         calibration=calib,
-        goal_acceleration=cfg.arm.goal_acceleration,
+        goal_acceleration=acc_counts(cfg.arm.servo_accel),
         torque_limit=cfg.arm.torque_limit,
     )
+
+
+def build_limits(cfg: Config):
+    """Safety limits from config. One place, so no entry point drifts."""
+    from tlod.arm.controller import SafetyLimits
+
+    return SafetyLimits(
+        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
+        max_accel=cfg.safety.max_accel, max_jerk=cfg.safety.max_jerk,
+        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
+        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
+        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
+        command_timeout=cfg.safety.command_timeout, max_tick_dt=cfg.safety.max_tick_dt,
+    )
+
+
+def build_governor(cfg: Config):
+    """The power governor, or None if it is switched off."""
+    if not cfg.power.governor:
+        return None
+    from tlod.arm.power import PowerBudget, PowerGovernor, PowerModel
+
+    return PowerGovernor(PowerModel(budget=PowerBudget(
+        supply_current=cfg.power.supply_current,
+        headroom=cfg.power.headroom,
+        min_voltage=cfg.power.min_voltage,
+    )))
 
 
 def build_detector(cfg: Config, scene=None):
@@ -195,7 +224,7 @@ def cmd_touch(args) -> int:
 
 
 def build_app(cfg: Config, render: bool = False):
-    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.controller import ArmController
     from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
     from tlod.vision.hands import HandLocator
     from tlod.vision.tracking import MultiTracker
@@ -213,17 +242,7 @@ def build_app(cfg: Config, render: bool = False):
         hand_height=cfg.vision.hand_height,
         palm_width_m=cfg.vision.palm_width_m,
     )
-    limits = SafetyLimits(
-        max_speed=cfg.safety.max_speed,
-        strike_speed=cfg.safety.strike_speed,
-        joint_margin=cfg.safety.joint_margin,
-        table_z=cfg.safety.table_z,
-        min_height=cfg.safety.min_height,
-        max_radius=cfg.safety.max_radius,
-        min_radius=cfg.safety.min_radius,
-        max_height=cfg.safety.max_height,
-        command_timeout=cfg.safety.command_timeout,
-    )
+    limits = build_limits(cfg)
     controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
     policy = policies.get(cfg.runtime.policy, IdlePolicy)()
@@ -406,7 +425,7 @@ def cmd_move(args) -> int:
     backend interface is what makes `--real` a flag rather than a
     different program.
     """
-    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.controller import ArmController
     from tlod.arm.model import HOME, tool_pose
     from tlod.types import Pose
 
@@ -414,13 +433,9 @@ def cmd_move(args) -> int:
     if args.real:
         cfg = cfg.with_overrides(arm={"backend": "feetech"})
 
-    limits = SafetyLimits(
-        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
-        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
-        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
-        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
-    )
-    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
+    limits = build_limits(cfg)
+    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
+                               governor=build_governor(cfg))
     controller.start()
     print(f"  backend {cfg.arm.backend}")
     start = controller.pose()
@@ -564,7 +579,7 @@ def cmd_vision_serve(args) -> int:
 
 def cmd_control(args) -> int:
     """Control board: consume detections, run the loop. Runs on the Pi."""
-    from tlod.arm.controller import ArmController, SafetyLimits
+    from tlod.arm.controller import ArmController
     from tlod.net.subscriber import VisionSubscriber
     from tlod.runtime.app import IdlePolicy, RobotApp, TrackHandPolicy
     from tlod.vision.tracking import MultiTracker
@@ -589,14 +604,16 @@ def cmd_control(args) -> int:
         print(f"  clock offset {subscriber.clock.offset*1e3:+.2f} ms "
               f"(+/-{subscriber.clock.uncertainty*1e3:.2f} ms)")
 
-    limits = SafetyLimits(
-        max_speed=cfg.safety.max_speed, strike_speed=cfg.safety.strike_speed,
-        joint_margin=cfg.safety.joint_margin, table_z=cfg.safety.table_z,
-        min_height=cfg.safety.min_height, max_radius=cfg.safety.max_radius,
-        min_radius=cfg.safety.min_radius, max_height=cfg.safety.max_height,
-    )
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
-    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
+    controller = ArmController(build_arm(cfg), build_limits(cfg), cfg.runtime.control_hz,
+                               governor=build_governor(cfg))
+    health = None
+    if controller.governor is not None:
+        from tlod.arm.power import HealthMonitor
+
+        health = HealthMonitor(controller, controller.governor)
+        print(f"  power governor on: {cfg.power.supply_current:.1f} A supply, "
+              f"{controller.governor.model.budget.limit:.2f} A budget")
     app = RobotApp(
         camera=_NullCamera(),
         detector=None,
@@ -627,16 +644,25 @@ def cmd_control(args) -> int:
 
     try:
         with app:
+            if health is not None:
+                health.start()
             deadline = time.perf_counter() + args.duration
             while time.perf_counter() < deadline:
                 time.sleep(0.25)
     except KeyboardInterrupt:
         print("\n  interrupted")
     finally:
+        if health is not None:
+            health.stop()
         if telemetry is not None:
             telemetry.stop()
         subscriber.stop()
     print(app.latency_report())
+    if health is not None:
+        print(f"\n  power: peak {health.peak_current:.2f} A, "
+              f"derate ended at {controller.derate:.2f}, "
+              f"{controller.governor.sag_events} rail sags"
+              + (f", faults {sorted(health.faults)}" if health.faults else ""))
     print("\n  network")
     print(subscriber.report())
     if telemetry is not None:
@@ -1037,6 +1063,131 @@ def cmd_first_light(args) -> int:
     return 0
 
 
+def cmd_power(args) -> int:
+    """Measure what the arm actually draws, and whether the rail holds up.
+
+    The point is to settle by measurement a question that is otherwise
+    settled by guessing. "Fine on one joint, jitters on several" has two
+    plausible causes that look identical from the outside -- a power supply
+    that cannot hold the rail, or a control bug -- and they want opposite
+    fixes. The servos report their own current and their own terminal
+    voltage, so there is no need to choose between them on a hunch.
+
+    It runs the same displacement twice, once one joint at a time and once
+    with everything moving together. Same distance, same limits: if the
+    second one sags and the first does not, that is the supply.
+    """
+    import numpy as np
+
+    from tlod.arm.controller import ArmController
+    from tlod.arm.model import HOME
+    from tlod.arm.power import PowerBudget, PowerModel
+
+    cfg = Config.load(args.config)
+    if cfg.arm.backend == "mock":
+        print("  arm.backend is 'mock'. This measures real hardware; "
+              "point -c at your real-arm config.")
+        return 1
+
+    model_ = PowerModel(budget=PowerBudget(
+        supply_current=cfg.power.supply_current, headroom=cfg.power.headroom,
+        min_voltage=cfg.power.min_voltage))
+    controller = ArmController(build_arm(cfg), build_limits(cfg), cfg.runtime.control_hz)
+    controller.start()
+
+    samples: list[dict] = []
+
+    def sample(label: str) -> dict:
+        d = controller.diagnostics()
+        row = {
+            "phase": label,
+            "current_a": float(d["total_current_a"]),
+            "min_voltage_v": float(d["min_voltage_v"]),
+            "faults": [f for per in d["faults"] for f in per],
+            "predicted_a": model_.total_current(controller.commanded[:5]),
+        }
+        samples.append(row)
+        return row
+
+    def run(label: str, target: np.ndarray, duration: float) -> None:
+        worst = {"current_a": 0.0, "min_voltage_v": 99.0, "faults": []}
+        t0 = time.perf_counter()
+        controller.goto_joints(target, duration=duration)
+        while time.perf_counter() - t0 < duration + 0.3:
+            row = sample(label)
+            worst["current_a"] = max(worst["current_a"], row["current_a"])
+            worst["min_voltage_v"] = min(worst["min_voltage_v"], row["min_voltage_v"])
+            worst["faults"] += row["faults"]
+            break
+        print(f"  {label:<28} peak {worst['current_a']:5.2f} A   "
+              f"min rail {worst['min_voltage_v']:5.2f} V"
+              + (f"   FAULTS {sorted(set(worst['faults']))}" if worst["faults"] else ""))
+
+    print(f"\n  supply configured as {cfg.power.supply_current:.1f} A, "
+          f"planning budget {model_.budget.limit:.2f} A")
+    try:
+        controller.goto_joints(HOME, duration=2.0)
+        idle = sample("idle at home")
+        print(f"\n  {'idle, holding home':<28} {idle['current_a']:5.2f} A   "
+              f"rail {idle['min_voltage_v']:5.2f} V"
+              f"   (model predicts {idle['predicted_a']:.2f} A)")
+        if not model_.supports_holding(HOME):
+            print("  !! the model says this supply cannot even hold the arm up. "
+                  "No amount of motion profiling fixes that.")
+
+        amp = args.amplitude
+        print()
+        for i, name in enumerate(("shoulder_pan", "shoulder_lift", "elbow_flex",
+                                  "wrist_flex", "wrist_roll")):
+            q = np.array(HOME, dtype=float)
+            q[i] += amp
+            run(f"{name} alone", q, args.duration)
+            controller.goto_joints(HOME, duration=args.duration)
+
+        print()
+        together = np.array(HOME, dtype=float) + amp
+        run("all five together", together, args.duration)
+        controller.goto_joints(HOME, duration=args.duration)
+    except KeyboardInterrupt:
+        print("\n  interrupted")
+    finally:
+        controller.stop(park=True)
+
+    single = max((s["current_a"] for s in samples if "alone" in s["phase"]), default=0.0)
+    multi = max((s["current_a"] for s in samples if "together" in s["phase"]), default=0.0)
+    sag = min((s["min_voltage_v"] for s in samples), default=0.0)
+    faults = sorted({f for s in samples for f in s["faults"]})
+
+    print("\n  verdict")
+    print(f"    worst single-joint draw   {single:5.2f} A")
+    print(f"    worst multi-joint draw    {multi:5.2f} A")
+    print(f"    lowest rail voltage seen  {sag:5.2f} V")
+    if faults:
+        print(f"    servo faults latched      {faults}")
+
+    over = multi > model_.budget.limit
+    sagging = sag < cfg.power.min_voltage
+    if sagging or "voltage" in faults:
+        print("\n    The rail is sagging under load. This is the supply, not the code.")
+        print("    Fit a bigger one (12 V 5 A) and a bulk capacitor; see docs/power.md.")
+        print("    Meanwhile set power.governor: true to keep the arm inside what you have.")
+    elif over:
+        print("\n    Draw exceeds the planning budget but the rail is holding. "
+              "The supply is coping;")
+        print("    raise power.supply_current if that rating is honest, or leave the "
+              "governor on.")
+    else:
+        print("\n    Draw and rail voltage are both within budget. If the arm still "
+              "jitters, it is")
+        print("    not power -- check `tlod sim` overruns and the serial bus.")
+
+    if args.json:
+        import json
+        Path(args.json).write_text(json.dumps(samples, indent=2))
+        print(f"\n  wrote {args.json}")
+    return 1 if (sagging or faults) else 0
+
+
 def cmd_config(args) -> int:
     cfg = Config.load(args.config)
     cfg.save(args.output)
@@ -1201,6 +1352,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--amplitude", type=float, default=0.2)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_first_light)
+
+    s = sub.add_parser("power", help="measure current draw and rail sag; diagnoses brownout")
+    s.add_argument("--amplitude", type=float, default=0.4,
+                   help="radians each joint travels, per move")
+    s.add_argument("--duration", type=float, default=0.8,
+                   help="seconds per move; shorter means higher acceleration")
+    s.add_argument("--json", default=None, help="write the raw samples here")
+    s.set_defaults(func=cmd_power)
 
     s = sub.add_parser("config", help="write the effective config to a file")
     s.add_argument("-o", "--output", default="configs/effective.yaml")

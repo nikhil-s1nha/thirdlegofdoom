@@ -4,7 +4,7 @@ arm:
   baudrate: 1000000
   calibration: ''
   lerobot_id: ''
-  goal_acceleration: 60
+  servo_accel: 9.2
   torque_limit: 800
   sim_max_speed: 3.5
   sim_accel: 25.0
@@ -12,6 +12,8 @@ arm:
 safety:
   max_speed: 2.0
   strike_speed: 5.0
+  max_accel: 8.0
+  max_jerk: 80.0
   joint_margin: 0.05
   table_z: 0.0
   min_height: 0.015
@@ -19,6 +21,12 @@ safety:
   min_radius: 0.08
   max_height: 0.45
   command_timeout: 0.5
+  max_tick_dt: 0.05
+power:
+  governor: false
+  supply_current: 5.0
+  headroom: 0.75
+  min_voltage: 10.5
 camera:
   source: mock
   index: 0
