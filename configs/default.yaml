@@ -32,15 +32,15 @@ camera:
   exposure: null
   intrinsics: ''
   extrinsics: ''
-  hfov_deg: 70.0
+  hfov_deg: 145.0
   position:
-  - 0.15
-  - -0.45
-  - 0.55
+  - 0.0
+  - -0.3048
+  - 0.127
   look_at:
-  - 0.22
+  - 0.3556
   - 0.0
-  - 0.0
+  - 0.127
 vision:
   detector: mediapipe
   model_path: models/hand_landmarker.task
