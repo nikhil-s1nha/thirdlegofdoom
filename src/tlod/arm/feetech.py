@@ -234,14 +234,15 @@ class FeetechArm(ArmBackend):
     def read(self, retries: int = 5) -> JointState:
         self._require()
         stamp = time.perf_counter()
-        # Half-duplex bus: an occasional missed status packet right after a
-        # burst of writes is normal noise, not a fault worth crashing the
-        # caller over -- probe/first-light/pose() would otherwise die on
-        # the first transient glitch instead of the actual hardware issue
-        # they exist to find. Backoff grows with attempt count in case the
-        # servos are still finishing a large motion (current draw, mid-move
-        # busy state) rather than a one-instant glitch.
+        # Half-duplex bus: a burst of writes (e.g. the interpolated steps of
+        # a goto) can leave stale/echoed bytes sitting in the input buffer.
+        # A sync read issued right after picks those up first and its
+        # packet parser desyncs -- deterministically, not as random noise,
+        # which is why waiting longer between retries alone never helped.
+        # Flushing before each attempt discards that leftover backlog so
+        # the read starts clean.
         for attempt in range(retries + 1):
+            self._port_handler.clearPort()
             result = self._sync_read.txRxPacket()
             if result == 0:
                 break
