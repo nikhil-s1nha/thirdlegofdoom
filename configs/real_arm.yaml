@@ -1,0 +1,4 @@
+arm:
+  backend: feetech
+  port: /dev/ttyACM0  # confirm with `tlod ports` on the control board, edit if different
+  calibration: calib/arm1.json
