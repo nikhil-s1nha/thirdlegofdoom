@@ -1,11 +1,19 @@
-"""Return the arm to HOME one joint at a time.
+"""Return the arm to HOME one joint at a time, in small discrete steps.
 
 `tlod move --home` drives all 5 joints together, which briefly asks every
 servo for current at once -- fine on the rated 12V 5A supply, but enough
 to collapse an undersized one (measured dropping to ~3V under a full-arm
 move on this rig). Moving one joint at a time keeps peak draw down to
-whatever a single servo needs, with a short pause between joints so the
-rail can recover before the next one loads it.
+whatever a single servo needs.
+
+`ArmController.goto_joints()` (what `move`/`first-light`/this script all
+use) hardcodes its rate cap to `strike_speed` -- `safety.max_speed` in
+config has no effect on it. So instead of one continuous goto per joint
+(which for a ~2 rad swing is still a fast, current-hungry motion), each
+joint's total delta is broken into small waypoints with a real dead-stop
+pause between each: motion, full stop, motion, full stop. The stop is
+the point -- it lets the rail recover between chunks, not just ramp
+slower through one continuous move.
 
 Order: lightest/no-gravity joints first, shoulder_lift (the one actually
 lifting the arm's weight) last, so if the supply is going to give out,
@@ -40,8 +48,13 @@ SEQUENCE = [4, 3, 0, 2, 1]  # wrist_roll, wrist_flex, shoulder_pan, elbow_flex, 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("-c", "--config", default=None, help="YAML config path")
-    p.add_argument("--duration", type=float, default=1.2, help="seconds per joint")
-    p.add_argument("--settle", type=float, default=0.5, help="pause between joints, seconds")
+    p.add_argument("--steps", type=int, default=8, help="waypoints per joint")
+    p.add_argument("--step-duration", type=float, default=0.4, dest="step_duration",
+                   help="seconds of motion per waypoint")
+    p.add_argument("--step-settle", type=float, default=0.4, dest="step_settle",
+                   help="dead-stop pause between waypoints, seconds -- this is what "
+                        "lets the rail recover, not the motion speed itself")
+    p.add_argument("--settle", type=float, default=0.8, help="pause between joints, seconds")
     args = p.parse_args()
 
     cfg = Config.load(args.config)
@@ -59,13 +72,17 @@ def main() -> int:
     try:
         for i in SEQUENCE:
             name = JOINT_NAMES[i]
-            target = controller.commanded[:5].copy()
-            before = target[i]
-            target[i] = model.HOME[i]
-            delta = target[i] - before
-            print(f"  {name:<14} {before:+.3f} -> {target[i]:+.3f} rad "
-                  f"(delta {delta:+.3f}) ...", end="", flush=True)
-            controller.goto_joints(target, duration=args.duration)
+            base = controller.commanded[:5].copy()
+            before = base[i]
+            after = model.HOME[i]
+            print(f"  {name:<14} {before:+.3f} -> {after:+.3f} rad "
+                  f"({args.steps} steps) ", end="", flush=True)
+            for step in range(1, args.steps + 1):
+                waypoint = base.copy()
+                waypoint[i] = before + (after - before) * (step / args.steps)
+                controller.goto_joints(waypoint, duration=args.step_duration)
+                print(".", end="", flush=True)
+                time.sleep(args.step_settle)
             try:
                 measured = controller.state().q[i]
                 print(f"  measured {measured:+.3f}")
