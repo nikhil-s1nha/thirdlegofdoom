@@ -2,3 +2,11 @@ arm:
   backend: feetech
   port: /dev/ttyACM0  # confirm with `tlod ports` on the control board, edit if different
   calibration: calib/arm1.json
+  # Undersized 12V 2A supply (kit calls for 5A) is likely browning out
+  # under real load -- slow everything down to cut peak current until a
+  # proper supply is in hand. goal_acceleration: 0=instant/harsh servo
+  # ramp, 254=very smooth; smoother ramp = lower current spike on motion
+  # start. Revert both once the supply is fixed.
+  goal_acceleration: 200
+safety:
+  max_speed: 0.5      # rad/s, software-side rate cap -- was 2.0
