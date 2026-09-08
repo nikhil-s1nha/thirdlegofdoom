@@ -1134,8 +1134,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="run without a clock offset (freshness checks become meaningless)")
     s.add_argument("--serial-port", default="", dest="serial_port",
                    help="receive perception over this UART device instead of UDP "
-                        "(e.g. /dev/ttyAMA0). Learning/testing link, mutually "
-                        "exclusive with --vision-host/--port")
+                        "(e.g. /dev/ttyAMA0). Learning/testing link -- replaces "
+                        "--port for the data path only. Clock sync is a separate "
+                        "UDP exchange (nothing measures an offset over serial), so "
+                        "still pass --vision-host alongside this if you want a real "
+                        "shutter->servo latency number instead of 'clock NOT SYNCED'")
     s.add_argument("--baudrate", type=int, default=115200)
     s.add_argument("--telemetry-to", default="", dest="telemetry_to",
                    help="stream this arm's joint state to host(s) (comma separated) "
