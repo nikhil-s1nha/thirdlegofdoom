@@ -23,6 +23,8 @@ import numpy as np
 
 from tlod.arm import model
 from tlod.arm.backend import ArmBackend
+from tlod.arm.power import PowerGovernor
+from tlod.arm.profile import MotionProfile, ProfileLimits
 from tlod.types import NUM_JOINTS, JointState, Pose
 
 log = logging.getLogger(__name__)
@@ -45,8 +47,22 @@ class SafetyLimits:
     min_radius: float = 0.08          # do not fold back into the base
     max_height: float = 0.45
 
+    # Bounds on how fast the command may change, not just how fast it may
+    # move. See tlod.arm.profile: acceleration is what sets motor current,
+    # so this is the limit that decides whether the supply copes.
+    max_accel: float = 8.0            # rad/s^2
+    max_jerk: float = 80.0            # rad/s^3
+
     # Watchdog: if nobody sends a command for this long, hold position.
     command_timeout: float = 0.5
+
+    # A stalled control thread must not be allowed to authorise a large
+    # step. Every rate limit here is expressed per tick as `limit * dt`,
+    # so a tick that took 200 ms instead of 10 ms permits twenty times the
+    # motion -- which is exactly the lurch the limits exist to prevent, and
+    # it fires precisely when something has already gone wrong. Clamping dt
+    # makes a late tick move less than it wanted rather than more.
+    max_tick_dt: float = 0.05
 
     def clamp_pose(self, p: Pose) -> tuple[Pose, list[str]]:
         """Project a requested pose into the allowed workspace.
@@ -87,6 +103,8 @@ class ControllerStats:
     ik_failures: int = 0
     guard_hits: int = 0
     last_ik_ms: float = 0.0
+    peak_speed: float = 0.0           # rad/s, largest commanded joint speed
+    peak_accel: float = 0.0           # rad/s^2, and the acceleration with it
     last_violations: list[str] = field(default_factory=list)
 
 
@@ -104,8 +122,13 @@ class ArmController:
         backend: ArmBackend,
         limits: SafetyLimits | None = None,
         control_hz: float = 100.0,
+        governor: PowerGovernor | None = None,
     ) -> None:
         self.backend = backend
+        # Off by default: the simulator has no power supply to overload,
+        # and a governor silently slowing a simulated arm would make every
+        # timing conclusion drawn from it wrong in a way nothing reports.
+        self.governor = governor
         self.limits = limits or SafetyLimits()
         self.control_hz = control_hz
         self.stats = ControllerStats()
@@ -113,6 +136,32 @@ class ArmController:
         self._estop = False
         self._lock = threading.Lock()
         self._last_command_time = 0.0
+        self.profile = MotionProfile(np.zeros(NUM_JOINTS), self.profile_limits())
+        # Time-scaling applied on top of every limit, in (0, 1]. The power
+        # governor writes it; everything else just obeys it. Kept separate
+        # from the limits themselves so that derating is visible and
+        # reversible rather than quietly editing the configured bounds.
+        self._derate = 1.0
+
+    def profile_limits(self, max_speed: float | None = None) -> ProfileLimits:
+        return ProfileLimits(
+            max_speed=self.limits.max_speed if max_speed is None else max_speed,
+            max_accel=self.limits.max_accel,
+            max_jerk=self.limits.max_jerk,
+        )
+
+    @property
+    def derate(self) -> float:
+        return self._derate
+
+    def set_derate(self, factor: float) -> None:
+        """Scale every kinematic limit by `factor` in (0, 1].
+
+        Time-scaling, so acceleration falls as the square and the current
+        that goes with it falls roughly as fast. This is the knob the
+        brownout governor turns.
+        """
+        self._derate = float(np.clip(factor, 0.05, 1.0))
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -121,6 +170,7 @@ class ArmController:
         with self._lock:
             state = self.backend.read()
             self._command = state.q.copy()
+            self.profile.reset(state.q)
         self._last_command_time = time.perf_counter()
 
     def stop(self, park: bool = True) -> None:
@@ -144,6 +194,10 @@ class ArmController:
             state = self.backend.read()
             self._estop = True
             self._command = state.q.copy()
+            # Discard the profile's velocity and acceleration too. Freezing
+            # only the position would leave the shaper mid-motion, and
+            # releasing the stop would resume the swing that caused it.
+            self.profile.reset(state.q)
             self.backend.write(state.q)
         log.warning("E-STOP engaged at q=%s", np.round(state.q, 3))
 
@@ -151,6 +205,7 @@ class ArmController:
         with self._lock:
             state = self.backend.read()
             self._command = state.q.copy()
+            self.profile.reset(state.q)
             self._estop = False
         log.info("e-stop released")
 
@@ -166,6 +221,18 @@ class ArmController:
         with self._lock:
             return self.backend.read()
 
+    def diagnostics(self) -> dict[str, object]:
+        """Backend health, read under the bus lock.
+
+        Same reason as `state()`: on real hardware this is two dozen
+        round trips on the serial port the control loop is also writing
+        to, and two threads interleaving raw transactions corrupt each
+        other. Callers should go through here rather than reaching for
+        `controller.backend.diagnostics()`.
+        """
+        with self._lock:
+            return self.backend.diagnostics()
+
     def pose(self) -> Pose:
         with self._lock:
             q = self.backend.read().q[:5]
@@ -178,9 +245,22 @@ class ArmController:
 
     # -- low level ---------------------------------------------------------
     def _write(self, q: np.ndarray, max_speed: float | None = None, dt: float | None = None) -> None:
-        """Rate-limit and dispatch a joint command."""
-        max_speed = self.limits.max_speed if max_speed is None else max_speed
+        """Shape and dispatch a joint command.
+
+        The requested configuration is a *target*, not the value written to
+        the servos. It goes through the motion profile, which bounds the
+        velocity, acceleration and jerk of the command stream and keeps the
+        joints synchronised. Callers therefore get the pose they asked for
+        only as fast as the arm and its power supply can actually deliver
+        it, which is the correct failure mode: a late arrival rather than a
+        lurch and a brownout.
+        """
         dt = (1.0 / self.control_hz) if dt is None else dt
+        dt = min(dt, self.limits.max_tick_dt)
+        requested = self.profile_limits(max_speed)
+        if self.governor is not None:
+            self._derate = self.governor.update(self.profile.q, requested, dt)
+        limits = requested.scaled(self._derate)
 
         with self._lock:
             # Checked inside the lock. estop() runs on whichever thread
@@ -190,19 +270,36 @@ class ArmController:
             # reaches the servos.
             if self._estop:
                 return
-            prev = self._command
-            step_cap = max_speed * dt
-            delta = np.clip(np.asarray(q, float) - prev, -step_cap, step_cap)
-            cmd = prev + delta
+            # Clamp the target, not the profiled output. Clipping
+            # afterwards would leave the profile integrating toward a
+            # configuration it is never allowed to reach, so its internal
+            # velocity would wind up against the limit and be carried into
+            # the next move as a lurch away from it.
             lo = np.concatenate([model.JOINT_LIMITS[:, 0] + self.limits.joint_margin,
                                  [model.GRIPPER_LIMITS[0]]])
             hi = np.concatenate([model.JOINT_LIMITS[:, 1] - self.limits.joint_margin,
                                  [model.GRIPPER_LIMITS[1]]])
-            cmd = np.clip(cmd, lo, hi)
+            target = np.clip(np.asarray(q, float), lo, hi)
+            cmd = self.profile.step(target, dt, limits)
             self._command = cmd
+            self.stats.peak_speed = max(self.stats.peak_speed, self.profile.speed)
+            self.stats.peak_accel = max(self.stats.peak_accel, self.profile.accel)
             self.backend.write(cmd)
         self._last_command_time = time.perf_counter()
         self.stats.commands += 1
+
+    def settled(self, dwell: float = 0.03) -> bool:
+        """True once the commanded setpoint has held still for `dwell`.
+
+        The dwell is not padding. The servo trails its goal by its own
+        latency and slew rate, so the instant the command stops the arm is
+        still arriving; returning "done" then means a caller that measures
+        the tool position finds it several millimetres short, and a
+        sequence of motions each starts from somewhere its predecessor did
+        not intend. One servo time constant of quiet is what makes
+        "finished" mean the arm is actually there.
+        """
+        return self.profile.rest_time >= dwell
 
     # -- pose control ------------------------------------------------------
     def solve(self, target: Pose, *, position_only: bool = True, seed: np.ndarray | None = None):
@@ -249,8 +346,18 @@ class ArmController:
         return result.ok
 
     # -- blocking moves ----------------------------------------------------
-    def goto_joints(self, q_target: np.ndarray, duration: float = 1.5) -> None:
-        """Interpolate to a joint configuration over `duration` seconds."""
+    def goto_joints(self, q_target: np.ndarray, duration: float = 1.5,
+                    settle_timeout: float = 2.0) -> None:
+        """Interpolate to a joint configuration over `duration` seconds.
+
+        `duration` shapes the plan; the motion profile underneath may still
+        be catching up when the plan ends, because it -- not the caller --
+        has the last word on how fast the arm may accelerate. So the plan is
+        followed by however long it takes the profile to converge. Without
+        that, a blocking move would return with the arm still travelling,
+        and every caller that assumed "goto_joints returned, so we are
+        there" would be wrong by a few centimetres.
+        """
         q_target = np.asarray(q_target, float)
         if q_target.shape[0] == 5:
             q_target = np.concatenate([q_target, [self.commanded[5]]])
@@ -262,7 +369,9 @@ class ArmController:
             s = minimum_jerk(elapsed / duration) if duration > 0 else 1.0
             self._write(q_start + (q_target - q_start) * s,
                         max_speed=self.limits.strike_speed, dt=period)
-            if elapsed >= duration:
+            if self._estop:
+                return
+            if elapsed >= duration and (self.settled() or elapsed >= duration + settle_timeout):
                 return
             time.sleep(max(0.0, period - (time.perf_counter() - t0 - elapsed)))
 
