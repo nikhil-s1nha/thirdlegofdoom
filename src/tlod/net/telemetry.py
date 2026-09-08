@@ -180,7 +180,16 @@ class ArmTelemetryPublisher:
         period = 1.0 / max(self.rate_hz, 0.1)
         while self._running:
             t0 = time.perf_counter()
-            self._sample_and_send()
+            try:
+                self._sample_and_send()
+            except Exception as e:
+                # A transient bus hiccup on real hardware (e.g. a
+                # GroupSyncRead colliding with the control loop's own
+                # backend.write()) must not permanently end this thread --
+                # this is a HUD feed, not something safety-critical, so
+                # skip the frame and keep going rather than going silent
+                # for the rest of the run.
+                log.debug("telemetry sample failed: %s", e)
             time.sleep(max(0.0, period - (time.perf_counter() - t0)))
 
     def _sample_and_send(self) -> None:

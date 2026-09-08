@@ -118,8 +118,8 @@ class ArmController:
     def start(self) -> None:
         if not self.backend.connected:
             self.backend.connect()
-        state = self.backend.read()
         with self._lock:
+            state = self.backend.read()
             self._command = state.q.copy()
         self._last_command_time = time.perf_counter()
 
@@ -140,26 +140,36 @@ class ArmController:
         Deliberately holds torque rather than cutting it: a limp arm falls,
         and it may be falling onto the hand that triggered the stop.
         """
-        state = self.backend.read()
         with self._lock:
+            state = self.backend.read()
             self._estop = True
             self._command = state.q.copy()
-        self.backend.write(state.q)
+            self.backend.write(state.q)
         log.warning("E-STOP engaged at q=%s", np.round(state.q, 3))
 
     def release_estop(self) -> None:
-        state = self.backend.read()
         with self._lock:
+            state = self.backend.read()
             self._command = state.q.copy()
             self._estop = False
         log.info("e-stop released")
 
     # -- state -------------------------------------------------------------
     def state(self) -> JointState:
-        return self.backend.read()
+        # Locked: on real hardware this shares the servo bus with _write()'s
+        # backend.write() from the control loop's own thread (and, for
+        # anything polling state() off-thread, like ArmTelemetryPublisher).
+        # Two threads doing raw serial I/O on the same port at once can
+        # corrupt a transaction -- harmless on MockArm, but on FeetechArm it
+        # can throw or return garbage, which is exactly the kind of failure
+        # that should never touch the servos.
+        with self._lock:
+            return self.backend.read()
 
     def pose(self) -> Pose:
-        return model.tool_pose(self.backend.read().q[:5])
+        with self._lock:
+            q = self.backend.read().q[:5]
+        return model.tool_pose(q)
 
     @property
     def commanded(self) -> np.ndarray:
@@ -190,7 +200,7 @@ class ArmController:
                                  [model.GRIPPER_LIMITS[1]]])
             cmd = np.clip(cmd, lo, hi)
             self._command = cmd
-        self.backend.write(cmd)
+            self.backend.write(cmd)
         self._last_command_time = time.perf_counter()
         self.stats.commands += 1
 
