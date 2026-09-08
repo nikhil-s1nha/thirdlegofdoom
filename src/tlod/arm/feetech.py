@@ -191,6 +191,12 @@ class FeetechArm(ArmBackend):
             self._packet_handler.write1ByteTxRx(self._port_handler, mid, ADDR_GOAL_ACC, self.goal_acceleration)
             self._packet_handler.write2ByteTxRx(self._port_handler, mid, ADDR_GOAL_SPEED, self.goal_speed)
             self._packet_handler.write2ByteTxRx(self._port_handler, mid, ADDR_TORQUE_LIMIT, self.torque_limit)
+        # disconnect() always leaves torque OFF (see below) so a limp arm is
+        # never a surprise between runs. connect() must be the symmetric
+        # counterpart and always leave it ON, or a command session started
+        # right after e.g. `tlod probe` silently drives goal positions into
+        # servos that never move.
+        self.set_torque(True)
 
     def disconnect(self) -> None:
         if self._port_handler is not None:
