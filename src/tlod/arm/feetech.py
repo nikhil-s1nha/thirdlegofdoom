@@ -231,12 +231,21 @@ class FeetechArm(ArmBackend):
             raise RuntimeError("arm not connected; call connect() first")
 
     # -- io ----------------------------------------------------------------
-    def read(self) -> JointState:
+    def read(self, retries: int = 2) -> JointState:
         self._require()
         stamp = time.perf_counter()
-        result = self._sync_read.txRxPacket()
-        if result != 0:
-            raise OSError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
+        # Half-duplex bus: an occasional missed status packet right after a
+        # burst of writes is normal noise, not a fault worth crashing the
+        # caller over -- probe/first-light/pose() would otherwise die on
+        # the first transient glitch instead of the actual hardware issue
+        # they exist to find.
+        for attempt in range(retries + 1):
+            result = self._sync_read.txRxPacket()
+            if result == 0:
+                break
+            if attempt == retries:
+                raise OSError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
+            time.sleep(0.002)
 
         counts = np.empty(NUM_JOINTS)
         speeds = np.empty(NUM_JOINTS)
