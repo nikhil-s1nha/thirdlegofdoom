@@ -1,4 +1,4 @@
-# Third Leg of Doom
+# 6 DOF Hand Slap
 
 Arm control and vision for an SO-ARM101 (SO-101). A fixed camera watches
 the table; the arm reaches for what it sees.
