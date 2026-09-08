@@ -7,6 +7,6 @@ arm:
   # proper supply is in hand. goal_acceleration: 0=instant/harsh servo
   # ramp, 254=very smooth; smoother ramp = lower current spike on motion
   # start. Revert both once the supply is fixed.
-  goal_acceleration: 200
+  goal_acceleration: 254
 safety:
   max_speed: 0.5      # rad/s, software-side rate cap -- was 2.0
