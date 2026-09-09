@@ -445,6 +445,15 @@ def cmd_move(args) -> int:
                 controller.stop(park=False)
                 return 1
 
+        if args.settle:
+            # Hold here before reading back. On real hardware the servo
+            # bus needs a moment to recover after a burst of writes, and
+            # reading immediately reports either a comms error or a
+            # position the arm hasn't actually finished settling into --
+            # either way, a "wrong" error number. holding (not just
+            # sleeping) keeps torque actively on the target through the
+            # pause instead of coasting on whatever the last write was.
+            controller.goto_joints(controller.commanded[:5], duration=args.settle)
         end = controller.pose()
         print(f"  end     ({end.x:+.4f}, {end.y:+.4f}, {end.z:+.4f}) m")
         if target is not None:
@@ -1097,6 +1106,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--joints", type=float, nargs=5, metavar=("J1", "J2", "J3", "J4", "J5"))
     s.add_argument("--home", action="store_true", help="go to the home configuration")
     s.add_argument("--duration", type=float, default=1.5)
+    s.add_argument("--settle", type=float, default=0.3,
+                   help="pause after reaching target, holding position, before reading "
+                        "it back -- on real hardware the servo bus needs a moment after "
+                        "a burst of writes; reading too soon reports a stale/wrong error")
     s.add_argument("--hold", type=float, default=0.0, help="stay there for N seconds")
     s.add_argument("--park", action="store_true", help="return home afterwards")
     s.add_argument("--real", action="store_true", help="drive real hardware")
