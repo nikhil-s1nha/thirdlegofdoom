@@ -27,7 +27,7 @@ import sys
 
 import cv2
 import numpy as np
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, "src")
 from tlod.vision.calibration import Intrinsics  # noqa: E402
@@ -110,14 +110,37 @@ def annotate():
     return np.hstack([shown, fixed])
 
 
+
+PAGE = (b"<!doctype html><title>calib</title>"
+        b"<body style='margin:0;background:#111'>"
+        b"<img src='/stream' style='width:100%'></body>")
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        # One path streams; everything else answers immediately. A browser
+        # asks for /favicon.ico too, and on a server where every path
+        # blocks forever that request is enough to hang the page.
+        if self.path.startswith("/stream"):
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.end_headers()
+            self.stream()
+            return
+        if self.path in ("/", "/index.html"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(PAGE)))
+            self.end_headers()
+            self.wfile.write(PAGE)
+            return
+        self.send_response(404)
         self.end_headers()
+
+    def stream(self):
         try:
             while True:
                 pair = annotate()
@@ -132,6 +155,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 try:
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 except KeyboardInterrupt:
     cap.release()
