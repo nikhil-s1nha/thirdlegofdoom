@@ -77,6 +77,88 @@ def test_speed_limit_is_enforced(controller):
     assert step <= 1.0 * 0.01 + 1e-9, f"stepped {step} rad in one tick"
 
 
+def test_acceleration_limit_is_enforced(controller):
+    """The limit that decides motor current, and so whether the supply
+    copes. A velocity cap alone permits a standing start to full speed in
+    one tick, which is what the old rate clamp did."""
+    far = np.concatenate([model.HOME + 1.0, [0.0]])
+    for _ in range(50):
+        controller._write(far, dt=0.01)
+    assert controller.profile.accel <= controller.limits.max_accel + 1e-9
+    assert controller.stats.peak_accel <= controller.limits.max_accel + 1e-9
+
+
+def test_a_late_tick_cannot_authorise_a_bigger_step(controller):
+    """Every limit is applied as `limit * dt`, so an unbounded dt is an
+    unbounded step -- and dt blows up exactly when the control thread has
+    already stalled, which is the worst moment to permit a lurch."""
+    far = np.concatenate([model.HOME + 2.0, [0.0]])
+    before = controller.commanded.copy()
+    controller._write(far, dt=5.0)
+    step = np.abs(controller.commanded - before).max()
+    ceiling = controller.limits.max_speed * controller.limits.max_tick_dt
+    assert step <= ceiling + 1e-9, f"a 5 s tick moved {step:.4f} rad"
+
+
+def test_derate_scales_the_limits(controller):
+    """Time-scaling: velocity by s, acceleration by s squared."""
+    controller.set_derate(0.5)
+    far = np.concatenate([model.HOME + 1.0, [0.0]])
+    for _ in range(200):
+        controller._write(far, dt=0.01)
+    assert controller.profile.speed <= 0.5 * controller.limits.max_speed + 1e-9
+    assert controller.profile.accel <= 0.25 * controller.limits.max_accel + 1e-9
+
+
+def test_governor_slows_the_arm_on_a_small_supply():
+    """The whole point: an arm that is too heavy for its brick should move
+    slowly rather than brown out."""
+    from tlod.arm.power import PowerBudget, PowerGovernor, PowerModel
+
+    def peak_speed(supply):
+        governor = (None if supply is None else
+                    PowerGovernor(PowerModel(budget=PowerBudget(supply_current=supply))))
+        c = ArmController(MockArm(q0=np.concatenate([model.HOME, [0.0]])),
+                          control_hz=100.0, governor=governor)
+        c.start()
+        far = np.concatenate([model.HOME + 1.0, [0.0]])
+        worst = 0.0
+        for _ in range(400):
+            c._write(far, dt=0.01)
+            worst = max(worst, c.profile.speed)
+        c.backend.disconnect()
+        return worst
+
+    ungoverned = peak_speed(None)
+    starved = peak_speed(2.0)
+    ample = peak_speed(10.0)
+    assert starved < 0.7 * ungoverned, "a 2 A supply should force a slowdown"
+    assert ample == pytest.approx(ungoverned, rel=0.05), "10 A needs no slowdown"
+
+
+def test_estop_clears_the_profile_velocity(controller):
+    """Releasing an e-stop must not resume the swing that triggered it."""
+    far = np.concatenate([model.HOME + 1.0, [0.0]])
+    for _ in range(40):
+        controller._write(far, dt=0.01)
+    assert controller.profile.speed > 0.1
+    controller.estop()
+    assert controller.profile.speed == 0.0
+    controller.release_estop()
+    assert controller.profile.speed == 0.0
+
+
+def test_settled_waits_for_the_arm_not_just_the_command(controller):
+    """`settled` gates every blocking move, so it has to mean the servo
+    got there, not that the setpoint stopped changing."""
+    target = np.concatenate([model.HOME + 0.05, [0.0]])
+    assert not controller.settled()
+    for _ in range(400):
+        controller._write(target, dt=0.005)
+    assert controller.settled()
+    assert np.allclose(controller.commanded, target, atol=1e-6)
+
+
 def test_estop_freezes_and_blocks(controller):
     controller.estop()
     frozen = controller.commanded.copy()

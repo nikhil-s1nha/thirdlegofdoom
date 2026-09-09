@@ -59,6 +59,16 @@ class Motion(abc.ABC):
 
     name: str = "motion"
 
+    # How long to keep ticking after a motion's plan has run out, waiting
+    # for the controller's motion profile to catch up. The plan says where
+    # the arm should be; the profile decides how fast it is allowed to get
+    # there, and under a tight acceleration limit -- a derated one in
+    # particular -- it can still be travelling when the plan ends. Finishing
+    # on plan time alone would hand the next motion an arm that is still
+    # moving, and a sequence of those accumulates error until a hover is
+    # nowhere near where the strike expects to start from.
+    settle_timeout: float = 0.75
+
     def __init__(self) -> None:
         self.started_at: float = 0.0
         self.finished: bool = False
@@ -77,6 +87,17 @@ class Motion(abc.ABC):
     @property
     def elapsed(self) -> float:
         return time.perf_counter() - self.started_at
+
+    def _complete(self, controller: ArmController, plan_duration: float) -> bool:
+        """Plan has run out and the arm has stopped -- or waited long enough.
+
+        The timeout matters: a target the profile can never converge on,
+        because a joint limit clamps it short, would otherwise never
+        report done and would wedge the state machine driving it.
+        """
+        if self.elapsed < plan_duration:
+            return False
+        return controller.settled() or self.elapsed >= plan_duration + self.settle_timeout
 
     def abort(self) -> None:
         self.finished = True
@@ -107,7 +128,7 @@ class GoTo(Motion):
         s = minimum_jerk(self.elapsed / self.duration)
         controller._write(self._q0 + (self.q_target - self._q0) * s,
                           max_speed=self.speed or controller.limits.strike_speed, dt=dt)
-        if self.elapsed >= self.duration:
+        if self._complete(controller, self.duration):
             self.finished = True
         return self.finished
 
@@ -224,7 +245,7 @@ class Strike(Motion):
         s = minimum_jerk(self.elapsed / self.duration)
         controller._write(self._q0 + (self._q1 - self._q0) * s,
                           max_speed=self.limits.strike_speed, dt=dt)
-        if self.elapsed >= self.duration:
+        if self._complete(controller, self.duration):
             self.finished = True
             self._restore(controller)
         return self.finished
@@ -297,7 +318,7 @@ class Feint(Motion):
             s = 1.0 - minimum_jerk((e - self.out) / self.back)
         controller._write(self._q0 + (self._q1 - self._q0) * s,
                           max_speed=self.limits.strike_speed, dt=dt)
-        if e >= total:
+        if self._complete(controller, total):
             self.finished = True
         return self.finished
 

@@ -25,7 +25,15 @@ class ArmConfig:
     baudrate: int = 1_000_000
     calibration: str = ""                 # path; empty = identity mapping
     lerobot_id: str = ""                  # read lerobot-calibrate output instead
-    goal_acceleration: int = 60
+    # Acceleration of the servo's own internal ramp, rad/s^2. Given in SI
+    # rather than as the raw Goal_Acceleration register value, because the
+    # register is an acceleration magnitude -- bigger is harsher, and 0
+    # disables the ramp entirely -- and is very easy to read as a
+    # smoothness dial that works the other way round. Stating the physical
+    # quantity makes the direction unmistakable. Roughly: 3 rad/s^2 is
+    # gentle, 9 is the servo default, 39 is the harshest the register can
+    # express. See tlod.arm.feetech.acc_counts.
+    servo_accel: float = 9.2
     torque_limit: int = 800
     # Simulator dynamics. Estimates from the STS3215 datasheet until M6
     # measures them; see docs/ROADMAP.md.
@@ -38,6 +46,11 @@ class ArmConfig:
 class SafetyConfig:
     max_speed: float = 2.0
     strike_speed: float = 5.0
+    # Bounds on how the command may *change*, not just how fast it moves.
+    # max_accel sets motor torque and so supply current; max_jerk stops
+    # that current arriving as a step. See tlod.arm.profile.
+    max_accel: float = 8.0
+    max_jerk: float = 80.0
     joint_margin: float = 0.05
     table_z: float = 0.0
     min_height: float = 0.015
@@ -45,6 +58,24 @@ class SafetyConfig:
     min_radius: float = 0.08
     max_height: float = 0.45
     command_timeout: float = 0.5
+    max_tick_dt: float = 0.05
+
+
+@dataclass(slots=True)
+class PowerConfig:
+    """The supply, and whether to plan around it.
+
+    An SO-101 follower on the 12 V 2 A brick that ships with some kits is
+    over-committed the moment several joints turn at once; the kit's own
+    bill of materials asks for 5 A. Setting `supply_current` honestly lets
+    the governor slow the arm to fit instead of browning out. See
+    docs/power.md.
+    """
+
+    governor: bool = False            # off unless asked; sim has no supply
+    supply_current: float = 5.0       # A, what the brick is rated for
+    headroom: float = 0.75            # fraction of that to plan for
+    min_voltage: float = 10.5         # V, below this the rail is sagging
 
 
 @dataclass(slots=True)
@@ -61,10 +92,10 @@ class CameraConfig:
     exposure: float | None = None
     intrinsics: str = ""                  # .npz path; empty = approximate
     extrinsics: str = ""                  # .npz path; empty = synthetic pose
-    hfov_deg: float = 70.0
+    hfov_deg: float = 145.0
     # Where the camera sits, when no calibration file exists yet.
-    position: tuple[float, float, float] = (0.15, -0.45, 0.55)
-    look_at: tuple[float, float, float] = (0.22, 0.0, 0.0)
+    position: tuple[float, float, float] = (0.0, -0.3048, 0.127)
+    look_at: tuple[float, float, float] = (0.3556, 0.0, 0.127)
 
 
 @dataclass(slots=True)
@@ -95,6 +126,7 @@ class RuntimeConfig:
 class Config:
     arm: ArmConfig = field(default_factory=ArmConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    power: PowerConfig = field(default_factory=PowerConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -111,6 +143,7 @@ class Config:
         sections = {
             "arm": ArmConfig,
             "safety": SafetyConfig,
+            "power": PowerConfig,
             "camera": CameraConfig,
             "vision": VisionConfig,
             "runtime": RuntimeConfig,

@@ -20,6 +20,7 @@ import time
 
 from tlod.net.clock import ClockResponder
 from tlod.net.protocol import encode_perception
+from tlod.net.uart_link import encode_frame
 from tlod.runtime.loop import Timing
 from tlod.types import Perception
 
@@ -40,6 +41,8 @@ class VisionPublisher:
         targets: list[tuple[str, int]] | None = None,
         clock_port: int = DEFAULT_CLOCK_PORT,
         hand_suppression_radius: float = 0.07,
+        serial_port: str | None = None,
+        serial_baudrate: int = 115200,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -48,9 +51,15 @@ class VisionPublisher:
         self.object_detector = object_detector
         self.targets = targets or [("255.255.255.255", DEFAULT_PORT)]
         self.hand_suppression_radius = hand_suppression_radius
+        # UART is the learning/testing link (see docs/deployment.md); when
+        # set, every packet also goes out this serial port, framed, in
+        # addition to whatever UDP targets are configured.
+        self.serial_port = serial_port
+        self.serial_baudrate = serial_baudrate
 
         self.clock = ClockResponder(clock_port)
         self._sock: socket.socket | None = None
+        self._serial = None
         self._running = False
         self._threads: list[threading.Thread] = []
         self._seq = 0
@@ -65,6 +74,11 @@ class VisionPublisher:
     def start(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        if self.serial_port:
+            import serial
+
+            self._serial = serial.Serial(self.serial_port, self.serial_baudrate, timeout=0)
+            log.info("also publishing over UART: %s @ %d", self.serial_port, self.serial_baudrate)
         self.camera.start()
         self.clock.start()
         self._running = True
@@ -84,6 +98,9 @@ class VisionPublisher:
         self.detector.close()
         if self._sock:
             self._sock.close()
+        if self._serial:
+            self._serial.close()
+            self._serial = None
 
     def __enter__(self) -> VisionPublisher:
         self.start()
@@ -187,6 +204,11 @@ class VisionPublisher:
                 self._sock.sendto(data, target)
             except OSError as e:
                 log.debug("send to %s failed: %s", target, e)
+        if self._serial is not None:
+            try:
+                self._serial.write(encode_frame(data))
+            except OSError as e:
+                log.debug("uart write failed: %s", e)
         self.sent += 1
 
     def report(self) -> str:

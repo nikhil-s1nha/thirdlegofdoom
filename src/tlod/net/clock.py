@@ -16,8 +16,19 @@ The measurement is the NTP one, without the daemon:
     t1  they receive it and reply with t1  (their clock)
     t3  we receive the reply               (our clock)
 
-    offset = t1 - (t0 + t3) / 2
+    offset = (t0 + t3) / 2 - t1
     rtt    = t3 - t0
+
+`(t0 + t3) / 2` is our best estimate of what our own clock read at the
+moment they composed the reply, assuming the path is symmetric; `t1` is
+what their clock read at that same moment, in their own terms. The
+difference is exactly the correction that turns one of their timestamps
+into ours: `their_timestamp + offset == our_equivalent`. (It is easy to
+get this backwards -- `t1 - (t0+t3)/2` looks just as plausible until you
+work a concrete example: a responder whose clock reads consistently
+*larger* numbers needs that *subtracted* off to land on our clock, not
+added, so the correction has to carry the opposite sign from how far
+ahead their raw reading looks.)
 
 Assuming a symmetric path, offset is what to add to their timestamps to
 put them in our terms. The assumption fails when the path is congested,
@@ -86,7 +97,7 @@ def measure_offset(
             rtt = t3 - t0
             taken += 1
             if best is None or rtt < best[1]:
-                best = (t1 - (t0 + t3) / 2.0, rtt)
+                best = ((t0 + t3) / 2.0 - t1, rtt)
             time.sleep(gap)
     finally:
         sock.close()

@@ -1,0 +1,26 @@
+{
+  "shoulder_pan": {
+    "center": 2111.0,
+    "sign": 1.0
+  },
+  "shoulder_lift": {
+    "center": 1691.0,
+    "sign": 1.0
+  },
+  "elbow_flex": {
+    "center": 2460.0,
+    "sign": 1.0
+  },
+  "wrist_flex": {
+    "center": 1256.0,
+    "sign": 1.0
+  },
+  "wrist_roll": {
+    "center": 2839.0,
+    "sign": 1.0
+  },
+  "gripper": {
+    "center": 3267.0,
+    "sign": 1.0
+  }
+}
