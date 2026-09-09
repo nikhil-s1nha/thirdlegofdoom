@@ -153,6 +153,38 @@ def build_governor(cfg: Config):
     )))
 
 
+def build_strike_limits(cfg: Config):
+    """Strike bounds, tied to the configured arm rather than to defaults.
+
+    Two couplings that are only coincidences in the dataclass defaults:
+
+    A `Strike` drops the servo torque limit for the duration of the swing
+    so the arm yields on contact, then puts it back -- and "back" has to
+    mean the limit *this config* asked for. `StrikeLimits.normal_torque_limit`
+    defaults to 800 only because `arm.torque_limit` does; a config that
+    lowered one and not the other would have its first strike silently
+    restore the arm to a strength it was configured away from, for the
+    rest of the session.
+
+    And the game's own speeds go to `controller._write` as an explicit
+    `max_speed`, which is used verbatim -- `profile_limits` substitutes
+    `safety.max_speed` only when nothing was passed. So a StrikeLimits
+    faster than `safety.max_speed` does not get clamped by it; it
+    overrides it. That is the wrong direction for the one motion aimed at
+    a person, and it matters on a rig whose config was deliberately
+    slowed to keep the supply from browning out.
+    """
+    from tlod.arm.primitives import StrikeLimits
+
+    cap = cfg.safety.max_speed
+    defaults = StrikeLimits()
+    return StrikeLimits(
+        normal_torque_limit=cfg.arm.torque_limit,
+        strike_speed=min(defaults.strike_speed, cap),
+        retract_speed=min(defaults.retract_speed, cap),
+    )
+
+
 def build_detector(cfg: Config, scene=None):
     from tlod.vision.hands import MediaPipeHandDetector, NullHandDetector
     from tlod.vision.scene import SceneHandDetector
@@ -311,16 +343,76 @@ def cmd_touch(args) -> int:
     return 0
 
 
+def play_config(cfg: Config, camera: int, real: bool) -> Config:
+    """Config for a hand-slap run against a real hand.
+
+    Split out from `cmd_play` for the same reason `hybrid_config` was:
+    the one thing worth getting wrong here is whether `--real` reaches
+    the arm backend, and that is checkable without hardware. An arm that
+    was never asked to move is indistinguishable, from the outside, from
+    one that was asked and failed.
+    """
+    return cfg.with_overrides(
+        arm={"backend": "feetech" if real else "mock"},
+        camera={"source": "opencv", "index": camera},
+        vision={"detector": "mediapipe"},
+    )
+
+
 def cmd_play(args) -> int:
-    """Play hand slap. The robot slaps; you dodge."""
-    from tlod.game.contact import GeometricContactSensor, ProximityContactSensor
+    """Play hand slap. The robot slaps; you dodge.
+
+    Three tiers, and the contact sensor is what separates them. Whether
+    the slap landed is the question a camera cannot answer -- at the
+    moment of contact the arm is between an overhead camera and the
+    contact point -- so each tier answers it with the best instrument it
+    has: ground truth in simulation, tracked hand position in tier B, and
+    on hardware the servos' own torque feedback. See game/contact.py.
+    """
+    from tlod.game.contact import (
+        GeometricContactSensor,
+        ProximityContactSensor,
+        ServoLoadContactSensor,
+    )
     from tlod.game.handslap import HandSlapGame
     from tlod.game.opponent import DodgingHand
 
     cfg = Config.load(args.config)
-    if args.real_hand:
-        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
-                                 vision={"detector": "mediapipe"})
+    contact = None
+    if args.real:
+        cfg = play_config(cfg, args.camera, real=True)
+        if not cfg.camera.extrinsics:
+            raise SystemExit(
+                "  no extrinsics configured, so the camera has no idea where the\n"
+                "  arm is and every strike would be aimed through a guessed pose.\n"
+                "  That is tolerable for `tlod hybrid`, which only hovers. It is\n"
+                "  not tolerable here: this command aims at a hand.\n"
+                "  Run `tlod calibrate extrinsics` first.")
+
+        # The controller has to exist before the game does. The contact
+        # sensor reads the servos through it, and HandSlapGame takes its
+        # sensor at construction -- so this is app first, game second,
+        # the opposite order from the branches below.
+        app = build_app(cfg)
+        contact = ServoLoadContactSensor(app.controller.state,
+                                         threshold=args.contact_threshold)
+        game = HandSlapGame(args.difficulty, limits=build_strike_limits(cfg),
+                            contact=contact, seed=args.seed)
+        app.policy = game
+
+        print(f"tier C: real hand, REAL ARM. difficulty={args.difficulty}")
+        print(f"  contact from servo load, threshold {args.contact_threshold:.2f} "
+              f"of rated torque")
+        print("\n  THE ARM WILL MOVE, and it will strike at your hand.")
+        print(f"  It drops at most {game.limits.max_drop*100:.0f} cm at a torque limit of "
+              f"{game.limits.torque_limit}/1000, so it yields on contact.")
+        print("  Put one hand flat on the table and keep everything else clear --")
+        print("  face, other hand, cables. Ctrl-C stops it and parks the arm; with")
+        print("  --view, `e` is e-stop and space pauses.")
+        if not args.yes:
+            input("  press Enter when ready, Ctrl-C to abort... ")
+    elif args.real_hand:
+        cfg = play_config(cfg, args.camera, real=False)
         game = HandSlapGame(args.difficulty, contact=ProximityContactSensor(), seed=args.seed)
         app = build_app(cfg)
         app.policy = game
@@ -336,11 +428,34 @@ def cmd_play(args) -> int:
         print(f"tier A: simulated opponent (reaction {args.reaction*1000:.0f} ms), "
               f"difficulty={args.difficulty}")
 
-    _run_for(app, args.duration, view=args.view, projector=app.projector)
+    try:
+        _run_for(app, args.duration, view=args.view, projector=app.projector)
+    finally:
+        # Sensors may own a thread or a serial port (SerialContactSensor
+        # does). ServoLoadContactSensor owns neither, but closing through
+        # the interface is what keeps that an implementation detail
+        # rather than something every caller has to know.
+        game.contact.close()
+
     print(f"\n  final score: {game.score}  over {game.score.rounds} rounds")
     if game.score.rounds:
         print(f"  robot win rate: {game.score.robot/game.score.rounds:.0%}  "
               f"({game.strikes} strikes, {game.feints} feints)")
+    if contact is not None:
+        # The number to read on the first hardware session. The strike
+        # caps the servo torque limit, which caps how much load a servo
+        # can report, so the usable range is narrow and the 0.12 default
+        # is a guess. A peak well under the threshold means contacts were
+        # being missed; a peak far above it on rounds scored as dodges
+        # means it is firing on the strike's own acceleration.
+        print(f"\n  contact: peak load rise {contact.peak_rise:.3f} "
+              f"(threshold {contact.threshold:.3f})")
+        if contact.read_failures:
+            print(f"  {contact.read_failures} servo reads failed during strikes "
+                  f"(scored as dodges rather than e-stopping mid-swing)")
+        if game.strikes and contact.peak_rise < contact.threshold:
+            print("  nothing ever crossed the threshold. Either nothing was hit, or")
+            print(f"  --contact-threshold is too high; try just under {contact.peak_rise:.3f}.")
     return 0
 
 
@@ -407,7 +522,12 @@ def build_app(cfg: Config, render: bool = False):
         palm_width_m=cfg.vision.palm_width_m,
     )
     limits = build_limits(cfg)
-    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz)
+    # The governor is None unless power.governor is set, so this costs the
+    # simulated paths nothing. It matters for the paths that reach real
+    # servos through here -- `hybrid --real` and `play --real` -- which
+    # were the only entry points driving hardware without it.
+    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
+                               governor=build_governor(cfg))
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
     policy = policies.get(cfg.runtime.policy, IdlePolicy)()
 
@@ -1506,6 +1626,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--duration", type=float, default=60.0)
     s.add_argument("--reaction", type=float, default=0.22, help="simulated human reaction, s")
     s.add_argument("--real-hand", action="store_true", help="tier B: use the webcam")
+    s.add_argument("--real", action="store_true",
+                   help="tier C: real camera, real hand AND the real arm, on this "
+                        "machine. The arm will strike at your hand")
+    s.add_argument("--contact-threshold", type=float, default=0.12,
+                   dest="contact_threshold",
+                   help="--real only: rise in servo load, as a fraction of rated "
+                        "torque, that counts as a hit. The default is a guess; "
+                        "the run prints the peak it saw so you can set it")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--seed", type=int, default=None)
     s.add_argument("--view", action="store_true")
