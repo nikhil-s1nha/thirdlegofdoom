@@ -17,6 +17,13 @@ Human visual reaction is 200–250 ms *plus* hand travel. A robot reacting
 to what it saw is always late, and the servo alone eats most of the
 budget, so no optimisation fixes it.
 
+The servo line is the one that has since been measured on the real arm,
+and it holds: an 80 mm strike drop takes **0.23 s** at best and 0.27 s at
+an accuracy worth having, and a 150 mm move will not go below 0.48 s.
+That is with full motion limits on a supply with headroom to spare — it
+is the arm, not the budget. The rest of the table is still laptop
+measurement plus datasheet.
+
 ## The fix: initiate, don't respond
 
 Latency taxes whoever is responding. If the robot strikes and the human
@@ -82,7 +89,9 @@ Re-tune against real people; these are against the simulated opponent.
 
 ## Impact
 
-An 8 cm strike lands in ~210 ms at ~0.7 m/s. A casual human high-five is
+An 8 cm strike lands in ~210 ms at ~0.7 m/s — the real arm measures
+230 ms for that drop, so read the figures below as a shade optimistic
+rather than as a target to tune towards. A casual human high-five is
 1–3 m/s. Short strikes are better on both axes at once — faster to land
 and softer on impact — which gives the design rule: hover close, strike
 short.

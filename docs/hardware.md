@@ -88,14 +88,42 @@ and `GroupSyncRead`/`GroupSyncWrite` is one bus transaction per tick;
 `Calibration.from_lerobot()` reads files written by `lerobot-calibrate`,
 so the standard homing and range tooling still works.
 
+This matters for the install as well as the loop. The arm needs
+`pip install pyserial feetech-servo-sdk` and nothing else —
+`feetech-servo-sdk` is the `scservo_sdk` that `tlod.arm.feetech` imports.
+The project's `.[robot]` extra is `lerobot[feetech]`, which pulls torch
+and does not resolve on Python 3.13; install it only on a machine where
+you are running lerobot's calibration commands, which need not be the
+board wired to the arm. Point `arm.calibration` at the JSON afterwards.
+
 ## Camera
 
 Fixed mount, angled down over the table. Steeper is better — error from a
 wrong assumed hand height scales with the tangent of the viewing angle.
 
-Logitech C922 (720p60). The capture layer is source-agnostic, so a
-global-shutter module can be swapped in if motion blur turns out to
-matter.
+The one in use is an **Arducam B0589**, a wide-angle USB module.
+Advertised as 145° diagonal / 120° horizontal — but the mode USB
+bandwidth actually allows here is 640x480, and the **measured** horizontal
+field of view in that mode is **74°**. That is not a small discrepancy and
+it is not a defect: the advertised figure belongs to the sensor's full
+frame, and the mode you can afford is a crop of it.
+
+So `camera.hfov_deg` should hold the number you measured, not the number
+on the box. It only seeds the intrinsics solve and the no-calibration
+approximation, but seeding it 70° wrong is a bad start. `tlod calibrate
+intrinsics` prints the field of view it recovered next to the configured
+one; believe the recovered one. `configs/opi.yaml` carries 74.
+
+The lens is wide enough that the default pinhole distortion model cannot
+fit it — use `tlod calibrate intrinsics --fisheye`, which is an
+equidistant model. That fit came out at 0.165 px RMS.
+
+Mounted, the extrinsics put this camera 445 mm forward, 35 mm right and
+451 mm above the arm's base.
+
+The capture layer is source-agnostic, so a global-shutter module can be
+swapped in if motion blur turns out to matter. `/dev/video*` indices move
+between boots; see [headless.md](headless.md).
 
 ## Bring-up
 
