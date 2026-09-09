@@ -42,9 +42,22 @@ from tlod.types import Pose
 
 log = logging.getLogger(__name__)
 
-# HSV band for the gripper marker. Green by default because skin, wood
+# HSV bands for the gripper marker. Green by default because skin, wood
 # and most tabletops are not green -- red would fight with hands.
-MARKER_HSV = ((40, 90, 60), (85, 255, 255))
+#
+# The others exist because people calibrate with the tape they own. Pick
+# by what is *absent* from the frame, not by what looks brightest: the
+# detector takes the largest blob of the colour, so one blue foam roller
+# on the floor outranks a blue marker on the gripper and the camera gets
+# calibrated against the roller. Check with scripts/marker_view.py before
+# letting the arm move.
+MARKER_BANDS = {
+    "green": ((40, 90, 60), (85, 255, 255)),
+    "blue": ((95, 90, 60), (130, 255, 255)),
+    "yellow": ((20, 110, 90), (35, 255, 255)),
+    "magenta": ((140, 90, 60), (172, 255, 255)),
+}
+MARKER_HSV = MARKER_BANDS["green"]
 
 
 def _spread_enough(corners: np.ndarray, previous: list[np.ndarray], min_shift: float) -> bool:
