@@ -1,36 +1,20 @@
-# Real arm on the undersized 12 V 2 A supply.
-#
-# The kit's bill of materials asks for 12 V 5 A. On 2 A the arm is fine
-# with one joint moving and browns out with several, because six STS3215
-# draw 180 mA each just to turn, before they lift anything -- see
-# docs/power.md for the arithmetic. Everything below buys time until the
-# right supply arrives; none of it is a substitute for one.
-#
-# Confirm the diagnosis rather than assuming it:  tlod power -c this-file
+# Real arm, 12 V 5 A supply (the rating the kit's BOM asks for).
 
 arm:
   backend: feetech
-  port: /dev/ttyACM0  # confirm with `tlod ports` on the control board, edit if different
-  calibration: calib/arm1.json
-  # Acceleration of the servo's own internal ramp, rad/s^2 -- NOT a
-  # smoothness dial. It maps to Goal_Acceleration, which is an
-  # acceleration magnitude: bigger is harsher, and 0 switches the ramp off
-  # for maximum harshness. 3.0 is a gentle ramp; the default is 9.2 and
-  # the register saturates around 39.
-  servo_accel: 3.0
+  port: /dev/ttyACM0
+  calibration: calib/mine.json
+  servo_accel: 9.2      # rad/s². NOT a smoothness dial - bigger is harsher.
+  torque_limit: 800
 
 safety:
-  max_speed: 1.2      # rad/s. Was 2.0.
-  # The one that governs current. Motor torque is inertia times
-  # acceleration plus gravity, and current is torque over the torque
-  # constant, so this is very nearly a direct current dial. Was 8.0.
-  max_accel: 3.0
-  # And this stops that current arriving as a step, which is what the
-  # supply actually cannot absorb. Was 80.0.
-  max_jerk: 30.0
+  max_speed: 2.0
+  max_accel: 8.0
+  max_jerk: 80.0
+  min_height: 0.03
 
 power:
-  governor: true      # slow down automatically rather than brown out
-  supply_current: 2.0
-  headroom: 0.7
+  governor: true
+  supply_current: 5.0
+  headroom: 0.75
   min_voltage: 10.5
