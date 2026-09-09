@@ -163,8 +163,19 @@ def run_intrinsics(
                                 hfov_deg=hfov_deg)
 
 
-def find_marker(image: np.ndarray, hsv_band=MARKER_HSV, min_area: int = 120):
-    """Centroid of the largest blob in the marker colour, or None."""
+def find_marker(image: np.ndarray, hsv_band=MARKER_HSV, min_area: int = 45):
+    """Centroid of the largest blob in the marker colour, or None.
+
+    `min_area` is a floor on blob size in pixels, not a filter on which
+    blob wins -- the largest always does. Lowering it therefore only
+    changes what happens when the marker is small or far away: at 45 px
+    (roughly 7x7) a strip of tape stays findable from across a table,
+    where 120 px lost it. The cost is at the other end: with the real
+    marker out of frame or occluded, a smaller speck of the same colour
+    can now clear the bar and be believed, so it trades a silence for a
+    quiet wrong answer. Check with scripts/marker_view.py, which reports
+    how many candidates there are.
+    """
     hsv = cv2.cvtColor(cv2.GaussianBlur(image, (5, 5), 0), cv2.COLOR_BGR2HSV)
     mask = None
     for lo, hi in _bands(hsv_band):
