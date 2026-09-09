@@ -20,7 +20,12 @@ safety:
   max_speed: 3.5
   max_accel: 35.0
   max_jerk: 400.0
-  min_height: 0.03
+  # The strike's own plane_margin -- 5 mm above the target plane -- is the
+  # guard that keeps a misjudged hand height harmless. This floor is only
+  # about not driving into the table, which sits 17 mm below the base on
+  # its riser, so 20 mm still leaves 37 mm. At 30 mm it was clipping the
+  # last 3 mm off every strike and the paddle halted above the hand.
+  min_height: 0.02
 
 vision:
   num_hands: 1
