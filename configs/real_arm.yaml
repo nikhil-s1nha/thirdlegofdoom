@@ -4,13 +4,13 @@ arm:
   backend: feetech
   port: /dev/ttyACM0
   calibration: calib/mine.json
-  servo_accel: 9.2      # rad/s². NOT a smoothness dial - bigger is harsher.
+  servo_accel: 35      # rad/s². NOT a smoothness dial - bigger is harsher.
   torque_limit: 800
 
 safety:
-  max_speed: 2.0
-  max_accel: 8.0
-  max_jerk: 80.0
+  max_speed: 3.5
+  max_accel: 35
+  max_jerk: 400.0
   min_height: 0.03
 
 power:
