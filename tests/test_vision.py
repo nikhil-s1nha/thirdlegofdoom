@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from tlod.types import Frame
+from tlod.types import Detection, Frame
 from tlod.vision.calibration import (
     Extrinsics, Intrinsics, Projector, solve_extrinsics,
     synthetic_projector,
@@ -232,3 +232,33 @@ def test_a_detection_beyond_reach_is_dropped():
     gated = ColorBlobDetector(projector, min_area_px=50, max_range=0.4)
     assert gated.detect(far) == [], "kept a detection past the arm's reach"
     assert gated.detect(near), "dropped one the arm can reach"
+
+
+def test_one_object_split_by_a_highlight_is_one_detection():
+    """A specular highlight can cut a glossy piece into two contours
+    despite the morphological close, and each half then arrives as its
+    own detection a few millimetres from its twin -- indistinguishable
+    downstream from two real objects. Seen on hardware as a single blue
+    block touched twice, 2.5 mm and 5.2 mm off centre."""
+    from tlod.vision.objects import ColorBlobDetector
+
+    detector = ColorBlobDetector(synthetic_projector())
+    at = lambda x, y, r, c: Detection(  # noqa: E731
+        label="blue", position=np.array([x, y, 0.0]), stamp=0.0,
+        confidence=c, radius=r)
+
+    halves = [at(0.220, 0.100, 0.020, 0.9), at(0.228, 0.100, 0.012, 0.6)]
+    merged = detector._merge_overlapping(halves)
+    assert len(merged) == 1
+    # Area-weighted, so the centre sits nearer the larger fragment than
+    # the midpoint of the two.
+    assert 0.220 < merged[0].position[0] < 0.224
+    assert merged[0].confidence == 0.9
+
+    apart = [at(0.20, 0.10, 0.015, 0.9), at(0.20, -0.10, 0.015, 0.8)]
+    assert len(detector._merge_overlapping(apart)) == 2, "merged two real objects"
+
+    other = [at(0.220, 0.100, 0.020, 0.9),
+             Detection(label="red", position=np.array([0.221, 0.100, 0.0]),
+                       stamp=0.0, confidence=0.8, radius=0.02)]
+    assert len(detector._merge_overlapping(other)) == 2, "merged across colours"
