@@ -66,6 +66,7 @@ def run_intrinsics(
     min_shift: float = 60.0,
     timeout: float = 180.0,
     fisheye: bool = False,
+    hfov_deg: float = 145.0,
     on_progress=None,
 ) -> Intrinsics:
     """Collect chessboard views until there are enough, then calibrate.
@@ -104,7 +105,8 @@ def run_intrinsics(
             "corners, so an 8x8 board is 7x7), and that the board is well lit "
             "and fully in frame."
         )
-    return calibrate_intrinsics(kept_images, pattern, square, fisheye=fisheye)
+    return calibrate_intrinsics(kept_images, pattern, square, fisheye=fisheye,
+                                hfov_deg=hfov_deg)
 
 
 def find_marker(image: np.ndarray, hsv_band=MARKER_HSV, min_area: int = 120):

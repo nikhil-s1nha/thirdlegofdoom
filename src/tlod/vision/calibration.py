@@ -152,6 +152,39 @@ class Extrinsics:
 CHESSBOARD_FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
 
 
+def _calib_flag(name: str) -> int:
+    """A calibration flag, wherever this OpenCV keeps it.
+
+    4.x exposes the fisheye flags on `cv2.fisheye`; 5.0 moved them to the
+    top-level namespace and left `cv2.fisheye` with none, so referring to
+    either one directly breaks on the other. Missing entirely resolves to
+    0, which drops that flag rather than failing the calibration.
+    """
+    for holder in (cv2.fisheye, cv2):
+        value = getattr(holder, name, None)
+        if value is not None:
+            return int(value)
+    return 0
+
+
+# RECOMPUTE_EXTRINSIC re-solves each view's pose between iterations, which
+# a wide lens needs to converge; FIX_SKEW pins the skew term to zero,
+# since no real sensor has any and leaving it free just absorbs noise.
+#
+# USE_INTRINSIC_GUESS is not optional here. The solver's own linear
+# initialisation assumes a near-pinhole geometry, and on a 145 degree lens
+# it lands nowhere near: measured against a synthetic camera of known
+# focal length 101 px, starting cold gives 317 px and an RMS of 118, or
+# fails outright inside InitExtrinsics. Seeded from the advertised field
+# of view it recovers the focal length exactly. The advertised number only
+# has to be roughly right -- it is a starting point, not an answer.
+FISHEYE_CALIB_FLAGS = (
+    _calib_flag("CALIB_RECOMPUTE_EXTRINSIC")
+    | _calib_flag("CALIB_FIX_SKEW")
+    | _calib_flag("CALIB_USE_INTRINSIC_GUESS")
+)
+
+
 def find_chessboard(image: np.ndarray, pattern: tuple[int, int]) -> np.ndarray | None:
     """Sub-pixel inner-corner locations, or None. `pattern` is (cols, rows)
     of *inner* corners -- an 8x8 board has a 7x7 pattern."""
@@ -175,6 +208,7 @@ def calibrate_intrinsics(
     pattern: tuple[int, int] = (9, 6),
     square: float = 0.025,
     fisheye: bool = False,
+    hfov_deg: float = 145.0,
 ) -> Intrinsics:
     """Chessboard intrinsics. Aim for 15+ views covering the whole frame,
     especially the corners, at varied tilts.
@@ -182,7 +216,9 @@ def calibrate_intrinsics(
     Set `fisheye` for a lens much wider than about 120 degrees. The
     pinhole model does not degrade gracefully past that point -- it
     cannot express the projection at all, and no number of views brings
-    the residual down.
+    the residual down. `hfov_deg` then seeds the solve from the lens's
+    advertised field of view; see FISHEYE_CALIB_FLAGS for why that is
+    required rather than merely helpful. It is ignored for pinhole.
     """
     objp = _board_object_points(pattern, square)
     obj_points, img_points = [], []
@@ -201,14 +237,17 @@ def calibrate_intrinsics(
         rms, K, dist, _, _ = cv2.calibrateCamera(obj_points, img_points, shape, None, None)
         return Intrinsics(K, dist.ravel(), shape, float(rms))
 
-    K = np.eye(3)
+    # cv2.fisheye wants (1, N, C), not the (N, 1, C) its pinhole
+    # counterpart takes, and rejects the latter with a size mismatch from
+    # inside the arithmetic rather than anything nameable.
+    K = Intrinsics.approximate(shape, hfov_deg).K
     D = np.zeros((4, 1))
     rms, K, D, _, _ = cv2.fisheye.calibrate(
-        [p.reshape(-1, 1, 3).astype(np.float64) for p in obj_points],
-        [p.reshape(-1, 1, 2).astype(np.float64) for p in img_points],
+        [np.ascontiguousarray(p.reshape(1, -1, 3), np.float64) for p in obj_points],
+        [np.ascontiguousarray(p.reshape(1, -1, 2), np.float64) for p in img_points],
         shape, K, D,
-        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+        flags=FISHEYE_CALIB_FLAGS,
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-9),
     )
     return Intrinsics(K, D.ravel(), shape, float(rms), model="fisheye")
 
