@@ -184,16 +184,23 @@ def find_marker(image: np.ndarray, hsv_band=MARKER_HSV, min_area: int = 120):
     return float(m["m10"] / m["m00"]), float(m["m01"] / m["m00"])
 
 
-def calibration_poses(count: int = 12) -> list[Pose]:
+def calibration_poses(count: int = 12, heights=(0.06, 0.14, 0.22)) -> list[Pose]:
     """A spread of tool positions covering the working volume.
 
     Spread matters more than count. Points clustered in a plane leave the
     solve poorly conditioned along the camera axis, which shows up as an
     extrinsic that reprojects beautifully and puts the arm in the wrong
     place the moment it changes height.
+
+    `heights` is adjustable because a marker on the gripper is not equally
+    visible at every one of them: on a shallow camera angle the arm body
+    comes between the lens and a raised tool. Narrowing the range to what
+    the camera can actually see beats keeping poses that contribute
+    nothing -- but narrow it as little as you can get away with, since
+    the spread in z is exactly what conditions the solve.
     """
     poses: list[Pose] = []
-    for z in (0.06, 0.14, 0.22):
+    for z in heights:
         for x, y in ((0.16, -0.10), (0.26, -0.06), (0.26, 0.06), (0.16, 0.10)):
             poses.append(Pose(x, y, z))
     return poses[:count] if count < len(poses) else poses
