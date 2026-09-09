@@ -3,9 +3,38 @@
 For the symptom: **one joint at a time is fine, anything coordinated
 jitters, stutters, or goes briefly limp.**
 
-That is almost always the power supply, and it is a well-known failure of
-this specific arm. This page has the arithmetic, what other people found,
-and what this codebase now does about it.
+That is a well-known failure of this specific arm, and it is almost
+always the power supply. This page has the arithmetic, what other people
+found, and what this codebase now does about it.
+
+## Measured first, so you know whether the rest applies
+
+On this rig, with the 12 V **5 A** supply the kit's own bill of materials
+asks for, it does not happen:
+
+| | |
+|---|---|
+| peak current, coordinated multi-joint move | 1.81 A |
+| planning budget (5 A x 0.75 headroom) | 3.75 A |
+| rail voltage under load | no sag |
+| latched servo faults | none |
+
+So the arm has roughly twice the headroom it needs, and the governor is
+off by default because there is nothing to govern. `tlod power` prints
+your arm's own version of that table — run it before assuming any of the
+rest of this page is about you.
+
+Two things still make the page worth keeping. Some kits ship a 12 V 2 A
+brick, and Seeed's own spec sheet says 2 A; **that** is the supply that
+browns out, and the arithmetic below says why. And the symptom has other
+causes that look identical from the outside — a joint fighting a bad
+calibration (section 2), and two software bugs that were real here
+(section 6).
+
+We spent a while treating one of those as a brownout, and detuned the
+arm's motion limits hard to "fix" it. It cost strike speed and fixed
+nothing, because the supply was never the problem. Measure before you
+slow anything down.
 
 ---
 
@@ -174,6 +203,12 @@ longest-travelling joint ever runs at the full limit. Measured on a
 five-joint move, it cuts peak simultaneous acceleration by about 2.3×
 against per-joint limits, and by far more against the old rate clamp.
 
+What the limits cost in speed, measured on the real arm at the values
+`configs/real_arm.yaml` now carries: an 80 mm strike drop takes 0.23 s at
+best and 0.27 s at an accuracy worth having, and a 150 mm move will not
+go below 0.48 s. That is the exchange rate. Detuning these to chase a
+brownout that is not happening buys nothing and spends all of it.
+
 ### Servo-side ramp — `arm.servo_accel`
 
 The servo's own trapezoidal ramp, discussed above. Belt and braces with
@@ -211,12 +246,6 @@ on connection.
 
 ## 5. What to actually do
 
-**Buy a 12 V 5 A supply.** Everything below makes a 2 A supply usable;
-none of it makes it correct. Per the model, even 3 A clears the problem
-outright.
-
-Then, in order:
-
 ```bash
 # 1. Confirm it. Don't infer it.
 tlod power -c configs/real_arm.yaml
@@ -224,10 +253,18 @@ tlod power -c configs/real_arm.yaml
 
 It runs the same move one joint at a time and then all together, and
 reports peak current, lowest rail voltage, and any latched servo faults.
-If multi-joint sags and single-joint does not, that is the supply.
+If multi-joint sags and single-joint does not, that is the supply. If
+neither sags — 1.81 A peak against a 3.75 A budget, as here — the supply
+is not your problem and nothing in section 4 will help; go to step 3 and
+then to section 6.
+
+**2. Read the label on the brick.** If it says 2 A, replace it: 12 V 5 A,
+5.5x2.1 mm, centre positive. Everything else on this page makes a 2 A
+supply usable; none of it makes it correct, and per the model even 3 A
+clears the problem outright.
 
 ```bash
-# 2. Check no joint is fighting a bad calibration
+# 3. Check no joint is fighting a bad calibration
 tlod probe --real
 tlod first-light
 ```
@@ -235,24 +272,16 @@ tlod first-light
 A joint 100° out of sync draws near-stall current continuously and will
 brown out a supply that is otherwise fine.
 
-3. Fit the capacitor, and use thick, short power leads.
+4. Thick, short power leads and a common ground, always. The bulk
+   capacitor only earns its place on an undersized supply; this rig has
+   never needed one.
 
-4. Run with `configs/real_arm.yaml`, which sets:
-
-```yaml
-arm:
-  servo_accel: 3.0    # rad/s^2, gentle servo ramp (default 9.2)
-safety:
-  max_speed: 1.2      # was 2.0
-  max_accel: 3.0      # was 8.0  -- the current knob
-  max_jerk: 30.0      # was 80.0
-power:
-  governor: true
-  supply_current: 2.0
-```
-
-5. Once the 5 A supply arrives, delete that file's overrides rather than
-   editing them, and confirm with `tlod power` that you have headroom.
+5. `configs/real_arm.yaml` describes a healthy 5 A rig — full motion
+   limits, governor off, `supply_current: 5.0`. If you are stuck on 2 A,
+   the levers in order of effect are `safety.max_accel`, then
+   `arm.servo_accel`, then `power.governor: true` with `supply_current`
+   set honestly to what the brick really is. Do not reach for them
+   otherwise: they are all speed, and speed is the whole game here.
 
 ---
 
