@@ -33,11 +33,15 @@ scored per round, not per millisecond.
 from __future__ import annotations
 
 import abc
+import logging
 import threading
 import time
 from dataclasses import dataclass
 
 import numpy as np
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -170,6 +174,7 @@ class ServoLoadContactSensor(ContactSensor):
         self.joints = list(self.STRIKE_JOINTS if joints is None else joints)
         self._baseline: np.ndarray | None = None
         self._blank_until = 0.0
+        self._armed_at = 0.0
         self._fired = False
         # Diagnostics, for tuning the threshold on the first real session.
         self.peak_rise = 0.0
@@ -189,8 +194,9 @@ class ServoLoadContactSensor(ContactSensor):
     def arm(self, blank_for: float | None = None) -> None:
         self._fired = False
         self._baseline = None
+        self._armed_at = time.perf_counter()
         window = self.blank_for if blank_for is None else max(blank_for, 0.0)
-        self._blank_until = time.perf_counter() + window
+        self._blank_until = self._armed_at + window
 
     def poll(self, **kwargs) -> ContactEvent | None:
         if self._fired or time.perf_counter() < self._blank_until:
@@ -219,6 +225,14 @@ class ServoLoadContactSensor(ContactSensor):
         if rise < self.threshold:
             return None
         self._fired = True
+        # When and how hard, because "it hit instantly" and "it hit on
+        # contact" are indistinguishable at one-second log resolution,
+        # and the difference is the whole diagnosis: a rise this side of
+        # the blanking window is the arm's own launch, not a hand.
+        log.debug("contact: rise %.3f (threshold %.3f) at %.0f ms after arming; "
+                  "baseline %s, now %s",
+                  rise, self.threshold, (time.perf_counter() - self._armed_at) * 1e3,
+                  np.round(self._baseline, 3), np.round(current, 3))
         return ContactEvent(time.perf_counter(), "servo_load", strength=min(rise, 1.0))
 
 
