@@ -262,3 +262,24 @@ def test_one_object_split_by_a_highlight_is_one_detection():
              Detection(label="red", position=np.array([0.221, 0.100, 0.0]),
                        stamp=0.0, confidence=0.8, radius=0.02)]
     assert len(detector._merge_overlapping(other)) == 2, "merged across colours"
+
+
+def test_closing_the_hand_detector_twice_is_harmless():
+    """MediaPipe's HandLandmarker also closes itself from __del__, which
+    on 1.0.x runs during interpreter shutdown -- when the globals its
+    dispatcher needs are already None, so it raises from inside a
+    destructor. Python prints that and continues, so a clean run ends in
+    a traceback that looks like a failure and is not one."""
+    from tlod.vision.hands import MediaPipeHandDetector
+
+    class Landmarker:
+        closes = 0
+
+        def close(self):
+            Landmarker.closes += 1
+
+    detector = MediaPipeHandDetector.__new__(MediaPipeHandDetector)
+    detector._landmarker = Landmarker()
+    detector.close()
+    detector.close()
+    assert Landmarker.closes == 1
