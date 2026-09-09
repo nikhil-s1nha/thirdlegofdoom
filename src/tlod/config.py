@@ -63,8 +63,8 @@ class CameraConfig:
     extrinsics: str = ""                  # .npz path; empty = synthetic pose
     hfov_deg: float = 145.0
     # Where the camera sits, when no calibration file exists yet.
-    position: tuple[float, float, float] = (0.0, -0.3048, 0.127)
-    look_at: tuple[float, float, float] = (0.3556, 0.0, 0.127)
+    position: tuple[float, float, float] = (0.0, 0.0, 0.635)
+    look_at: tuple[float, float, float] = (0.381, 0.0, 0.0)
 
 
 @dataclass(slots=True)

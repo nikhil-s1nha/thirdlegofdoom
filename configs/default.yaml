@@ -35,12 +35,12 @@ camera:
   hfov_deg: 145.0
   position:
   - 0.0
-  - -0.3048
-  - 0.127
-  look_at:
-  - 0.3556
   - 0.0
-  - 0.127
+  - 0.635
+  look_at:
+  - 0.381
+  - 0.0
+  - 0.0
 vision:
   detector: mediapipe
   model_path: models/hand_landmarker.task
