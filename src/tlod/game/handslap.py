@@ -495,6 +495,7 @@ class HandSlapGame(StateMachine):
         pressing = bool(getattr(self.motion, "pressing", False))
         if self.contact.poll(tool_xyz=tool, hand_xyz=hand,
                              pressing=pressing) is not None:
+            self._report_contact()
             self._resolve(robot, controller, hit=True)
             return
         if self.step_motion(controller, dt):
@@ -508,6 +509,20 @@ class HandSlapGame(StateMachine):
             self._pending = "strike"
             self.transition("resolve")
             self._retract(controller)
+
+    def _report_contact(self) -> None:
+        """Say what the sensor saw, every round, whichever way it went.
+
+        A verdict on its own is unfalsifiable from the outside: "dodged"
+        looks the same whether the paddle stopped on a hand and the margin
+        was too wide, or the floor was above the hand so there was nothing
+        to stop short of, or the hand simply compressed. Each of those has
+        a different fix and they are indistinguishable without the
+        numbers, which is how several rounds of guesswork happened.
+        """
+        report = getattr(self.contact, "report", None)
+        if callable(report):
+            self.announce(f"    {report()}")
 
     def _resolve(self, robot, controller, hit: bool) -> None:
         self.last_strike = time.perf_counter()
@@ -565,6 +580,7 @@ class HandSlapGame(StateMachine):
             return
         if self._pending == "strike":
             self._pending = None
+            self._report_contact()
             self._resolve(robot, controller, hit=False)
             return
         if self._pending == "feint":
