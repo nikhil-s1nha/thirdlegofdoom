@@ -347,7 +347,7 @@ class TestServoLoadContactWiring:
             # accessor, so reads take the bus lock the control loop uses.
             sensor = ServoLoadContactSensor(controller.state, threshold=0.12)
             backend.load[2] = 0.20          # elbow already loaded by the pose
-            sensor.arm()
+            sensor.arm(blank_for=0.0)
             assert sensor.poll() is None, "resting posture scored as a hit"
             backend.load[2] = 0.40          # something resisted
             event = sensor.poll()
@@ -367,9 +367,12 @@ class TestServoLoadContactWiring:
             raise RuntimeError("sync read failed")
 
         sensor = ServoLoadContactSensor(failing)
-        sensor.arm()
+        sensor.arm(blank_for=0.0)
         assert sensor.poll() is None
-        assert sensor.read_failures == 2
+        # One, not two: arm() no longer reads. The baseline is taken on
+        # the first poll instead, so that it measures an arm already
+        # moving rather than one still hovering.
+        assert sensor.read_failures == 1
 
     def test_a_missed_baseline_is_taken_later_not_assumed_zero(self):
         """If the read at arm() fails, a zero baseline would turn the
@@ -382,7 +385,7 @@ class TestServoLoadContactWiring:
             lambda: JointState(q=np.zeros(6), stamp=0.0, load=state["load"]),
             threshold=0.12,
         )
-        sensor.arm()
+        sensor.arm(blank_for=0.0)
         state["load"] = np.array([0.0, 0.45, 0.40, 0.35, 0.0, 0.0])
         assert sensor.poll() is None, "resting load scored as contact"
         state["load"] = np.array([0.0, 0.45, 0.60, 0.35, 0.0, 0.0])
