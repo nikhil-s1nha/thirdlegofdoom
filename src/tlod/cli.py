@@ -347,16 +347,45 @@ def cmd_sim(args) -> int:
     return 0
 
 
-def cmd_hybrid(args) -> int:
-    """Tier B: your real webcam and real hand, simulated arm."""
-    cfg = Config.load(args.config).with_overrides(
-        arm={"backend": "mock"},
-        camera={"source": "opencv", "index": args.camera},
+def hybrid_config(cfg: Config, camera: int, policy: str, real: bool) -> Config:
+    """Config for a hybrid run: real camera and real hand either way.
+
+    Split out from `cmd_hybrid` so the one thing worth getting wrong here
+    is checkable without hardware -- that `--real` actually reaches the
+    arm backend. Forcing "mock" unconditionally is what this command did
+    for its whole life, and a silent revert to that is indistinguishable
+    from the arm simply not moving.
+    """
+    return cfg.with_overrides(
+        arm={"backend": "feetech" if real else "mock"},
+        camera={"source": "opencv", "index": camera},
         vision={"detector": "mediapipe"},
-        runtime={"policy": args.policy},
+        runtime={"policy": policy},
     )
-    print(f"tier B hybrid: real camera {args.camera}, real hand, simulated arm "
+
+
+def cmd_hybrid(args) -> int:
+    """Your real webcam and real hand; simulated arm, or `--real` for both.
+
+    With `--real` this is the whole robot on one machine: camera, hand
+    tracking, IK and servos in a single process, with the arm hovering
+    over the tracked hand. That is the two-board system minus the wire,
+    and it is the useful shape when the camera and the servo adapter are
+    plugged into the same board -- which is where they both are during
+    calibration anyway.
+    """
+    cfg = hybrid_config(Config.load(args.config), args.camera, args.policy, args.real)
+    where = "real arm" if args.real else "simulated arm"
+    print(f"hybrid: real camera {args.camera}, real hand, {where} "
           f"[policy={args.policy}]")
+    if args.real:
+        # TrackHandPolicy hovers above the hand rather than reaching for
+        # it, but it is following a person's hand in real time and the
+        # only thing between it and them is the hover height.
+        print("  THE ARM WILL MOVE, and it will follow your hand.")
+        print("  Keep your hand flat on the table and the rest of you clear.")
+        if not args.yes:
+            input("  press Enter when ready, Ctrl-C to abort... ")
     print("wave your hand in front of the camera.")
     app = build_app(cfg)
     _run_for(app, args.duration, view=args.view, projector=app.projector)
@@ -1311,6 +1340,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--policy", default="track_hand")
     s.add_argument("--view", action="store_true", help="open a window")
+    s.add_argument("--real", action="store_true",
+                   help="drive the real arm as well, so it follows your hand. "
+                        "Camera and servo adapter must be on this machine")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.set_defaults(func=cmd_hybrid)
 
     s = sub.add_parser("bench", help="measure what is currently estimated")
