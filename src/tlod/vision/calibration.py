@@ -250,46 +250,69 @@ def calibrate_intrinsics(
         for o, i in zip(obj_points, img_points, strict=True)
     ]
 
-    # cv2.fisheye initialises each view's pose from a plane-to-image
-    # homography and *asserts* when one is near-degenerate, rather than
-    # naming the view or dropping it. A board that is small or nearly
-    # edge-on in frame produces exactly that, and one such view among
-    # fifteen good ones fails the whole calibration -- after the person
-    # has spent three minutes holding a board up.
+    # Candidate starting points for the focal length, best first.
     #
-    # So drop the least informative view and try again. Image area is the
-    # right thing to rank by: it is small precisely when the board is far
-    # away or steeply foreshortened, which are the two ways a homography
-    # goes bad here.
-    dropped = 0
-    while True:
-        try:
-            K = Intrinsics.approximate(shape, hfov_deg).K
-            D = np.zeros((4, 1))
-            rms, K, D, _, _ = cv2.fisheye.calibrate(
-                [o for o, _ in views], [i for _, i in views], shape, K, D,
-                flags=FISHEYE_CALIB_FLAGS,
-                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-9),
-            )
-            break
-        except cv2.error as exc:
-            if len(views) <= 5:
-                raise RuntimeError(
-                    f"fisheye calibration failed with {len(views)} views "
-                    f"({dropped} already dropped as degenerate): {exc}. "
-                    "The board is probably too small in frame -- hold it "
-                    "closer so it fills a third of the view, and get it "
-                    "into the frame corners."
-                ) from exc
-            areas = [
-                cv2.contourArea(cv2.convexHull(i.reshape(-1, 2).astype(np.float32)))
-                for _, i in views
-            ]
-            views.pop(int(np.argmin(areas)))
-            dropped += 1
+    # The advertised field of view is not trustworthy enough to be the
+    # only one: it is usually quoted diagonally, so on a 4:3 sensor the
+    # horizontal figure is materially smaller, and a seed that far out
+    # does not converge slowly -- it diverges. Measured on a 145-degree
+    # lens seeded at its advertised number: 179 px of reprojection error.
+    #
+    # The pinhole fit is the better guess even though the pinhole model
+    # is the wrong shape for this lens, because focal length is what it
+    # gets roughly right and distortion is what it gets wrong. The rest
+    # of the sweep is insurance against both being off.
+    seeds: list[np.ndarray] = []
+    try:
+        _, K_pin, _, _, _ = cv2.calibrateCamera(obj_points, img_points, shape, None, None)
+        seeds.append(K_pin)
+    except cv2.error:
+        pass
+    seeds += [Intrinsics.approximate(shape, f).K for f in (hfov_deg, 160, 130, 100, 70)]
 
+    best: tuple[float, np.ndarray, np.ndarray] | None = None
+    dropped = 0
+    for seed in seeds:
+        trial = list(views)
+        while True:
+            try:
+                K, D = seed.copy(), np.zeros((4, 1))
+                rms, K, D, _, _ = cv2.fisheye.calibrate(
+                    [o for o, _ in trial], [i for _, i in trial], shape, K, D,
+                    flags=FISHEYE_CALIB_FLAGS,
+                    criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-9),
+                )
+                if best is None or rms < best[0]:
+                    best = (float(rms), K, D)
+                    dropped = len(views) - len(trial)
+                break
+            except cv2.error:
+                # cv2.fisheye initialises each view's pose from a
+                # plane-to-image homography and asserts when one is
+                # near-degenerate, without naming it. Drop the least
+                # informative -- image area is small precisely when the
+                # board is distant or steeply foreshortened, the two ways
+                # that homography goes bad -- and try again.
+                if len(trial) <= 5:
+                    break
+                areas = [
+                    cv2.contourArea(cv2.convexHull(i.reshape(-1, 2).astype(np.float32)))
+                    for _, i in trial
+                ]
+                trial.pop(int(np.argmin(areas)))
+        if best is not None and best[0] < 1.0:
+            break                       # good enough; the rest cannot help
+
+    if best is None:
+        raise RuntimeError(
+            "fisheye calibration did not converge from any starting point. "
+            "The board is probably too small or too blurred in frame: hold "
+            "it closer, so it fills a third of the view."
+        )
+    rms, K, D = best
     if dropped:
-        log.warning("dropped %d degenerate view(s); calibrated on %d", dropped, len(views))
+        log.warning("dropped %d degenerate view(s); calibrated on %d",
+                    dropped, len(views) - dropped)
     return Intrinsics(K, D.ravel(), shape, float(rms), model="fisheye")
 
 
