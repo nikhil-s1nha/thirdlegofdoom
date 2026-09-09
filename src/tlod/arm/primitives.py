@@ -17,6 +17,12 @@ The strike primitives encode the finding from docs/slap-analysis.md:
 short strikes are better on both axes at once, faster to land *and*
 softer on impact, so the safe strike and the effective strike are the
 same strike. `StrikeLimits` enforces that rather than trusting callers.
+
+Measurement on the real arm added a floor to that. Below a ~250 ms ask
+for an 8 cm drop the arm does not land sooner -- it lands *further from
+where it was aimed*, and past a point the miss is bigger than the contact
+tolerance, so the fastest strike is the one that cannot score. Short is
+better right up to that floor and worse below it; the defaults sit on it.
 """
 
 from __future__ import annotations
@@ -36,18 +42,47 @@ from tlod.types import Pose
 class StrikeLimits:
     """Bounds on anything that moves fast toward a person.
 
-    Defaults come from the measured strike table: an 8 cm drop lands in
-    ~210 ms at ~0.7 m/s, which beats a 230-400 ms human escape budget
-    while tapping more softly than a casual high-five (1-3 m/s).
+    Defaults now come from the arm rather than from the simulator. Measured
+    on an SO-ARM101 at 12 V 5 A with `servo_accel: 35`, `max_accel: 35`,
+    `max_jerk: 400`, `max_speed: 3.5`: an 8 cm drop asked for in 250 ms
+    takes 310 ms end to end and stops 9 mm short of the target. Of that
+    310 ms, 50-60 ms is `Motion._complete` waiting for `controller.settled`
+    rather than travel, so the paddle is moving for ~255 ms and covers the
+    8 cm at ~0.3 m/s mean, ~0.5 m/s peak. Still a third of a casual
+    high-five (1-3 m/s), and still inside a 230-400 ms human escape budget.
+
+    The old docstring said ~210 ms at ~0.7 m/s. Both halves were the
+    simulator: the real arm is 100 ms slower and correspondingly gentler.
     """
 
     max_drop: float = 0.08              # metres; the single most important cap
+    # Equal to max_drop on purpose, not by coincidence of two defaults.
+    # `Strike` clamps its drop to max_drop, so a hover *above* max_drop
+    # ends the strike (hover - max_drop) above the hand and it can never
+    # land -- at the old easy preset's 12 cm hover, 4 cm short, twice the
+    # contact sensor's 20 mm plane tolerance. Hovering further away is
+    # therefore not "more warning"; past this value it is no strike at all.
     hover_height: float = 0.08          # resting height above the target plane
+    # Binding, not decorative: the measured peak commanded joint speed
+    # during an 8 cm strike under the real arm's limits is 3.41 rad/s, and
+    # dropping this to 2.0 stretches the same strike to 400 ms.
     strike_speed: float = 3.5           # rad/s during a strike
-    retract_speed: float = 4.0          # rad/s returning; faster is fine, it moves away
+    # Was 4.0, on the theory that retracting fast is free because it moves
+    # away. The theory is fine; the number was not. Nothing clamps it: a
+    # primitive's per-call speed *replaces* `SafetyLimits.max_speed` inside
+    # `ArmController.profile_limits()` rather than being min()'d against
+    # it, so 4.0 really did authorise -- and reach -- 3.53 rad/s on an arm
+    # configured to cap at 3.5. It bought 10 ms on a 320 ms retract. This
+    # number is the only guard there is, so it matches the configured
+    # ceiling.
+    retract_speed: float = 3.5          # rad/s returning; away from the hand
     plane_margin: float = 0.005         # never command below target plane minus this
     torque_limit: int = 350             # of 1000, while striking; yields on contact
     normal_torque_limit: int = 800
+    # A backstop, not the working cadence. HandSlapGame's own dwells --
+    # retract, then 0.6 s of settle, then 0.4 s of ready before the hazard
+    # rate is allowed to fire -- already put ~1.3 s between strikes, so
+    # this only ever fires if those change.
     min_strike_interval: float = 0.35   # seconds between strikes; thermal and safety
 
     def clamp_drop(self, drop: float) -> float:
@@ -193,7 +228,7 @@ class Strike(Motion):
         self,
         target_xyz,
         limits: StrikeLimits,
-        duration: float = 0.21,
+        duration: float = 0.25,   # the measured floor; see StrikeLimits
         depth: float | None = None,
     ) -> None:
         super().__init__()
