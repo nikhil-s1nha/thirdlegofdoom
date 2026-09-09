@@ -24,7 +24,7 @@ import numpy as np
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, "src")
-from tlod.vision.calibrate_flow import MARKER_BANDS, find_marker  # noqa: E402
+from tlod.vision.calibrate_flow import MARKER_BANDS, _bands, find_marker  # noqa: E402
 
 PORT = 8080
 MIN_AREA = 120                       # matches find_marker's own threshold
@@ -42,7 +42,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 if not cap.isOpened():
     raise SystemExit(f"camera {index} did not open. Is another process holding it?")
 
-print(f"  looking for {colour} blobs, HSV {band[0]} to {band[1]}")
+print(f"  looking for {colour} blobs, {len(_bands(band))} HSV band(s)")
 print(f"  open http://<this board>:{PORT}")
 
 PAGE = (b"<!doctype html><title>marker</title>"
@@ -52,7 +52,10 @@ PAGE = (b"<!doctype html><title>marker</title>"
 
 def annotate(image):
     hsv = cv2.cvtColor(cv2.GaussianBlur(image, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array(band[0]), np.array(band[1]))
+    mask = None
+    for lo, hi in _bands(band):
+        part = cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask = part if mask is None else cv2.bitwise_or(mask, part)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
