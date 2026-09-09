@@ -13,7 +13,7 @@ import time
 import numpy as np
 import pytest
 
-from tlod.net.clock import ClockResponder, measure_offset
+from tlod.net.clock import ClockEstimate, ClockResponder, measure_offset
 from tlod.net.protocol import Packet, decode_perception, encode_perception
 from tlod.net.publisher import VisionPublisher
 from tlod.net.subscriber import VisionSubscriber
@@ -233,6 +233,9 @@ def test_a_backlogged_publisher_cannot_claim_the_mailbox():
     hardware as a 4.5 s shutter-to-servo latency with every counter
     looking like ordinary reordering."""
     sub = VisionSubscriber(port=45994, require_clock=False)
+    # The age check is only meaningful against a clock estimate.
+    sub.clock = ClockEstimate(offset=0.0, rtt=0.0004, samples=8,
+                              stamp=time.perf_counter())
     now = time.perf_counter()
 
     sub._handle(Packet(seq=5, stamp=now, hands=[], objects=[]).encode())
@@ -262,3 +265,14 @@ def test_the_sequence_guard_gives_up_when_the_sender_restarts():
         sub._handle(Packet(seq=seq, stamp=time.perf_counter(), hands=[], objects=[]).encode())
     assert sub.seq_resyncs == 1
     assert sub._last_seq < 500, "did not adopt the restarted sender"
+
+
+def test_the_age_check_is_skipped_without_a_clock():
+    """Over UART no offset is measured at all, so the sender's stamps are
+    in an unrelated timebase. Rejecting them on age would throw away
+    perfectly good perception -- a worse failure than the one the age
+    check exists to prevent."""
+    sub = VisionSubscriber(serial_port="/dev/null", require_clock=False)
+    assert sub.clock is None
+    sub._handle(Packet(seq=1, stamp=1234.5, hands=[], objects=[]).encode())
+    assert sub.received == 1 and sub.dropped_old == 0

@@ -193,10 +193,17 @@ class VisionSubscriber:
         # Old on its face, whoever sent it. Checked before the sequence
         # guard so a backlogged sender cannot claim the mailbox on the
         # strength of a high sequence number alone.
-        age = time.perf_counter() - (packet.stamp + self.offset)
-        if self.max_stamp_age > 0 and age > self.max_stamp_age:
-            self.dropped_old += 1
-            return
+        #
+        # Only meaningful with a clock estimate. Without one the sender's
+        # stamps are in an unrelated timebase -- the UART path measures no
+        # offset at all, by design -- and comparing them against local
+        # perf_counter() rejects perfectly good perception, which is a
+        # worse failure than the one this guards against.
+        if self.max_stamp_age > 0 and self.clock is not None:
+            age = time.perf_counter() - (packet.stamp + self.offset)
+            if age > self.max_stamp_age:
+                self.dropped_old += 1
+                return
         # Both UDP and (framed) UART can reorder. An older packet
         # overwriting a newer one would have the arm chase the past.
         if packet.seq <= self._last_seq:
