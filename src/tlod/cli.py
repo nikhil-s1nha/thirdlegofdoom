@@ -154,19 +154,43 @@ def build_governor(cfg: Config):
 
 
 def build_detector(cfg: Config, scene=None):
-    from tlod.vision.hands import MediaPipeHandDetector
+    from tlod.vision.hands import MediaPipeHandDetector, NullHandDetector
     from tlod.vision.scene import SceneHandDetector
 
     if cfg.vision.detector == "scripted":
         if scene is None:
             raise ValueError("the scripted detector needs a scene")
         return SceneHandDetector(scene)
-    return MediaPipeHandDetector(
-        model_path=cfg.vision.model_path,
-        num_hands=cfg.vision.num_hands,
-        min_detection_confidence=cfg.vision.min_detection_confidence,
-        delegate=cfg.vision.delegate,
-    )
+    if cfg.vision.detector == "none":
+        return NullHandDetector()
+    try:
+        return MediaPipeHandDetector(
+            model_path=cfg.vision.model_path,
+            num_hands=cfg.vision.num_hands,
+            min_detection_confidence=cfg.vision.min_detection_confidence,
+            delegate=cfg.vision.delegate,
+        )
+    except (ImportError, RuntimeError) as exc:
+        # Hands are one input among several, and the commands that build a
+        # detector also run a camera, object detection, tracking, control
+        # and the publisher. Losing MediaPipe should cost the hands, not
+        # the board: an ImportError here means the wheel is missing or
+        # broken for this interpreter (see pyproject.toml's `hands` extra
+        # for which build goes where), a RuntimeError means it imported
+        # but could not build a landmarker -- a missing .task bundle, or
+        # a delegate the platform cannot service. Both are worth saying
+        # out loud and neither is worth a traceback.
+        #
+        # A crash in the MediaPipe *graph* is a different animal: those
+        # are abseil CHECK failures that abort the process, so there is no
+        # exception to catch and nothing this can do. Hence the pins.
+        logging.getLogger(__name__).warning(
+            "no hand detector available: %s: %s. Hands will never be seen; "
+            "everything else still runs. Install the extra with "
+            "`pip install -e \".[hands]\"`.",
+            type(exc).__name__, exc,
+        )
+        return NullHandDetector()
 
 
 
@@ -188,7 +212,7 @@ def cmd_touch(args) -> int:
     from tlod.arm.controller import ArmController
     from tlod.game.touch import TouchObjectsPolicy
     from tlod.runtime.app import RobotApp
-    from tlod.vision.hands import HandLocator
+    from tlod.vision.hands import HandLocator, NullHandDetector
     from tlod.vision.objects import ColorBlobDetector
     from tlod.vision.tracking import MultiTracker
 
@@ -217,7 +241,7 @@ def cmd_touch(args) -> int:
         camera=camera,
         # No hand detector: this run is about objects, and loading
         # mediapipe to return nothing would be a heavy way to do it.
-        detector=_NoHands(),
+        detector=NullHandDetector(),
         locator=HandLocator(projector, depth_mode="size"),
         controller=controller,
         policy=policy,
@@ -236,16 +260,6 @@ def cmd_touch(args) -> int:
         print(f"  placement error: mean {np.mean(policy.errors)*1000:.1f} mm, "
               f"max {np.max(policy.errors)*1000:.1f} mm")
     return 0
-
-
-class _NoHands:
-    """A hand detector that finds none, for object-only runs."""
-
-    def detect(self, frame):
-        return []
-
-    def close(self):
-        pass
 
 
 def build_app(cfg: Config, render: bool = False):
