@@ -80,15 +80,29 @@ class Hand2D:
 
     @property
     def palm_center(self) -> np.ndarray:
-        """Centroid of wrist and the four knuckles.
+        """Halfway between the wrist and the knuckle line -- the flat of the palm.
 
-        More stable than the wrist alone, which swings a lot as the hand
-        rotates, and more stable than the fingertips, which move
-        independently of the hand as a whole. For "where is the hand", this
-        is the point you want.
+        This is where the arm aims, so it is worth being exact about which
+        point it is. Fingertips are out: they move independently of the
+        hand and a strike aimed at one lands on a moving target. The wrist
+        alone is out too: it swings widely as the hand rotates.
+
+        The obvious middle ground -- the plain centroid of the wrist and
+        the four knuckles -- was what this returned, and it is wrong in a
+        way that only shows up on hardware. Four of its five points are
+        the knuckles, so it sits 80% of the way from wrist to knuckle
+        line: not the palm, but the crease where the fingers begin. On the
+        arm that reads as forever aiming at the edge of the index finger,
+        and it is the worst place on the hand to aim, because the finger
+        bases curve away and the paddle slides off them.
+
+        Weighting the wrist against the knuckles as a whole puts it at
+        50%, on the flat middle of the palm. Flat matters twice over: it
+        is a more consistent height, and contact is judged from how far
+        short the paddle stopped.
         """
-        idx = [WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]
-        return self.landmarks[idx].mean(axis=0)
+        knuckles = self.landmarks[[INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]].mean(axis=0)
+        return 0.5 * self.landmarks[WRIST] + 0.5 * knuckles
 
     @property
     def palm_width_px(self) -> float:

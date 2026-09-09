@@ -121,10 +121,26 @@ def test_scene_detector_is_deterministic(projector):
     assert np.allclose(d1.detect(f)[0].landmarks, d2.detect(f)[0].landmarks)
 
 
-def test_hand2d_palm_center_is_the_knuckle_centroid():
+def test_hand2d_palm_center_sits_on_the_flat_of_the_palm():
+    """Halfway from wrist to knuckles, not four-fifths of the way.
+
+    A plain centroid of the wrist and the four knuckles is four parts
+    knuckle to one part wrist, so it lands at the crease where the fingers
+    begin rather than on the palm. On hardware that reads as the arm
+    forever aiming at the edge of the index finger -- the worst spot to
+    aim at, since the finger bases curve away and the paddle slides off.
+    """
     lms = np.zeros((21, 2))
-    lms[[0, 5, 9, 13, 17]] = [[0, 0], [10, 0], [10, 10], [0, 10], [5, 5]]
-    assert np.allclose(Hand2D(lms, 1.0, "Right", 0.0).palm_center, [5.0, 5.0])
+    lms[0] = [0, 0]                                   # wrist
+    lms[[5, 9, 13, 17]] = [[0, 100], [0, 100], [0, 100], [0, 100]]   # knuckle line
+    centre = Hand2D(lms, 1.0, "Right", 0.0).palm_center
+    assert np.allclose(centre, [0.0, 50.0]), centre
+
+    # And laterally it stays between the index and pinky knuckles rather
+    # than being dragged to either edge.
+    lms[[5, 9, 13, 17]] = [[0, 100], [10, 100], [20, 100], [30, 100]]
+    centre = Hand2D(lms, 1.0, "Right", 0.0).palm_center
+    assert np.allclose(centre, [7.5, 50.0]), centre
 
 
 def test_color_blob_detects_a_disc_on_the_table(projector):
