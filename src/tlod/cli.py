@@ -1334,7 +1334,8 @@ def cmd_calibrate(args) -> int:
     if residuals.max() > 3 * max(extr.rms, 0.5):
         print("  NOTE: one point is far worse than the rest -- likely a mislocated")
         print("  marker rather than a bad calibration. Rerun; it should settle.")
-    print("\n  verify with:  tlod touch --view    (the drawn arm must land on the real arm)")
+    print("\n  verify with:  tlod touch --real     (the tool must land on the objects)")
+    print("  or numerically:  tlod vision-check --with-arm --marker <colour>")
     return 0
 
 
