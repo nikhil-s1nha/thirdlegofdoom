@@ -51,6 +51,11 @@ PAGE = (b"<!doctype html><title>marker</title>"
 
 
 def annotate(image):
+    # Detect before drawing anything. Annotating first and detecting after
+    # overwrites the blob's own edge pixels with the outline colour, which
+    # shrinks it below the area threshold: the overlay then reports a
+    # candidate and no detection at the same time.
+    found = find_marker(image, band)
     hsv = cv2.cvtColor(cv2.GaussianBlur(image, (5, 5), 0), cv2.COLOR_BGR2HSV)
     mask = None
     for lo, hi in _bands(band):
@@ -64,10 +69,11 @@ def annotate(image):
     big = [c for c in contours if cv2.contourArea(c) >= MIN_AREA]
     cv2.drawContours(image, big, -1, (0, 165, 255), 2)
 
-    found = find_marker(image, band)
     if found is None:
-        cv2.putText(image, f"no {colour} blob big enough", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        biggest = max((cv2.contourArea(c) for c in contours), default=0.0)
+        cv2.putText(image, f"no {colour} blob big enough "
+                    f"(largest {biggest:.0f} px, need {MIN_AREA})", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     else:
         u, v = int(found[0]), int(found[1])
         cv2.drawMarker(image, (u, v), (0, 220, 0), cv2.MARKER_CROSS, 40, 2)
