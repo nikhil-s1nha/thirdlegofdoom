@@ -477,7 +477,7 @@ def cmd_play(args) -> int:
     if game.score.rounds:
         print(f"  robot win rate: {game.score.robot/game.score.rounds:.0%}  "
               f"({game.strikes} strikes, {game.feints} feints)")
-    if contact is not None:
+    if contact is not None and hasattr(contact, "peak_rise"):
         # The number to read on the first hardware session. The strike
         # caps the servo torque limit, which caps how much load a servo
         # can report, so the usable range is narrow and the 0.12 default

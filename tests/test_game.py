@@ -593,3 +593,48 @@ def test_the_strike_launch_does_not_read_as_contact():
     event = sensor.poll()
     assert event is not None and event.source == "servo_load"
     assert sensor.poll() is None, "fired twice for one strike"
+
+
+def test_a_round_is_not_scored_until_the_camera_has_caught_up():
+    """Measured on hardware: shutter-to-command is ~115 ms, so when the
+    paddle reaches the bottom the hand estimate still shows where the
+    hand was ~100 ms earlier -- under the arm. Judging there calls a
+    dodge a hit, and calls every feint a hold, because a flinch is a
+    reaction and cannot have happened yet."""
+    for withdrawn, expect_human in ((True, 1), (False, 0)):
+        game = HandSlapGame("normal", seed=3, contact=GeometricContactSensor())
+        robot = fake_robot(np.array([0.22, 0.0, 0.03]))
+        robot.measured_latency = 0.10
+        try:
+            game.hover_q = robot.controller.commanded.copy()
+            game.transition("ready")
+            game.state_since = time.perf_counter() - 5.0
+            for _ in range(4000):
+                game._state_ready(robot, robot.controller, 0.005)
+                if game.state == "strike":
+                    break
+            assert game.state == "strike", "never committed"
+
+            # Out of reach while the paddle travels, so nothing scores
+            # early and the swing runs to the bottom.
+            robot.tracker.best().filter.position = np.array([0.22, 0.30, 0.03])
+            deadline = time.perf_counter() + 2.0
+            while game.state == "strike" and time.perf_counter() < deadline:
+                game._state_strike(robot, robot.controller, 0.005)
+                time.sleep(0.005)
+            assert game.state == "resolve", "the swing never finished"
+            assert game.score.rounds == 0, "scored before the camera caught up"
+
+            # What the frames covering the moment of contact now show.
+            if not withdrawn:
+                robot.tracker.best().filter.position = game._tool_at_bottom.copy()
+            deadline = time.perf_counter() + 2.0
+            while game.state == "resolve" and time.perf_counter() < deadline:
+                game._state_resolve(robot, robot.controller, 0.005)
+                time.sleep(0.005)
+
+            assert game.score.rounds == 1, "never scored"
+            assert game.score.human == expect_human, (
+                f"withdrawn={withdrawn} scored {game.last_result}")
+        finally:
+            robot.controller.stop(park=False)

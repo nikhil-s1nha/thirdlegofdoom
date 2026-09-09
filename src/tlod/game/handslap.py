@@ -244,6 +244,8 @@ class HandSlapGame(StateMachine):
         self.personality = personality or Personality()
         self._performed = False
         self.hand_at_commit: np.ndarray | None = None
+        self._pending: str | None = None
+        self._tool_at_bottom: np.ndarray | None = None
         self.flinches = 0
         self.holds = 0
 
@@ -426,7 +428,14 @@ class HandSlapGame(StateMachine):
                 self._resolve_feint(robot, controller, flinched=True)
                 return
         if self.step_motion(controller, dt):
-            self._resolve_feint(robot, controller, flinched=False)
+            # A flinch is a *reaction*, so it cannot have happened yet: a
+            # feint lasts 280 ms and a human reacts in 230-400, then the
+            # camera takes another ~100 to show it. Scoring at the end of
+            # the motion calls every round a hold. Keep watching through
+            # the retract instead, which is where the reaction lands.
+            self._pending = "feint"
+            self.transition("resolve")
+            self._retract(controller)
 
     def _resolve_feint(self, robot, controller, flinched: bool) -> None:
         self.last_strike = time.perf_counter()
@@ -443,9 +452,9 @@ class HandSlapGame(StateMachine):
             self.announce(f"held through a feint ({self.score})")
         self.hand_at_commit = None
         self._performed = False
-        self.transition("resolve")
-        target = self.hover_q if self.hover_q is not None else np.concatenate([model.HOME, [0.0]])
-        self.run_motion(Retract(target, self.limits, duration=0.28), controller)
+        if self.state != "resolve":
+            self.transition("resolve")
+            self._retract(controller)
 
     def _begin_strike(self, controller, track) -> None:
         # Aim a touch ahead: the hand is nearly stationary, so this is a
@@ -483,7 +492,16 @@ class HandSlapGame(StateMachine):
             self._resolve(robot, controller, hit=True)
             return
         if self.step_motion(controller, dt):
-            self._resolve(robot, controller, hit=False)
+            # The paddle is down, but the camera has not caught up: the
+            # hand estimate is a pipeline-latency old, so a hand pulled
+            # during the swing still reads as sitting under the tool.
+            # Judging here scores that as a hit. So freeze where the tool
+            # got to and keep asking, through the retract, until the
+            # frames covering the moment of contact have arrived.
+            self._tool_at_bottom = tool
+            self._pending = "strike"
+            self.transition("resolve")
+            self._retract(controller)
 
     def _resolve(self, robot, controller, hit: bool) -> None:
         self.last_strike = time.perf_counter()
@@ -501,8 +519,54 @@ class HandSlapGame(StateMachine):
         target = self.hover_q if self.hover_q is not None else np.concatenate([model.HOME, [0.0]])
         self.run_motion(Retract(target, self.limits, duration=0.28), controller)
 
+    def _retract(self, controller) -> None:
+        target = self.hover_q if self.hover_q is not None else np.concatenate([model.HOME, [0.0]])
+        self.run_motion(Retract(target, self.limits, duration=0.28), controller)
+
+    def _judging_window(self, robot) -> float:
+        """How long to keep watching after a motion ends.
+
+        The pipeline's own measured shutter-to-command latency, when
+        there is one, because that is exactly how far behind the hand
+        estimate is. Doubled: once for the lag on the evidence, once more
+        because a reaction has to happen before it can be seen.
+        """
+        latency = getattr(robot, "measured_latency", 0.0) or 0.12
+        return float(np.clip(latency * 2.0, 0.12, 0.45))
+
     def _state_resolve(self, robot, controller, dt) -> None:
-        if self.step_motion(controller, dt):
+        done = self.step_motion(controller, dt)
+
+        # Still deciding the round the retract belongs to.
+        if self._pending == "strike":
+            hand = self._hand_for_scoring(robot)
+            if (hand is not None
+                    and self.contact.poll(tool_xyz=self._tool_at_bottom,
+                                          hand_xyz=hand) is not None):
+                self._pending = None
+                self._resolve(robot, controller, hit=True)
+                return
+        elif self._pending == "feint":
+            hand = self._hand_for_scoring(robot)
+            if hand is not None and self.hand_at_commit is not None:
+                moved = float(np.linalg.norm(np.asarray(hand) - self.hand_at_commit))
+                if moved > self.rules.flinch_distance:
+                    self._pending = None
+                    self._resolve_feint(robot, controller, flinched=True)
+                    return
+
+        if self._pending is not None and self.in_state < self._judging_window(robot):
+            return
+        if self._pending == "strike":
+            self._pending = None
+            self._resolve(robot, controller, hit=False)
+            return
+        if self._pending == "feint":
+            self._pending = None
+            self._resolve_feint(robot, controller, flinched=False)
+            return
+
+        if done:
             self.transition("settle")
 
     def _state_settle(self, robot, controller, dt) -> None:
