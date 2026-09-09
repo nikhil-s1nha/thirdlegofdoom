@@ -75,6 +75,10 @@ def main() -> int:
     p.add_argument("--precision", type=int, default=1, help="decimal places sent")
     p.add_argument("--sim", action="store_true",
                    help="synthetic camera + scripted hand, to test the serial link alone")
+    p.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="serve the camera view over HTTP so you can watch hand tracking "
+                        "from another machine, e.g. --preview 8081, then open "
+                        "http://<this board>:8081/ in a browser on your laptop")
     args = p.parse_args()
 
     if not args.port:
@@ -112,6 +116,14 @@ def main() -> int:
           f"rate <= {args.rate:g}/s" if args.rate > 0 else
           f"  eyes link: {args.port} @ {args.baud} baud, scale x{args.scale:g}")
 
+    preview = None
+    if args.preview:
+        from tlod.vision.preview import PreviewServer
+        preview = PreviewServer(port=args.preview)
+        preview.start()
+        print(f"  preview: open http://<this board>:{args.preview}/ from any browser "
+              "on the same network (or SSH-tunnel the port from your laptop)")
+
     min_interval = (1.0 / args.rate) if args.rate > 0 else 0.0
     last_sent = 0.0
     last_index = -1
@@ -129,6 +141,16 @@ def main() -> int:
 
             hands2d = detector.detect(frame)
             observations = locator.locate_all(hands2d)
+
+            if preview is not None:
+                import cv2
+
+                vis = frame.image.copy()
+                for h in hands2d:
+                    cx, cy = h.palm_center
+                    cv2.circle(vis, (int(cx), int(cy)), 10, (0, 220, 90), 2)
+                preview.offer(vis)
+
             if not observations:
                 continue
 
@@ -149,6 +171,8 @@ def main() -> int:
         camera.stop()
         detector.close()
         eyes.close()
+        if preview is not None:
+            preview.stop()
     print(f"\n  sent {sent} position updates")
     return 0
 
