@@ -176,34 +176,48 @@ def cmd_touch(args) -> int:
     The perception-to-control path on something that is not a hand, and
     the clearest way to see calibration error: a consistent offset in the
     same direction on every object means the extrinsics are wrong.
+
+    Real hardware only. There is no synthetic version of this because
+    there is nothing to synthesise: the scene renderer draws a hand and
+    no objects, so a simulated run would search an empty table. It also
+    could not answer the question if it did -- rendering objects through
+    the same calibration that recovers them exercises the arithmetic in
+    both directions and agrees with itself whatever the camera's real
+    position.
     """
-    from tlod.arm.controller import ArmController, SafetyLimits
-    from tlod.arm.mock import MockArm
-    from tlod.arm.model import HOME
+    from tlod.arm.controller import ArmController
     from tlod.game.touch import TouchObjectsPolicy
     from tlod.runtime.app import RobotApp
-    from tlod.vision.camera import MockCamera
     from tlod.vision.hands import HandLocator
     from tlod.vision.objects import ColorBlobDetector
-    from tlod.vision.scene import SceneHandDetector, SyntheticHandScene
     from tlod.vision.tracking import MultiTracker
 
     cfg = Config.load(args.config)
+    if not args.real:
+        raise SystemExit(
+            "  tlod touch drives the real arm against what the real camera\n"
+            "  sees; pass --real to confirm you want it to move.")
+    if not cfg.camera.extrinsics:
+        raise SystemExit(
+            "  no extrinsics configured, so the camera has no idea where the\n"
+            "  arm is. Run `tlod calibrate extrinsics` first.")
+
+    cfg = cfg.with_overrides(arm={"backend": "feetech"}, camera={"source": "opencv"})
     projector = build_projector(cfg)
-    scene = SyntheticHandScene(projector)
     policy = TouchObjectsPolicy()
-    controller = ArmController(
-        MockArm(q0=np.concatenate([HOME, [0.0]]), max_speed=cfg.arm.sim_max_speed,
-                accel=cfg.arm.sim_accel),
-        SafetyLimits(), cfg.runtime.control_hz)
+    camera = build_camera(cfg)
+    controller = ArmController(build_arm(cfg), build_limits(cfg),
+                               cfg.runtime.control_hz, governor=build_governor(cfg))
+
+    print("  THE ARM WILL MOVE. Clear the workspace, keep hands away.")
+    print("  Put red, green, blue or yellow objects on the table.")
+    input("  press Enter when ready, Ctrl-C to abort... ")
 
     app = RobotApp(
-        # Objects have to be visible, so this run renders pixels and the
-        # detector actually looks at them -- unlike the hand path, which
-        # short-circuits to scene truth for determinism.
-        camera=MockCamera(cfg.camera.width, cfg.camera.height, cfg.camera.fps,
-                          scene=scene, render=True),
-        detector=SceneHandDetector(scene),
+        camera=camera,
+        # No hand detector: this run is about objects, and loading
+        # mediapipe to return nothing would be a heavy way to do it.
+        detector=_NoHands(),
         locator=HandLocator(projector, depth_mode="size"),
         controller=controller,
         policy=policy,
@@ -212,21 +226,26 @@ def cmd_touch(args) -> int:
         control_hz=cfg.runtime.control_hz,
     )
     app.projector = projector
-    print(f"  scene has {len(scene.objects)} objects: "
-          f"{', '.join(o.label for o in scene.objects)}")
     _run_for(app, args.duration, view=args.view, projector=projector)
+
     print(f"\n  touched {len(policy.visited)}: {', '.join(policy.visited) or 'none'}")
+    for det in app.objects:
+        print(f"    {det.label:<6} at ({det.position[0]:+.3f}, "
+              f"{det.position[1]:+.3f}, {det.position[2]:+.3f}) m")
     if policy.errors:
         print(f"  placement error: mean {np.mean(policy.errors)*1000:.1f} mm, "
               f"max {np.max(policy.errors)*1000:.1f} mm")
-        truth = {o.label: np.array(o.position) for o in scene.objects}
-        for det in app.objects:
-            if det.label in truth:
-                err = np.linalg.norm(det.position - truth[det.label])
-                print(f"    {det.label:<6} detected {err*1000:5.1f} mm from true position")
     return 0
 
 
+class _NoHands:
+    """A hand detector that finds none, for object-only runs."""
+
+    def detect(self, frame):
+        return []
+
+    def close(self):
+        pass
 
 
 def build_app(cfg: Config, render: bool = False):
@@ -1301,6 +1320,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("touch", help="detect table objects and touch each one")
     s.add_argument("--duration", type=float, default=25.0)
     s.add_argument("--view", action="store_true")
+    s.add_argument("--real", action="store_true",
+                   help="required: this command drives the real arm against "
+                        "what the real camera sees")
     s.set_defaults(func=cmd_touch)
 
     s = sub.add_parser("move", help="move the tool to a position")
