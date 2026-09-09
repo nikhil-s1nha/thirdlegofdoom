@@ -14,7 +14,10 @@ safety:
   min_height: 0.03
 
 power:
-  governor: true
+  governor: false
   supply_current: 5.0
   headroom: 0.75
   min_voltage: 10.5
+
+runtime:
+  control_hz: 50
