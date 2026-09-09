@@ -374,6 +374,7 @@ def cmd_play(args) -> int:
         GeometricContactSensor,
         ProximityContactSensor,
         ServoLoadContactSensor,
+        ServoPressContactSensor,
     )
     from tlod.game.handslap import HandSlapGame, Personality
     from tlod.game.opponent import DodgingHand
@@ -420,10 +421,29 @@ def cmd_play(args) -> int:
         # What it genuinely cannot do is see a dodge inside the last
         # ~100 ms, because that is how stale the hand estimate is. A hand
         # pulled at the last instant scores as a hit it did not take.
-        if args.contact == "servo":
-            contact = ServoLoadContactSensor(app.controller.state,
-                                             threshold=args.contact_threshold)
-            source = (f"servo load, threshold {args.contact_threshold:.2f} "
+        if args.contact == "press":
+            limits = build_strike_limits(cfg)
+            # Left unset, each sensor keeps its own measured default: 0.02
+            # for press, which reads a settled arm, and 0.12 for servo,
+            # which reads one mid-swing. One flag cannot carry a sensible
+            # default for both, so it carries neither.
+            contact = ServoPressContactSensor(
+                app.controller.state,
+                **({} if args.contact_threshold is None
+                   else {"threshold": args.contact_threshold}))
+            source = (f"servo press, threshold {contact.threshold:.3f} of rated "
+                      f"torque after {contact.settle * 1000:.0f} ms still")
+            if limits.press_hold < contact.settle:
+                log.warning("press_hold is %.0f ms but the sensor needs %.0f ms of "
+                            "stillness: the arm will retract before it ever reads, "
+                            "and every round will score as a dodge",
+                            limits.press_hold * 1e3, contact.settle * 1e3)
+        elif args.contact == "servo":
+            contact = ServoLoadContactSensor(
+                app.controller.state,
+                **({} if args.contact_threshold is None
+                   else {"threshold": args.contact_threshold}))
+            source = (f"servo load, threshold {contact.threshold:.2f} "
                       "of rated torque")
         else:
             contact = ProximityContactSensor()
@@ -478,12 +498,14 @@ def cmd_play(args) -> int:
         print(f"  robot win rate: {game.score.robot/game.score.rounds:.0%}  "
               f"({game.strikes} strikes, {game.feints} feints)")
     if contact is not None and hasattr(contact, "peak_rise"):
-        # The number to read on the first hardware session. The strike
-        # caps the servo torque limit, which caps how much load a servo
-        # can report, so the usable range is narrow and the 0.12 default
-        # is a guess. A peak well under the threshold means contacts were
-        # being missed; a peak far above it on rounds scored as dodges
-        # means it is firing on the strike's own acceleration.
+        # The number to read after a hardware session, and it means
+        # different things for the two sensors. For press it is the
+        # largest *settled* rise -- measured 0.001 over nothing and
+        # 0.037 over a hand, so a peak near 0.001 across a session with
+        # strikes means the paddle kept missing. For servo it is a peak
+        # taken mid-swing, where the arm's own braking reached the torque
+        # cap in every measured run including the empty one, so a high
+        # peak there says very little.
         print(f"\n  contact: peak load rise {contact.peak_rise:.3f} "
               f"(threshold {contact.threshold:.3f})")
         if contact.read_failures:
@@ -1739,15 +1761,21 @@ def main(argv: list[str] | None = None) -> int:
                    help="tier C: real camera, real hand AND the real arm, on this "
                         "machine. The arm will strike at your hand")
     s.add_argument("--contact", default="proximity",
-                   choices=("proximity", "servo"),
+                   choices=("proximity", "servo", "press"),
                    help="how a hit is decided. proximity compares the tracked "
-                        "hand against the arm's encoders; servo watches joint "
-                        "load, which on this arm also sees its own braking")
-    s.add_argument("--contact-threshold", type=float, default=0.12,
+                        "hand against the arm's encoders, and cannot see a dodge "
+                        "inside the last ~100 ms; press holds the paddle down and "
+                        "reads what torque the arm is still spending, which "
+                        "measured 0.001 over nothing against 0.037 over a hand; "
+                        "servo watches load during the swing, which on this arm "
+                        "measured a rigid book *between* nothing and a hand and "
+                        "is kept only so that result stays reproducible")
+    s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
                    help="--real only: rise in servo load, as a fraction of rated "
-                        "torque, that counts as a hit. The default is a guess; "
-                        "the run prints the peak it saw so you can set it")
+                        "torque, that counts as a hit. Left unset, each sensor uses "
+                        "its own measured default -- 0.02 for press, 0.12 for "
+                        "servo. The run prints the peak it saw")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--seed", type=int, default=None)

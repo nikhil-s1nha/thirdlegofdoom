@@ -140,7 +140,20 @@ millimetres?).
 
 No sidecar microcontroller: the servos carry torque and overload limits
 themselves, a mechanical switch is a better e-stop than any chip, and
-contact is read from `Present_Load` over the bus already in use.
+contact is read from `Present_Load` over the bus already in use -- but
+only in the one regime where that register says anything. Measured
+across nothing / a book / a hand, the peak load *during* a swing read
+0.330 / 0.326 / 0.350: a rigid book landed between the other two,
+because the arm braking its own mass reaches the torque cap in every
+run, empty table included. Held still at the bottom, the same three read
+**0.001 / 0.038 / 0.037**.
+
+So `Strike` stays down for `press_hold` (450 ms) at the strike's torque
+limit, and `ServoPressContactSensor` reads only after the servo's load
+filter has decayed -- `--contact press`. `Present_Current` (addr 69) was
+tried alongside and is not usable: it separated the same three
+conditions by 0.006 A, exactly one 6.5 mA quantisation step, and smaller
+than the jitter within a single run.
 
 The adapter's 5 V buck is specified for a Raspberry Pi, so it can power a
 control board in the two-board layout. An Orange Pi 5 can draw up to 4 A

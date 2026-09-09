@@ -417,3 +417,180 @@ def test_the_overlay_stream_starts_and_stops_cleanly():
     names = {t.name for t in threading.enumerate() if t.is_alive()}
     time.sleep(0.3)
     assert "overlay" not in {t.name for t in threading.enumerate() if t.is_alive()}, names
+
+
+class TestServoPressContact:
+    """The sensor that survived the hardware A/B.
+
+    Measured on the arm across nothing / a book / a hand, peak load during
+    the swing read 0.330 / 0.326 / 0.350 -- a rigid book between the other
+    two, so the swing carries no information about what it hit. Held still
+    at the bottom the same three read 0.001 / 0.038 / 0.037. These tests
+    pin the two properties that turn the second set of numbers into a
+    sensor: nothing is read until the arm is pressing, and the reference is
+    the hover rather than anything sampled mid-swing.
+    """
+
+    def _rig(self, load_at_rest=0.20):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.arm.mock import MockArm
+        from tlod.types import JointState
+
+        class LoadReportingArm(MockArm):
+            def __init__(self):
+                super().__init__(q0=np.concatenate([HOME, [0.0]]))
+                self.load = np.zeros(6)
+
+            def read(self):
+                s = super().read()
+                return JointState(q=s.q, stamp=s.stamp, dq=s.dq, load=self.load.copy())
+
+        backend = LoadReportingArm()
+        backend.load[2] = load_at_rest
+        controller = ArmController(backend, SafetyLimits(), 100.0)
+        controller.start()
+        return backend, controller
+
+    def test_the_swings_own_braking_torque_is_never_read(self):
+        """The failure that retired the previous sensor, as a test.
+
+        Load reaches its ceiling during every swing, empty table included,
+        because the arm is braking its own mass. A sensor that reads then
+        cannot help but score a dodge as a hit.
+        """
+        from tlod.game.contact import ServoPressContactSensor
+
+        backend, controller = self._rig()
+        try:
+            sensor = ServoPressContactSensor(controller.state, threshold=0.02)
+            sensor.arm()
+            assert sensor.poll(pressing=False) is None       # baseline, at hover
+            backend.load[2] = 0.55                           # mid-swing, at the cap
+            for _ in range(50):
+                assert sensor.poll(pressing=False) is None, \
+                    "fired on the strike's own braking torque"
+                time.sleep(0.01)
+        finally:
+            controller.stop(park=False)
+
+    def test_it_fires_only_after_the_press_has_settled(self):
+        from tlod.game.contact import ServoPressContactSensor
+
+        backend, controller = self._rig()
+        try:
+            sensor = ServoPressContactSensor(controller.state, threshold=0.02,
+                                             settle=0.15)
+            sensor.arm()
+            sensor.poll(pressing=False)                      # baseline at 0.20
+            backend.load[2] = 0.24                           # 0.04 rise: something there
+            assert sensor.poll(pressing=True) is None, "fired before settling"
+            t0 = time.perf_counter()
+            event = None
+            while event is None and time.perf_counter() - t0 < 1.0:
+                event = sensor.poll(pressing=True)
+                time.sleep(0.005)
+            assert event is not None and event.source == "servo_press"
+            assert time.perf_counter() - t0 >= 0.15, "settle window not honoured"
+            assert sensor.poll(pressing=True) is None, "fired twice on one arming"
+        finally:
+            controller.stop(park=False)
+
+    def test_an_empty_press_is_a_dodge(self):
+        """0.001 over nothing, against a 0.02 threshold."""
+        from tlod.game.contact import ServoPressContactSensor
+
+        backend, controller = self._rig()
+        try:
+            sensor = ServoPressContactSensor(controller.state, threshold=0.02,
+                                             settle=0.05)
+            sensor.arm()
+            sensor.poll(pressing=False)
+            backend.load[2] = 0.201                          # the measured 0.001
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 0.4:
+                assert sensor.poll(pressing=True) is None, "empty air scored as a hit"
+                time.sleep(0.005)
+            assert sensor.peak_rise < 0.02
+        finally:
+            controller.stop(park=False)
+
+    def test_a_caller_that_forgets_pressing_scores_dodges_not_hits(self):
+        from tlod.game.contact import ServoPressContactSensor
+
+        backend, controller = self._rig()
+        try:
+            sensor = ServoPressContactSensor(controller.state, threshold=0.02,
+                                             settle=0.0)
+            sensor.arm()
+            sensor.poll()
+            backend.load[2] = 0.60
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 0.2:
+                assert sensor.poll() is None
+                time.sleep(0.005)
+        finally:
+            controller.stop(park=False)
+
+
+class TestStrikeHoldsBeforeRetracting:
+    """`press_hold` is what gives the sensor above anything to read."""
+
+    def _rig(self):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.arm.mock import MockArm
+
+        controller = ArmController(MockArm(q0=np.concatenate([HOME, [0.0]])),
+                                   SafetyLimits(), 100.0)
+        controller.start()
+        return controller
+
+    def test_it_reports_pressing_and_stays_down_for_the_hold(self):
+        from tlod.arm.primitives import Strike, StrikeLimits
+
+        controller = self._rig()
+        try:
+            limits = StrikeLimits()
+            limits.press_hold = 0.25
+            start = controller.pose()
+            motion = Strike([start.x, start.y, start.z - 0.05], limits, duration=0.15)
+            motion.start(controller)
+            assert not motion.pressing, "pressing before the drop has begun"
+
+            pressing_at = None
+            depths = []
+            t0 = time.perf_counter()
+            while not motion.step(controller, 0.01) and time.perf_counter() - t0 < 3.0:
+                if motion.pressing:
+                    if pressing_at is None:
+                        pressing_at = time.perf_counter()
+                    depths.append(controller.commanded.copy())
+                time.sleep(0.01)
+
+            assert pressing_at is not None, "never reported pressing"
+            held = time.perf_counter() - pressing_at
+            assert held >= limits.press_hold, f"held only {held * 1e3:.0f} ms"
+            # The commanded pose must not drift during the hold: the whole
+            # point is a static lean on whatever is underneath.
+            assert np.allclose(depths[0], depths[-1], atol=1e-9), \
+                "commanded pose moved during the press"
+            assert not motion.pressing, "still pressing after finishing"
+        finally:
+            controller.stop(park=False)
+
+    def test_press_hold_of_zero_keeps_the_old_drop_and_go_behaviour(self):
+        from tlod.arm.primitives import Strike, StrikeLimits
+
+        controller = self._rig()
+        try:
+            limits = StrikeLimits()
+            limits.press_hold = 0.0
+            start = controller.pose()
+            motion = Strike([start.x, start.y, start.z - 0.05], limits, duration=0.15)
+            motion.start(controller)
+            t0 = time.perf_counter()
+            while not motion.step(controller, 0.01) and time.perf_counter() - t0 < 3.0:
+                assert not motion.pressing
+                time.sleep(0.01)
+            assert motion.finished
+        finally:
+            controller.stop(park=False)
