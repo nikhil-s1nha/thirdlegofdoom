@@ -183,3 +183,206 @@ class TestHybridConfig:
         assert cfg.arm.calibration == "calib/mine.json"
         assert cfg.arm.port == "/dev/ttyACM0"
         assert cfg.safety.max_speed == 3.5
+
+
+class TestPlayConfig:
+    """`play --real` is the whole game on one board: camera, hand tracking,
+    IK, servos and contact detection in one process, with the arm striking
+    at a person's hand.
+
+    `cmd_play` had `--real-hand` for the camera and no flag at all for the
+    arm, so tier C could not be reached. The failure to guard against is
+    the one `hybrid` had: a silent revert to "mock" is indistinguishable
+    from an arm that simply did not move.
+    """
+
+    def test_real_reaches_the_arm_backend(self):
+        from tlod.cli import play_config
+        from tlod.config import Config
+
+        cfg = play_config(Config(), camera=5, real=True)
+        assert cfg.arm.backend == "feetech"
+
+    def test_without_real_nothing_can_move(self):
+        from tlod.cli import play_config
+        from tlod.config import Config
+
+        cfg = play_config(Config(), camera=5, real=False)
+        assert cfg.arm.backend == "mock"
+
+    def test_the_camera_and_hand_are_real_either_way(self):
+        """Tier B and tier C differ only in the arm; both play a real hand."""
+        from tlod.cli import play_config
+        from tlod.config import Config
+
+        for real in (True, False):
+            cfg = play_config(Config(), camera=5, real=real)
+            assert cfg.camera.source == "opencv"
+            assert cfg.camera.index == 5
+            assert cfg.vision.detector == "mediapipe"
+
+    def test_the_arm_config_is_otherwise_untouched(self):
+        from tlod.cli import play_config
+        from tlod.config import Config
+
+        base = Config.from_dict({
+            "arm": {"calibration": "calib/mine.json", "port": "/dev/ttyACM0"},
+            "safety": {"max_speed": 3.5},
+        })
+        cfg = play_config(base, camera=0, real=True)
+        assert cfg.arm.calibration == "calib/mine.json"
+        assert cfg.arm.port == "/dev/ttyACM0"
+        assert cfg.safety.max_speed == 3.5
+
+    def test_real_refuses_to_run_without_extrinsics(self):
+        """The gate has to fire before anything opens a serial port.
+
+        Without extrinsics the camera's pose is a guess, so every strike
+        would be aimed through a guessed transform -- at a hand.
+        """
+        import pytest
+
+        from tlod.cli import main
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["play", "--real", "--yes"])
+        assert "extrinsics" in str(excinfo.value)
+
+
+class TestStrikeAppliesTheTorqueLimit:
+    """The lowered torque limit is what makes an arm swinging at a hand
+    yield instead of push. It reaches the servos only through
+    `backend.set_torque_limit`, looked up with getattr -- so a broken path
+    fails silently, and the arm just hits harder.
+    """
+
+    def _controller(self, torque_limit=800):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.arm.mock import MockArm
+
+        backend = MockArm(q0=np.concatenate([HOME, [0.0]]))
+        backend.set_torque_limit(torque_limit)
+        controller = ArmController(backend, SafetyLimits(), 100.0)
+        controller.start()
+        return controller
+
+    def test_a_strike_lowers_the_limit_and_puts_it_back(self):
+        from tlod.arm import model
+        from tlod.arm.primitives import Strike, StrikeLimits
+
+        controller = self._controller()
+        limits = StrikeLimits()
+        start = model.tool_pose(HOME).xyz()
+        strike = Strike([start[0], start[1], start[2] - 0.05], limits, duration=0.05)
+        try:
+            strike.start(controller)
+            assert controller.backend._torque_limit == limits.torque_limit, (
+                "the strike never lowered the servo torque limit")
+            deadline = time.perf_counter() + 3.0
+            while not strike.step(controller, 0.01) and time.perf_counter() < deadline:
+                time.sleep(0.01)
+            assert strike.finished, "strike never completed"
+            assert controller.backend._torque_limit == limits.normal_torque_limit
+        finally:
+            controller.stop(park=False)
+
+    def test_the_restored_limit_follows_the_config(self):
+        """`StrikeLimits.normal_torque_limit` defaults to 800 only because
+        `arm.torque_limit` does. Changing one and not the other would let
+        the first strike restore a strength the config asked against."""
+        from tlod.cli import build_strike_limits
+        from tlod.config import Config
+
+        limits = build_strike_limits(Config.from_dict({"arm": {"torque_limit": 500}}))
+        assert limits.normal_torque_limit == 500
+        assert limits.torque_limit == 350, "the strike-time cap is not a config knob"
+
+    def test_game_speeds_cannot_exceed_the_configured_cap(self):
+        """`controller._write` uses an explicit max_speed verbatim, so a
+        StrikeLimits faster than `safety.max_speed` overrides it rather
+        than being clamped by it -- on the one motion aimed at a person."""
+        from tlod.cli import build_strike_limits
+        from tlod.config import Config
+
+        slow = build_strike_limits(Config.from_dict({"safety": {"max_speed": 1.5}}))
+        assert slow.strike_speed <= 1.5
+        assert slow.retract_speed <= 1.5
+
+        fast = build_strike_limits(Config.from_dict({"safety": {"max_speed": 99.0}}))
+        assert fast.strike_speed == 3.5, "the cap must not speed the strike up"
+
+
+class TestServoLoadContactWiring:
+    """Contact on hardware reads Present_Load through the same controller
+    the control loop commands, which is the only place the servo bus is
+    serialised. Nothing had ever constructed this sensor."""
+
+    def _load_arm(self):
+        from tlod.arm.mock import MockArm
+        from tlod.types import JointState
+
+        class LoadReportingArm(MockArm):
+            """MockArm that also reports Present_Load, as the STS3215 does."""
+
+            def __init__(self):
+                super().__init__(q0=np.concatenate([HOME, [0.0]]))
+                self.load = np.zeros(6)
+
+            def read(self):
+                s = super().read()
+                return JointState(q=s.q, stamp=s.stamp, dq=s.dq, load=self.load.copy())
+
+        return LoadReportingArm()
+
+    def test_it_fires_through_a_live_controller(self):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.game.contact import ServoLoadContactSensor
+
+        backend = self._load_arm()
+        controller = ArmController(backend, SafetyLimits(), 100.0)
+        controller.start()
+        try:
+            # Exactly how cmd_play builds it: the controller's own state()
+            # accessor, so reads take the bus lock the control loop uses.
+            sensor = ServoLoadContactSensor(controller.state, threshold=0.12)
+            backend.load[2] = 0.20          # elbow already loaded by the pose
+            sensor.arm()
+            assert sensor.poll() is None, "resting posture scored as a hit"
+            backend.load[2] = 0.40          # something resisted
+            event = sensor.poll()
+            assert event is not None and event.source == "servo_load"
+            assert sensor.poll() is None, "fired twice on one arming"
+        finally:
+            controller.stop(park=False)
+
+    def test_a_failed_bus_read_does_not_escape(self):
+        """A read failure here would reach RobotApp's control loop, which
+        answers a policy exception by e-stopping -- freezing the arm
+        mid-swing above the hand it was aiming at. Sync-read failures are a
+        known event on this bus, so this is a live path."""
+        from tlod.game.contact import ServoLoadContactSensor
+
+        def failing():
+            raise RuntimeError("sync read failed")
+
+        sensor = ServoLoadContactSensor(failing)
+        sensor.arm()
+        assert sensor.poll() is None
+        assert sensor.read_failures == 2
+
+    def test_a_missed_baseline_is_taken_later_not_assumed_zero(self):
+        """If the read at arm() fails, a zero baseline would turn the
+        pose's own resting load into a hit on the first tick."""
+        from tlod.game.contact import ServoLoadContactSensor
+        from tlod.types import JointState
+
+        state = {"load": None}
+        sensor = ServoLoadContactSensor(
+            lambda: JointState(q=np.zeros(6), stamp=0.0, load=state["load"]),
+            threshold=0.12,
+        )
+        sensor.arm()
+        state["load"] = np.array([0.0, 0.45, 0.40, 0.35, 0.0, 0.0])
+        assert sensor.poll() is None, "resting load scored as contact"
+        state["load"] = np.array([0.0, 0.45, 0.60, 0.35, 0.0, 0.0])
+        assert sensor.poll() is not None
