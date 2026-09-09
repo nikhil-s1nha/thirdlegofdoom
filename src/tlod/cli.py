@@ -753,7 +753,7 @@ def cmd_vision_check(args) -> int:
     self-consistent) needs only a camera, while accuracy (actually right)
     needs ground truth, which only the arm can provide.
     """
-    from tlod.vision.calibrate_flow import calibration_poses, find_marker
+    from tlod.vision.calibrate_flow import MARKER_BANDS, calibration_poses, find_marker
     from tlod.vision.check import Thresholds, check_against_arm, check_precision
     from tlod.vision.hands import HandLocator
 
@@ -799,14 +799,14 @@ def cmd_vision_check(args) -> int:
             from tlod.arm.controller import ArmController, SafetyLimits
 
             print("\n  accuracy check: THE ARM WILL MOVE. Clear the workspace.")
-            print("  A green marker must be on the gripper.")
+            print(f"  A {args.marker} marker must be on the gripper.")
             if not args.yes:
                 input("  press Enter when ready, Ctrl-C to abort... ")
             controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
             controller.start()
             try:
                 def locate(image):
-                    uv = find_marker(image)
+                    uv = find_marker(image, MARKER_BANDS[args.marker])
                     if uv is None:
                         return None
                     depth_plane = projector.pixel_to_plane(uv[0], uv[1], 0.0)
@@ -1405,6 +1405,10 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_arm_viewer)
 
     s = sub.add_parser("vision-check", help="verify vision numerically; for headless boards")
+    s.add_argument("--marker", default="green", choices=sorted(MARKER_COLOURS),
+                   help="colour of the marker on the gripper, for --with-arm. "
+                        "Pick one absent from the rest of the frame: the largest "
+                        "blob of that colour wins, whatever it belongs to")
     s.add_argument("--duration", type=float, default=20.0)
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--with-arm", action="store_true", dest="with_arm",
