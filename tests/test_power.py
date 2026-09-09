@@ -182,3 +182,43 @@ class TestGovernor:
             gov.note_voltage(12.0)
         gov.update(model.HOME, ProfileLimits(), 0.2)
         assert gov.scale < dropped + 0.2, "recovered far too quickly"
+
+
+class TestGovernorCost:
+    """The governor has to fit inside a control tick.
+
+    Measured on a Raspberry Pi 5: worst_case_scale is ~11.9 ms, against a
+    20 ms budget at 50 Hz, and more than policy, IK and the servo bus put
+    together. It ran every tick and drove the control loop to 96.7%
+    overruns and a 4.5 s command latency.
+    """
+
+    def test_the_pose_term_is_not_recomputed_every_tick(self):
+        gov = PowerGovernor(PowerModel(budget=PowerBudget(supply_current=2.0)),
+                            pose_interval=0.2)
+        for _ in range(100):                      # 1 s at 100 Hz
+            gov.update(model.HOME, ProfileLimits(), 0.01)
+        assert gov.pose_evaluations <= 6, "still recomputing at control rate"
+
+    def test_caching_does_not_change_where_the_derate_settles(self):
+        limits = ProfileLimits()
+        gov = PowerGovernor(PowerModel(budget=PowerBudget(supply_current=2.0)),
+                            pose_interval=0.2)
+        for _ in range(2000):
+            scale = gov.update(model.HOME, limits, 0.01)
+        assert scale == pytest.approx(gov.model.worst_case_scale(model.HOME, limits),
+                                      abs=1e-3)
+
+    def test_a_sagging_rail_is_answered_between_pose_evaluations(self):
+        """The voltage term is the one that must not wait for the cache:
+        it arrives from HealthMonitor asynchronously, and delaying it is
+        the failure the governor exists to prevent."""
+        gov = PowerGovernor(PowerModel(budget=PowerBudget(supply_current=10.0)),
+                            pose_interval=10.0)
+        gov.update(model.HOME, ProfileLimits(), 0.01)
+        before = gov.pose_evaluations
+        gov.note_voltage(8.0)
+        for _ in range(20):
+            scale = gov.update(model.HOME, ProfileLimits(), 0.01)
+        assert scale < 0.9, "sag ignored until the next pose evaluation"
+        assert gov.pose_evaluations == before, "test did not exercise the cache"

@@ -223,3 +223,42 @@ def test_freshness_gate_works_across_the_link():
         assert subscriber.perception.get_fresh(0.15) is None, "stale data served"
     finally:
         subscriber.stop()
+
+
+def test_a_backlogged_publisher_cannot_claim_the_mailbox():
+    """A vision-serve left running from an earlier session has higher
+    sequence numbers than a freshly started one, so the sequence guard
+    alone hands it the mailbox permanently -- and it is usually also
+    backlogged, so what it hands over is seconds old. Observed on real
+    hardware as a 4.5 s shutter-to-servo latency with every counter
+    looking like ordinary reordering."""
+    sub = VisionSubscriber(port=45994, require_clock=False)
+    now = time.perf_counter()
+
+    sub._handle(Packet(seq=5, stamp=now, hands=[], objects=[]).encode())
+    assert sub.received == 1
+
+    # The zombie: far ahead in sequence, far behind in time.
+    sub._handle(Packet(seq=9000, stamp=now - 4.5, hands=[], objects=[]).encode())
+    assert sub.dropped_old == 1
+    assert sub._last_seq == 5, "a stale packet advanced the sequence"
+
+    # The live publisher keeps the mailbox.
+    sub._handle(Packet(seq=6, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.received == 2
+
+
+def test_the_sequence_guard_gives_up_when_the_sender_restarts():
+    """A restarted publisher begins at seq 1 again. Holding the old
+    sequence forever would ignore the only perception there is."""
+    sub = VisionSubscriber(port=45993, require_clock=False, seq_resync_after=5)
+    sub._handle(Packet(seq=500, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+
+    for seq in range(1, 5):
+        sub._handle(Packet(seq=seq, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.seq_resyncs == 0, "gave up too early; this could be real reordering"
+
+    for seq in range(5, 9):
+        sub._handle(Packet(seq=seq, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.seq_resyncs == 1
+    assert sub._last_seq < 500, "did not adopt the restarted sender"

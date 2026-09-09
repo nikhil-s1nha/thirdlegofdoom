@@ -410,14 +410,28 @@ class PowerGovernor:
         *,
         cut_time: float = 0.1,
         recover_time: float = 3.0,
+        pose_interval: float = 0.2,
     ) -> None:
         self.model = model or PowerModel()
         self.cut_time = cut_time
         self.recover_time = recover_time
+        # How often the pose-dependent term is recomputed. It costs an
+        # inertia matrix and a feasibility search -- ~12 ms on a Pi 5,
+        # measured, which is more than policy and IK and the servo bus
+        # together and does not fit in a control tick. It also does not
+        # need to run at control rate: its output is fed through the
+        # cut_time/recover_time filter below, which is an order of
+        # magnitude slower than a tick, so recomputing every tick buys
+        # precision the filter immediately throws away. The voltage term
+        # is *not* cached; see update().
+        self.pose_interval = pose_interval
         self.scale = 1.0
         self.voltage_scale = 1.0
         self.last_voltage: float | None = None
         self.sag_events = 0
+        self._pose_scale = 1.0
+        self._since_pose = float("inf")
+        self.pose_evaluations = 0
 
     def note_voltage(self, volts: float) -> None:
         """Feed in a measured bus voltage, from anywhere that has one.
@@ -441,8 +455,23 @@ class PowerGovernor:
         self.voltage_scale = float(np.clip(1.0 - depth, 0.1, 1.0))
 
     def update(self, q: np.ndarray, limits, dt: float) -> float:
-        """Advance the governor one tick. Returns the derate to apply."""
-        target = min(self.model.worst_case_scale(q, limits), self.voltage_scale)
+        """Advance the governor one tick. Returns the derate to apply.
+
+        Two terms, deliberately on different clocks. The pose term asks
+        what this configuration can afford and is expensive, so it runs
+        at `pose_interval`; a pose cannot change enough in 200 ms to
+        matter to a filter whose own recovery is measured in seconds.
+        The voltage term is read every tick, because a sagging rail is
+        the one input that must be answered immediately -- it arrives
+        from HealthMonitor between pose evaluations, and delaying it is
+        exactly the failure the governor exists to prevent.
+        """
+        self._since_pose += dt
+        if self._since_pose >= self.pose_interval:
+            self._since_pose = 0.0
+            self._pose_scale = self.model.worst_case_scale(q, limits)
+            self.pose_evaluations += 1
+        target = min(self._pose_scale, self.voltage_scale)
         tau = self.cut_time if target < self.scale else self.recover_time
         alpha = 1.0 if dt >= tau else dt / tau
         self.scale += (target - self.scale) * alpha
