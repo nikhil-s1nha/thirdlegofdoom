@@ -565,11 +565,26 @@ Aim for ~50% against 250 ms.
 max_drop: float = 0.08        # the safety knob. Shorter = safer AND faster.
 strike_speed: float = 3.5     # rad/s during a strike
 torque_limit: int = 350       # of 1000, while striking
-plane_margin: float = 0.005   # never command below the target plane
+press_depth: float = 0.010    # command this far BELOW the hand surface
+press_hold: float = 0.45      # stay down this long before retracting
 ```
 
 `max_drop` improves speed and safety together — a shorter strike lands
 sooner and arrives slower. Reach for it first.
+
+`torque_limit` is what bounds the force, not the geometry. Held against
+a rigid book at 350/1000 the arm leans by 0.038 of rated torque and
+stops; it cannot push harder however deep it is asked to go.
+
+`press_depth` is what makes a hit detectable rather than what makes it
+harder. `ServoPressContactSensor` reads the torque still being spent
+while the paddle is held down, and torque is only spent when the arm is
+blocked short of its floor — so a floor *above* the hand means a real
+touch spends nothing and scores as a dodge. It was +5 mm for a while,
+and that is exactly what it did.
+
+`safety.min_height` has the last word over all of it, so raising
+`press_depth` past that floor changes nothing.
 
 ### A new game
 

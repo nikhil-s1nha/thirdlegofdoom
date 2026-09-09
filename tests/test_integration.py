@@ -594,3 +594,74 @@ class TestStrikeHoldsBeforeRetracting:
             assert motion.finished
         finally:
             controller.stop(park=False)
+
+
+class TestStrikeAimsBelowTheHand:
+    """A touch that spends no torque scores as a dodge.
+
+    `ServoPressContactSensor` reads the torque the arm is still spending
+    while held down, and torque is only spent when the arm is blocked
+    short of its commanded floor. So the floor has to sit *below* the
+    estimated hand surface. It sat 5 mm above it for a while, which made
+    detection a function of how thick the hand happened to be that round:
+    measured, a hand blocking at 29 mm against a 27 mm floor read 0.037,
+    and the same hand held flatter reached the floor untouched and read
+    0.001 after landing on it.
+    """
+
+    def _controller(self, min_height):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.arm.mock import MockArm
+
+        controller = ArmController(MockArm(q0=np.concatenate([HOME, [0.0]])),
+                                   SafetyLimits(min_height=min_height), 100.0)
+        controller.start()
+        return controller
+
+    def _floor_reached(self, controller, hand_z, limits):
+        from tlod.arm.primitives import Strike
+
+        start = controller.pose()
+        motion = Strike([start.x, start.y, hand_z], limits, duration=0.1)
+        motion.start(controller)
+        t0 = time.perf_counter()
+        while not motion.step(controller, 0.01) and time.perf_counter() - t0 < 3.0:
+            time.sleep(0.01)
+        return controller.pose().z
+
+    def test_the_commanded_floor_is_below_the_estimated_hand(self):
+        from tlod.arm.primitives import StrikeLimits
+
+        limits = StrikeLimits()
+        limits.press_hold = 0.0
+        controller = self._controller(min_height=0.001)
+        try:
+            hand_z = controller.pose().z - 0.05
+            floor = self._floor_reached(controller, hand_z, limits)
+            assert floor < hand_z, (
+                f"floor {floor * 1e3:.1f} mm is at or above the hand at "
+                f"{hand_z * 1e3:.1f} mm, so a touch would spend no torque")
+            assert abs((hand_z - floor) - limits.press_depth) < 2e-3
+        finally:
+            controller.stop(park=False)
+
+    def test_min_height_still_has_the_last_word(self):
+        """The floor that keeps the paddle off the table outranks press_depth.
+
+        Worth pinning because it is also the way to set press_depth and
+        see no change at all: a min_height above the intended floor
+        silently clamps it back, and the only symptom is a strike that
+        stops high.
+        """
+        from tlod.arm.primitives import StrikeLimits
+
+        limits = StrikeLimits()
+        limits.press_hold = 0.0
+        controller = self._controller(min_height=0.06)
+        try:
+            hand_z = controller.pose().z - 0.05
+            assert hand_z - limits.press_depth < 0.06, "test does not exercise the clamp"
+            floor = self._floor_reached(controller, hand_z, limits)
+            assert floor >= 0.06 - 2e-3, f"drove to {floor * 1e3:.1f} mm, under min_height"
+        finally:
+            controller.stop(park=False)

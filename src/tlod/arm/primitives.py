@@ -79,7 +79,33 @@ class StrikeLimits:
     # number is the only guard there is, so it matches the configured
     # ceiling.
     retract_speed: float = 3.5          # rad/s returning; away from the hand
-    plane_margin: float = 0.005         # never command below target plane minus this
+    # How far BELOW the estimated hand surface to command the paddle.
+    #
+    # This was +5 mm above it, named plane_margin, on the reasoning that
+    # stopping short of the hand is what keeps a wrong height estimate
+    # harmless. The reasoning had the wrong guard in mind. What bounds the
+    # force is `torque_limit`: the servo cannot push harder than 350/1000
+    # no matter how deep it is asked to go, and the measured press against
+    # a rigid book -- the stiffest thing available -- was a 0.038 lean.
+    # The geometry never bounded force; it only decided whether contact
+    # happened at all, and at +5 mm it decided "usually not".
+    #
+    # It also made detection depend on the thickness of the hand. The
+    # sensor reads the torque still being spent while held, and torque is
+    # only spent if the arm is *blocked short of its commanded floor*. A
+    # floor above the hand means the paddle arrives freely, spends nothing
+    # and scores a dodge -- having touched. Measured: floor 27 mm, a hand
+    # that blocked at 29 mm, 2 mm of press, 0.037. A flatter hand, or the
+    # same hand held flatter, reaches 27 mm unobstructed and reads 0.001.
+    #
+    # Commanding below the surface instead makes the press deep enough
+    # that a few millimetres of hand thickness stop mattering. 10 mm
+    # covers the spread seen between one round and the next.
+    #
+    # `safety.min_height` still has the last word, and is what keeps this
+    # off the table -- so raising press_depth without lowering min_height
+    # changes nothing at all.
+    press_depth: float = 0.010
     torque_limit: int = 350             # of 1000, while striking; yields on contact
     normal_torque_limit: int = 800
     # Stay down at the bottom, still at `torque_limit`, before retracting.
@@ -274,12 +300,23 @@ class Strike(Motion):
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
         start_z = model.tool_pose(self._q0[:5]).z
+        # `press_depth` below the estimated hand surface, so the paddle is
+        # still trying to descend when it meets the hand and the servos
+        # have something to spend torque on. The guard against a wrong
+        # height estimate is `torque_limit`, not this geometry.
+        #
+        # The drop is measured to *this*, not to the hand plane. Measuring
+        # it to the plane and then subtracting made press_depth a complete
+        # no-op: clamp_drop(start - hand) lands end_z exactly on the hand,
+        # and max() of that against a floor below it returns the hand
+        # again. Every strike stopped precisely where it used to.
+        floor = self.target[2] - self.limits.press_depth
         drop = self.limits.clamp_drop(
-            start_z - self.target[2] if self.depth is None else self.depth
+            start_z - floor if self.depth is None else self.depth
         )
-        # Never below the plane. This is the guard that makes a wrong
-        # height estimate harmless rather than injurious.
-        end_z = max(self.target[2] + self.limits.plane_margin, start_z - drop)
+        # max_drop can still stop the swing above the floor; the max()
+        # keeps an explicit `depth` from going below it.
+        end_z = max(floor, start_z - drop)
         goal = Pose(float(self.target[0]), float(self.target[1]), float(end_z))
         result, safe, violations = controller.solve(goal, position_only=True)
         self.ok = result.ok
@@ -449,37 +486,42 @@ class Move:
     cycles: float
 
 
-# Amplitudes are timid on the joints that translate the tool and generous
-# on the ones that do not: a 26-degree wrist roll is unmistakable across a
-# room and moves the gripper nowhere, where the same angle at the shoulder
-# would sweep it through 10 cm of table.
+# Big, slow gestures. Amplitude and speed trade against each other and
+# the trade is not negotiable: peak joint acceleration for a swing of
+# amplitude A at f Hz is A(2*pi*f)^2, against a configured 35 rad/s^2. So
+# a half-radian wiggle at 10 Hz asks for ~2000 and arrives as a tremble,
+# while the *same* half radian over a second and a bit asks for 14 and
+# arrives whole. Wanting bigger movements therefore means wanting slower
+# ones, and at 1.2 s a swing can be over a radian -- 60-plus degrees,
+# which is unmistakable from the other side of a room.
 #
-# One swing each, and a slow one, because the motion profile is not a
-# suggestion. Peak joint acceleration for a swing of amplitude A at f Hz
-# is A(2*pi*f)^2, so a 0.5 rad wiggle at 10 Hz asks for ~2000 rad/s^2
-# against a configured 35 and arrives as a 1.5-degree tremble -- correctly
-# smoothed into nothing. At one cycle over 0.8 s the same amplitude needs
-# ~28 rad/s^2 and survives. A single deliberate gesture also simply reads
-# better than a buzz.
+# Still timid on the joints that translate the tool relative to the ones
+# that do not: a wrist roll of a radian moves the gripper nowhere, where
+# a radian of shoulder pan would sweep it two hand-widths across the
+# table. The roll and the gripper are where the theatre is cheapest.
 FLOURISHES: dict[str, Move] = {
     #          pan   lift  elbow wrist roll  grip
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.45, 0.00), 1.0),
-    "wag":    Move((0.13, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
-    "nod":    Move((0.00, 0.00, 0.00, 0.25, 0.00, 0.00), 1.0),
-    "bob":    Move((0.00, 0.10, -0.13, 0.00, 0.00, 0.00), 1.0),
-    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.60), 1.0),
-    "droop":  Move((0.00, 0.13, 0.00, 0.10, 0.00, 0.00), 0.5),
-    "strut":  Move((0.09, 0.00, 0.00, 0.00, 0.35, 0.00), 1.0),
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.10, 0.00), 1.0),
+    "spin":   Move((0.00, 0.00, 0.00, 0.00, 2.20, 0.00), 0.5),
+    "wag":    Move((0.45, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
+    "nod":    Move((0.00, 0.00, 0.00, 0.75, 0.00, 0.00), 1.0),
+    "bow":    Move((0.00, 0.55, 0.00, 0.45, 0.00, 0.00), 0.5),
+    "bob":    Move((0.00, 0.35, -0.45, 0.00, 0.00, 0.00), 1.0),
+    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.90), 1.0),
+    "jig":    Move((0.30, 0.22, 0.00, 0.00, 0.00, 0.00), 2.0),
+    "droop":  Move((0.00, 0.55, 0.00, 0.40, 0.00, 0.00), 0.5),
+    "strut":  Move((0.28, 0.00, 0.00, 0.00, 0.95, 0.00), 1.0),
+    "flail":  Move((0.35, 0.28, -0.30, 0.00, 1.00, 0.00), 1.0),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
 # result so the game reads as a performer rather than a scoreboard.
 MOODS: dict[str, tuple[str, ...]] = {
-    "gloat": ("shimmy", "strut", "chomp"),      # it landed one
-    "sulk": ("droop", "nod"),                   # it missed
-    "smug": ("wag", "shimmy"),                  # its bluff worked
-    "caught": ("nod", "droop"),                 # the human held through it
-    "idle": ("bob", "chomp"),
+    "gloat": ("spin", "shimmy", "strut", "flail", "chomp"),   # it landed one
+    "sulk": ("droop", "bow", "nod"),                          # it missed
+    "smug": ("wag", "shimmy", "jig"),                         # its bluff worked
+    "caught": ("nod", "droop", "bow"),                        # the human held
+    "idle": ("bob", "jig", "chomp"),
 }
 
 
@@ -498,7 +540,7 @@ class Flourish(Motion):
 
     name = "flourish"
 
-    def __init__(self, move: Move, duration: float = 0.8, speed: float = 2.0) -> None:
+    def __init__(self, move: Move, duration: float = 1.2, speed: float = 2.5) -> None:
         super().__init__()
         self.move = move
         self.duration = max(duration, 1e-3)
@@ -525,7 +567,7 @@ class Flourish(Motion):
         return self.finished
 
 
-def flourish(mood: str, rng=None, duration: float = 0.8, speed: float = 2.0) -> Flourish:
+def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 2.5) -> Flourish:
     """A flourish suiting `mood`, picked at random so it does not stale.
 
     Repetition is what makes a performance stop being funny, and this one
