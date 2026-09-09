@@ -121,26 +121,27 @@ def test_scene_detector_is_deterministic(projector):
     assert np.allclose(d1.detect(f)[0].landmarks, d2.detect(f)[0].landmarks)
 
 
-def test_hand2d_palm_center_sits_on_the_flat_of_the_palm():
-    """Halfway from wrist to knuckles, not four-fifths of the way.
+def test_hand2d_palm_center_slides_along_the_wrist_to_knuckle_axis():
+    """PALM_BIAS is the knob, and it is the only thing that moves the aim.
 
-    A plain centroid of the wrist and the four knuckles is four parts
-    knuckle to one part wrist, so it lands at the crease where the fingers
-    begin rather than on the palm. On hardware that reads as the arm
-    forever aiming at the edge of the index finger -- the worst spot to
-    aim at, since the finger bases curve away and the paddle slides off.
+    Set from hardware rather than anatomy: 0.8 -- which is what a plain
+    centroid of the wrist and four knuckles happens to give, nobody having
+    chosen it -- landed on the edge of the index finger, and 0.5, the
+    anatomical middle of the palm, was further off still.
     """
+    from tlod.vision.hands import PALM_BIAS
+
     lms = np.zeros((21, 2))
-    lms[0] = [0, 0]                                   # wrist
+    lms[0] = [0, 0]                                                  # wrist
     lms[[5, 9, 13, 17]] = [[0, 100], [0, 100], [0, 100], [0, 100]]   # knuckle line
     centre = Hand2D(lms, 1.0, "Right", 0.0).palm_center
-    assert np.allclose(centre, [0.0, 50.0]), centre
+    assert np.allclose(centre, [0.0, PALM_BIAS * 100.0]), centre
 
-    # And laterally it stays between the index and pinky knuckles rather
-    # than being dragged to either edge.
+    # Laterally it is always the centre of the knuckles, whatever the
+    # bias, so it never favours the index or the pinky edge.
     lms[[5, 9, 13, 17]] = [[0, 100], [10, 100], [20, 100], [30, 100]]
     centre = Hand2D(lms, 1.0, "Right", 0.0).palm_center
-    assert np.allclose(centre, [7.5, 50.0]), centre
+    assert np.isclose(centre[0], 15.0 * PALM_BIAS), centre
 
 
 def test_color_blob_detects_a_disc_on_the_table(projector):
