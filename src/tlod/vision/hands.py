@@ -12,16 +12,18 @@ Split deliberately into two stages:
                  metres is a property of the camera geometry, not of
                  whichever neural network found the hand.
 
-Note on MediaPipe versions: 0.10 exposed `mp.solutions.hands`, which is
-what essentially every tutorial online still uses. It was removed in 1.0.
-This module uses the Tasks API and a downloaded `.task` bundle, which is
-the only supported path going forward.
+Note on MediaPipe versions: early 0.10 exposed `mp.solutions.hands`,
+which is what essentially every tutorial online still uses. It was
+dropped at 0.10.30 and is not in 1.0 either. This module uses the Tasks
+API and a downloaded `.task` bundle, which is the only supported path
+going forward.
 
-1.0 also rewrote the Tasks API's insides -- pybind11 and protobuf graph
-configs became ctypes calls into a bundled `libmediapipe.so`/`.dylib` --
-but not its surface. Every name used below is spelled and behaves the
-same on 0.10.14 through 1.0.1: `mp.Image`/`mp.ImageFormat` (still
-re-exported from the package root, now out of `tasks.python.vision.core`),
+That same 0.10.30 rewrote the Tasks API's insides -- pybind11 and
+protobuf graph configs became ctypes calls into a bundled
+`libmediapipe.so`/`.dylib` -- but not its surface, and 1.0 did not change
+it either. Every name used below is spelled and behaves the same on
+0.10.14 through 1.0.1: `mp.Image`/`mp.ImageFormat` (still re-exported
+from the package root, now out of `tasks.python.vision.core`),
 `BaseOptions` and its `Delegate` enum, `HandLandmarker`,
 `HandLandmarkerOptions`, `RunningMode`, `detect_for_video(image, ms)` and
 the result's `.hand_landmarks` / `.handedness[i][0].category_name`.
