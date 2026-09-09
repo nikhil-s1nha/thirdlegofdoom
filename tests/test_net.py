@@ -5,13 +5,15 @@ fail silently if wrong -- clock translation, ordering, and the freshness
 gate -- because none of them raise when they misbehave.
 """
 
+import json
+import socket
 import threading
 import time
 
 import numpy as np
 import pytest
 
-from tlod.net.clock import ClockResponder, measure_offset
+from tlod.net.clock import ClockEstimate, ClockResponder, measure_offset
 from tlod.net.protocol import Packet, decode_perception, encode_perception
 from tlod.net.publisher import VisionPublisher
 from tlod.net.subscriber import VisionSubscriber
@@ -99,6 +101,49 @@ def test_clock_measurement_fails_cleanly_with_no_responder():
     assert measure_offset("127.0.0.1", 45992, samples=2, timeout=0.05) is None
 
 
+def test_offset_sign_is_correct_against_a_genuinely_different_clock():
+    """A same-process loopback (test_clock_offset_measured_over_loopback,
+    above) can never catch a sign error in the offset formula: both sides
+    share one `perf_counter()`, so the true offset is always ~0 and a
+    flipped sign is indistinguishable from a correct one (-0 == +0). This
+    fakes a responder whose clock reads a large, known amount *ahead* --
+    the two-real-boards scenario (independent perf_counter() epochs,
+    plausibly hours apart) that actually exposed the bug this pins down.
+    """
+    known_ahead = 137.5  # seconds; the fake responder's clock reads this much larger
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 46000))
+    sock.settimeout(0.2)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                data, addr = sock.recvfrom(256)
+            except (OSError, TimeoutError):
+                continue
+            if b"ping" not in data:
+                continue
+            sock.sendto(json.dumps({"t": time.perf_counter() + known_ahead}).encode(), addr)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        estimate = measure_offset("127.0.0.1", 46000, samples=5, gap=0.004)
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+        sock.close()
+
+    assert estimate is not None
+    # `their_timestamp + offset` must land back near our own clock -- so
+    # offset has to be approximately *negative* known_ahead, the opposite
+    # sign from how far ahead their raw reading looked.
+    assert estimate.offset == pytest.approx(-known_ahead, abs=max(estimate.rtt, 0.05))
+
+
 def test_subscriber_refuses_to_run_without_a_clock():
     """Better to fail loudly than to judge freshness against nonsense."""
     sub = VisionSubscriber(host="127.0.0.1", port=45993, clock_port=45994)
@@ -178,3 +223,56 @@ def test_freshness_gate_works_across_the_link():
         assert subscriber.perception.get_fresh(0.15) is None, "stale data served"
     finally:
         subscriber.stop()
+
+
+def test_a_backlogged_publisher_cannot_claim_the_mailbox():
+    """A vision-serve left running from an earlier session has higher
+    sequence numbers than a freshly started one, so the sequence guard
+    alone hands it the mailbox permanently -- and it is usually also
+    backlogged, so what it hands over is seconds old. Observed on real
+    hardware as a 4.5 s shutter-to-servo latency with every counter
+    looking like ordinary reordering."""
+    sub = VisionSubscriber(port=45994, require_clock=False)
+    # The age check is only meaningful against a clock estimate.
+    sub.clock = ClockEstimate(offset=0.0, rtt=0.0004, samples=8,
+                              stamp=time.perf_counter())
+    now = time.perf_counter()
+
+    sub._handle(Packet(seq=5, stamp=now, hands=[], objects=[]).encode())
+    assert sub.received == 1
+
+    # The zombie: far ahead in sequence, far behind in time.
+    sub._handle(Packet(seq=9000, stamp=now - 4.5, hands=[], objects=[]).encode())
+    assert sub.dropped_old == 1
+    assert sub._last_seq == 5, "a stale packet advanced the sequence"
+
+    # The live publisher keeps the mailbox.
+    sub._handle(Packet(seq=6, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.received == 2
+
+
+def test_the_sequence_guard_gives_up_when_the_sender_restarts():
+    """A restarted publisher begins at seq 1 again. Holding the old
+    sequence forever would ignore the only perception there is."""
+    sub = VisionSubscriber(port=45993, require_clock=False, seq_resync_after=5)
+    sub._handle(Packet(seq=500, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+
+    for seq in range(1, 5):
+        sub._handle(Packet(seq=seq, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.seq_resyncs == 0, "gave up too early; this could be real reordering"
+
+    for seq in range(5, 9):
+        sub._handle(Packet(seq=seq, stamp=time.perf_counter(), hands=[], objects=[]).encode())
+    assert sub.seq_resyncs == 1
+    assert sub._last_seq < 500, "did not adopt the restarted sender"
+
+
+def test_the_age_check_is_skipped_without_a_clock():
+    """Over UART no offset is measured at all, so the sender's stamps are
+    in an unrelated timebase. Rejecting them on age would throw away
+    perfectly good perception -- a worse failure than the one the age
+    check exists to prevent."""
+    sub = VisionSubscriber(serial_port="/dev/null", require_clock=False)
+    assert sub.clock is None
+    sub._handle(Packet(seq=1, stamp=1234.5, hands=[], objects=[]).encode())
+    assert sub.received == 1 and sub.dropped_old == 0

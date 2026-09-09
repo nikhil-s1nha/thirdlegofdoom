@@ -372,10 +372,20 @@ class RobotApp:
         lines.append(
             f"  perception {self.perception_frames} frames, {self.perception_skipped} failed"
         )
+        stats = self.controller.stats
         lines.append(
-            f"  IK: {self.controller.stats.commands} commands, "
-            f"{self.controller.stats.ik_failures} failures, "
-            f"{self.controller.stats.guard_hits} safety-guard hits"
+            f"  IK: {stats.commands} commands, "
+            f"{stats.ik_failures} failures, "
+            f"{stats.guard_hits} safety-guard hits"
+        )
+        limits = self.controller.limits
+        derate = self.controller.derate
+        lines.append(
+            f"  motion: peak {stats.peak_speed:.2f} rad/s of "
+            f"{limits.max_speed * derate:.2f}, "
+            f"{stats.peak_accel:.1f} rad/s^2 of "
+            f"{limits.max_accel * derate * derate:.1f}"
+            + (f"  (derated to {derate:.2f})" if derate < 0.999 else "")
         )
         return "\n".join(lines)
 

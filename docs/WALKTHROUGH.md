@@ -141,6 +141,11 @@ src/tlod/
     mock.py         simulator with a real slew rate; does not teleport
     feetech.py      STS3215 servos over the Feetech SDK
     controller.py   safety limits, e-stop, min-jerk. All commands pass here.
+    profile.py      velocity/acceleration/jerk limits on the command
+                    stream, synchronised across joints. Every command
+                    goes through this.
+    power.py        what a motion costs the supply, and slowing down to
+                    fit it. See docs/power.md.
     primitives.py   hover / strike / retract / feint / goto. Steppable,
                     so a game can abandon one mid-flight.
 
@@ -198,6 +203,7 @@ lerobot-calibrate ...               # 3. teach it zero and its limits
 tlod probe --real                   # 4. read it with torque OFF
 tlod first-light                    # 5. move one joint at a time
 tlod move 0.22 0 0.12 --real        # 6. go to a point
+tlod power -c configs/real_arm.yaml # 7. is the supply big enough?
 ```
 
 Done: the arm goes where you tell it. Everything after 3.5 is the camera
@@ -206,6 +212,9 @@ and the game, and neither is needed for that.
 **Before you plug anything in**
 
 - 12 V 5 A supply for the follower arm. Not 5 V — that is the leader.
+  Not 2 A either, even though some kits ship one and Seeed's own spec
+  says 2 A: it browns out as soon as several joints move together, which
+  looks like a software bug and is not. [power.md](power.md).
 - Give it clear space. Nothing fragile, nobody's hands in range.
 - Know where the power switch is. If you have not fitted an inline switch
   on the 12 V line yet, know which plug you are pulling.
@@ -548,10 +557,16 @@ how a safety limit fails to apply.
 | `backend` | `mock` | `mock` or `feetech` |
 | `port` | `""` | empty auto-detects if there is exactly one |
 | `lerobot_id` | `""` | read `lerobot-calibrate` output |
-| `goal_acceleration` | 60 | 0 = instant and harsh, 254 = smooth |
+| `servo_accel` | 9.2 | rad/s², the servo's own ramp. **Bigger is harsher.** |
 | `torque_limit` | 800 | of 1000, normal operation |
 | `sim_max_speed` | 3.5 | rad/s — estimate, measure yours |
 | `sim_accel` | 25.0 | rad/s² — estimate |
+
+`servo_accel` maps to `Goal_Acceleration`, which is an acceleration
+magnitude and not a smoothness dial: 0 disables the ramp for *maximum*
+harshness, and 254 (~39 rad/s²) is the harshest finite setting. Given in
+rad/s² here so the direction cannot be misread. See
+[power.md](power.md).
 
 ### `safety`
 
@@ -559,11 +574,25 @@ how a safety limit fails to apply.
 |---|---|---|
 | `max_speed` | 2.0 | rad/s, normal motion |
 | `strike_speed` | 5.0 | rad/s, explicit strikes only |
+| `max_accel` | 8.0 | rad/s². Sets motor torque, so sets current draw. |
+| `max_jerk` | 80.0 | rad/s³. Stops that current arriving as a step. |
 | `table_z` | 0.0 | table height in base coordinates |
 | `min_height` | 0.015 | never drive the tool below this |
 | `max_radius` | 0.33 | horizontal reach cap |
 | `min_radius` | 0.08 | do not fold back into the base |
 | `command_timeout` | 0.5 | hold position if commands go stale |
+| `max_tick_dt` | 0.05 | cap on dt, so a stalled tick cannot lurch |
+
+### `power`
+
+Only relevant on real hardware. See [power.md](power.md).
+
+| field | default | |
+|---|---|---|
+| `governor` | `false` | slow the arm to fit the supply rather than brown out |
+| `supply_current` | 5.0 | A, what the brick is rated for. Be honest. |
+| `headroom` | 0.75 | fraction of that to plan for |
+| `min_voltage` | 10.5 | V, below this the rail is judged to be sagging |
 
 ### `camera`
 
@@ -607,6 +636,8 @@ how a safety limit fails to apply.
 | no screen on the vision board | — | `tlod vision-check` for numbers, `--preview 8081` to watch from a browser |
 | vision precise but arm reaches wrong | bad extrinsics | `tlod vision-check --with-arm`; camera-only checks cannot see this |
 | hand seen as a red object | skin reads red to colour segmenters | handled by hand suppression; widen the radius |
+| fine on one joint, jitters on several | supply browning out | `tlod power`; see [power.md](power.md). 12 V 5 A, not 2 A |
+| a joint goes briefly limp mid-move | undervoltage, servo dropped torque | same; `tlod power` reports latched faults |
 | jitter high, overruns >10% | CPU starved | lower `control_hz` or camera resolution |
 | latency worse than expected | camera gave 30 fps, not 60 | `tlod bench camera --force` |
 | `no serial ports found` | power or permissions | check the supply; `usermod -aG dialout` |
@@ -659,6 +690,7 @@ None of that replaces item 3.
 
 ---
 
+- [power.md](power.md) — brownout, current budgets, motion profiles
 - [headless.md](headless.md) — verifying vision on a board with no screen
 - [slap-analysis.md](slap-analysis.md) — why it slaps rather than dodges
 - [hardware.md](hardware.md) — servo control table, wiring
