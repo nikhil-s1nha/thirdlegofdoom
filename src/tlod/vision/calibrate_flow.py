@@ -229,6 +229,7 @@ def run_extrinsics(
     poses: list[Pose] | None = None,
     settle: float = 0.4,
     move_time: float = 2.0,
+    gripper: float | None = 0.0,
     locate=None,
     on_progress=None,
 ) -> tuple[Extrinsics, list[float]]:
@@ -243,6 +244,16 @@ def run_extrinsics(
     """
     poses = poses or calibration_poses()
     locate = locate or find_marker
+
+    # Close the gripper first. The marker sits on a jaw, so an open
+    # gripper swings it away from the tool point forward kinematics is
+    # reporting -- and on this arm hides it behind the other jaw at most
+    # angles. Observed: the marker was found in 2 of 12 poses, and the
+    # two it did find were correspondences between a pixel and a
+    # coordinate 30 mm from it, which is worse than not finding it.
+    if gripper is not None:
+        controller.set_gripper(gripper)
+        time.sleep(0.6)
 
     points_base: list[np.ndarray] = []
     points_image: list[tuple[float, float]] = []
