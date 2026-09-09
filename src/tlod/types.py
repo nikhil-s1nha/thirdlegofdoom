@@ -47,6 +47,12 @@ class JointState:
     stamp: float                  # perf_counter of the encoder read
     dq: np.ndarray | None = None  # shape (6,), rad/s, if the backend reports it
     load: np.ndarray | None = None  # shape (6,), -1..1 of rated torque
+    # shape (6,), amps. Distinct from `load`: load is the PWM duty the
+    # servo is commanding, which Torque_Limit hard-clamps, so it pins at
+    # the ceiling during a strike and has no headroom left to register a
+    # hand. Current is what the motor actually draws, and rises when the
+    # rotor is held back at unchanged duty, because back-EMF collapses.
+    current: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.q.shape != (NUM_JOINTS,):
