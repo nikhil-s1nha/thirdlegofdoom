@@ -59,13 +59,20 @@ class StrikeLimits:
     """
 
     max_drop: float = 0.08              # metres; the single most important cap
-    # Equal to max_drop on purpose, not by coincidence of two defaults.
-    # `Strike` clamps its drop to max_drop, so a hover *above* max_drop
-    # ends the strike (hover - max_drop) above the hand and it can never
-    # land -- at the old easy preset's 12 cm hover, 4 cm short, twice the
-    # contact sensor's 20 mm plane tolerance. Hovering further away is
-    # therefore not "more warning"; past this value it is no strike at all.
-    hover_height: float = 0.08          # resting height above the target plane
+    # Set against max_drop and press_depth, not chosen freely: see
+    # __post_init__. `Strike` clamps its drop to max_drop, and the swing
+    # has to cover the hover *and* the press below the hand, so the floor
+    # the paddle can actually reach is (hover - max_drop). Hovering
+    # further away is not "more warning"; past this value the paddle
+    # stops above where it was aimed.
+    #
+    # This was 0.08, equal to max_drop, from when the strike aimed at the
+    # hand plane exactly. It cost a session of hardware testing when
+    # press_depth arrived: 80 + 17 > 80, so every strike's floor was
+    # clamped to precisely the hand plane, and the contact sensor was
+    # being asked to tell a hit from a miss across a band of zero width.
+    # The logs said "floor 22 mm, hand 22 mm" on every line.
+    hover_height: float = 0.063         # resting height above the target plane
     # Binding, not decorative: the measured peak commanded joint speed
     # during an 8 cm strike under the real arm's limits is 3.41 rad/s, and
     # dropping this to 2.0 stretches the same strike to 400 ms.
@@ -146,6 +153,36 @@ class StrikeLimits:
     # rate is allowed to fire -- already put ~1.3 s between strikes, so
     # this only ever fires if those change.
     min_strike_interval: float = 0.35   # seconds between strikes; thermal and safety
+
+    def __post_init__(self) -> None:
+        # The invariant that ties the three distances together. A strike
+        # from `hover_height` above the hand has to travel that plus
+        # `press_depth` to put the paddle below it, and `max_drop` caps
+        # the travel -- so if this does not hold, the floor silently rises
+        # to (hover - max_drop) and both contact sensors lose the band
+        # they decide on. Nothing downstream can detect that, because a
+        # floor sitting exactly at the hand plane is a perfectly
+        # ordinary-looking number.
+        needed = self.hover_height + self.press_depth
+        if needed > self.max_drop + 1e-9:
+            log.warning(
+                "strike geometry cannot reach its floor: hover %.0f mm + press "
+                "%.0f mm = %.0f mm of travel, but max_drop caps it at %.0f mm, so "
+                "the paddle stops %.0f mm above where it is aimed. Lower "
+                "hover_height to %.0f mm or raise max_drop to %.0f mm.",
+                self.hover_height * 1e3, self.press_depth * 1e3, needed * 1e3,
+                self.max_drop * 1e3, (needed - self.max_drop) * 1e3,
+                (self.max_drop - self.press_depth) * 1e3, needed * 1e3)
+
+    @property
+    def reachable_floor_offset(self) -> float:
+        """Depth below the hand the paddle can actually get to, in metres.
+
+        Equals `press_depth` when the geometry is consistent, and less
+        when `max_drop` is the binding constraint. Zero or negative means
+        the paddle stops at or above the hand and cannot land at all.
+        """
+        return min(self.press_depth, self.max_drop - self.hover_height)
 
     def clamp_drop(self, drop: float) -> float:
         return float(np.clip(drop, 0.0, self.max_drop))

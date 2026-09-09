@@ -563,11 +563,22 @@ Aim for ~50% against 250 ms.
 
 ```python
 max_drop: float = 0.08        # the safety knob. Shorter = safer AND faster.
+hover_height: float = 0.063   # resting height above the hand
+press_depth: float = 0.017    # command this far BELOW the hand surface
 strike_speed: float = 3.5     # rad/s during a strike
 torque_limit: int = 350       # of 1000, while striking
-press_depth: float = 0.010    # command this far BELOW the hand surface
 press_hold: float = 0.45      # stay down this long before retracting
 ```
+
+The first three are **one constraint, not three**: the swing has to
+cover the hover *and* the press, and `max_drop` caps the travel, so
+
+    hover_height + press_depth <= max_drop
+
+If that fails, the floor silently rises to `hover - max_drop` and the
+contact sensor is asked to separate a hit from a miss across a band that
+may be zero wide. `StrikeLimits.__post_init__` warns; the log line to
+watch for is a floor and a hand at the same height.
 
 `max_drop` improves speed and safety together — a shorter strike lands
 sooner and arrives slower. Reach for it first.

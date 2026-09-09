@@ -61,8 +61,22 @@ def test_hover_sits_above_the_target(controller):
     assert abs(controller.pose().z - (target[2] + 0.09)) < 4e-3
 
 
-def test_strike_never_goes_below_the_target_plane(controller):
-    """The guard that makes a wrong height estimate harmless."""
+def test_strike_goes_below_the_plane_but_only_by_press_depth(controller):
+    """The bound on how far under the hand the paddle is allowed to go.
+
+    This test used to assert the opposite -- that the paddle never went
+    below the plane at all -- on the reasoning that stopping short of the
+    hand is what keeps a wrong height estimate harmless. That reasoning
+    named the wrong guard. What bounds the force is `torque_limit`: at
+    350/1000 the arm leans on a rigid book by 0.038 of rated torque and
+    stops, however deep it is asked to go. The geometry only decided
+    whether contact happened at all, and above the plane it decided
+    "usually not" -- both contact sensors ask whether the paddle was
+    stopped *short* of its floor, and a floor above the hand is one that
+    a touched paddle and an untouched one both reach.
+
+    So the guarantee is now two-sided, and this pins both sides.
+    """
     limits = StrikeLimits()
     target = np.array([0.22, 0.0, 0.05])
     drive(Hover(target, limits, duration=0.4), controller)
@@ -76,7 +90,13 @@ def test_strike_never_goes_below_the_target_plane(controller):
         if done:
             break
         time.sleep(0.005)
-    assert lowest >= target[2] - 1e-3, f"tool reached {lowest:.4f}, below plane {target[2]}"
+
+    floor = target[2] - limits.press_depth
+    assert lowest >= floor - 2e-3, \
+        f"tool reached {lowest * 1e3:.1f} mm, under the {floor * 1e3:.1f} mm floor"
+    # And it has to actually get there, or there is no band to judge in.
+    assert lowest <= target[2] - 1e-3, \
+        f"tool stopped at {lowest * 1e3:.1f} mm, never reaching under the plane"
 
 
 def test_strike_respects_max_drop(controller):
