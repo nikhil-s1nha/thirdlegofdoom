@@ -809,12 +809,16 @@ def cmd_vision_check(args) -> int:
                     uv = find_marker(image, MARKER_BANDS[args.marker])
                     if uv is None:
                         return None
-                    depth_plane = projector.pixel_to_plane(uv[0], uv[1], 0.0)
                     # Resolve the marker the same way a hand would be, so
                     # the check exercises the real path rather than a
-                    # shortcut around it.
-                    return locator.projector.pixel_to_plane(uv[0], uv[1],
-                                                            controller.pose().z) or depth_plane
+                    # shortcut around it: intersect its ray with a plane
+                    # at the tool's own height, and fall back to the
+                    # table when the arm is below it and the ray misses.
+                    at_tool = locator.projector.pixel_to_plane(
+                        uv[0], uv[1], controller.pose().z)
+                    if at_tool is not None:
+                        return at_tool
+                    return projector.pixel_to_plane(uv[0], uv[1], 0.0)
                 report = check_against_arm(
                     camera, controller, locate, calibration_poses(args.poses),
                     report, thresholds,
