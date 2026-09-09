@@ -375,6 +375,7 @@ def cmd_play(args) -> int:
         ProximityContactSensor,
         ServoLoadContactSensor,
         ServoPressContactSensor,
+        ToolHeightContactSensor,
     )
     from tlod.game.handslap import HandSlapGame, Personality
     from tlod.game.opponent import DodgingHand
@@ -421,7 +422,29 @@ def cmd_play(args) -> int:
         # What it genuinely cannot do is see a dodge inside the last
         # ~100 ms, because that is how stale the hand estimate is. A hand
         # pulled at the last instant scores as a hit it did not take.
-        if args.contact == "press":
+        if args.contact == "height":
+            from tlod.arm import model
+
+            limits = build_strike_limits(cfg)
+
+            def _heights():
+                """(where the paddle got to, where it was sent), metres."""
+                # One bus read: pose() reads state, commanded is cached.
+                return (app.controller.pose().z,
+                        float(model.tool_pose(app.controller.commanded[:5]).z))
+
+            contact = ToolHeightContactSensor(
+                _heights,
+                **({} if args.contact_threshold is None
+                   else {"threshold": args.contact_threshold}))
+            source = (f"tool height, {contact.threshold * 1e3:.0f} mm short of the "
+                      f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
+            if limits.press_hold < contact.settle:
+                log.warning("press_hold is %.0f ms but the sensor needs %.0f ms of "
+                            "pressing: the arm will retract before it ever reads, "
+                            "and every round will score as a dodge",
+                            limits.press_hold * 1e3, contact.settle * 1e3)
+        elif args.contact == "press":
             limits = build_strike_limits(cfg)
             # Left unset, each sensor keeps its own measured default: 0.02
             # for press, which reads a settled arm, and 0.12 for servo,
@@ -1761,15 +1784,18 @@ def main(argv: list[str] | None = None) -> int:
                    help="tier C: real camera, real hand AND the real arm, on this "
                         "machine. The arm will strike at your hand")
     s.add_argument("--contact", default="proximity",
-                   choices=("proximity", "servo", "press"),
-                   help="how a hit is decided. proximity compares the tracked "
-                        "hand against the arm's encoders, and cannot see a dodge "
-                        "inside the last ~100 ms; press holds the paddle down and "
-                        "reads what torque the arm is still spending, which "
-                        "measured 0.001 over nothing against 0.037 over a hand; "
-                        "servo watches load during the swing, which on this arm "
-                        "measured a rigid book *between* nothing and a hand and "
-                        "is kept only so that result stays reproducible")
+                   choices=("proximity", "height", "servo", "press"),
+                   help="how a hit is decided. height asks whether the paddle "
+                        "reached the floor it was sent to -- if a hand stopped it "
+                        "short, that shortfall is the hand's thickness, and it is "
+                        "the recommended one on hardware; press instead reads what "
+                        "torque the arm is still spending while held down (0.001 "
+                        "over nothing against 0.037 over a hand), which works but "
+                        "needs twice the settling time; proximity compares the "
+                        "tracked hand against the arm's encoders and cannot see a "
+                        "dodge inside the last ~100 ms; servo watches load during "
+                        "the swing, which measured a rigid book *between* nothing "
+                        "and a hand and is kept only so that stays reproducible")
     s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
                    help="--real only: rise in servo load, as a fraction of rated "

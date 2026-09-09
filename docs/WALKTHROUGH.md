@@ -577,11 +577,20 @@ a rigid book at 350/1000 the arm leans by 0.038 of rated torque and
 stops; it cannot push harder however deep it is asked to go.
 
 `press_depth` is what makes a hit detectable rather than what makes it
-harder. `ServoPressContactSensor` reads the torque still being spent
-while the paddle is held down, and torque is only spent when the arm is
-blocked short of its floor — so a floor *above* the hand means a real
-touch spends nothing and scores as a dodge. It was +5 mm for a while,
-and that is exactly what it did.
+harder. Both hardware sensors ask whether the paddle was *stopped short*
+of the floor it was sent to — so a floor above the hand is one that an
+untouched paddle and a touched one both reach, and every real hit scores
+as a dodge. It was +5 mm above the hand plane for a while, and that is
+exactly what happened.
+
+The number is grounded rather than guessed. Driven to the joint angles
+at which the gripper rests on the table, forward kinematics reports the
+tool at **+0.2 mm** — so model z is height above the work surface. With
+the hand plane at 22 mm, 17 mm of depth lands the floor at 5 mm, and a
+hand of any plausible thickness then blocks the paddle by 17–24 mm.
+
+`safety.min_height` has the last word over all of it, so raising
+`press_depth` past that floor changes nothing.
 
 `safety.min_height` has the last word over all of it, so raising
 `press_depth` past that floor changes nothing.

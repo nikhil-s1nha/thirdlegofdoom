@@ -236,6 +236,97 @@ class ServoLoadContactSensor(ContactSensor):
         return ContactEvent(time.perf_counter(), "servo_load", strength=min(rise, 1.0))
 
 
+class ToolHeightContactSensor(ContactSensor):
+    """Did the paddle get where it was sent? If not, something stopped it.
+
+    The simplest instrument on the arm, and on measurement the best one.
+    The strike commands a floor below any plausible hand; the encoders say
+    where the paddle actually ended up; the difference is the thickness of
+    whatever was in the way. Nothing is inferred, nothing is filtered, and
+    the encoders resolve 0.087 degrees -- about 0.1 mm at the tool, against
+    a hand worth twenty-odd millimetres.
+
+    Compare with the two torque-based sensors in this file. Load is a
+    commanded quantity that Torque_Limit clamps, so it pins at its ceiling
+    mid-swing and reads a rigid book as indistinguishable from empty air.
+    Current is a real measurement but quantised at 6.5 mA, which turned out
+    to be the entire size of the effect. Held still, load does separate --
+    0.001 empty against 0.037 on a hand -- but only after waiting ~300 ms
+    for the servo's load filter to forget the swing. Height needs no such
+    wait: the number is already correct as soon as the arm has stopped.
+
+    Two things it does need.
+
+    The floor has to be *below* the hand, or an untouched paddle and a
+    touched one both arrive and the shortfall is zero either way. That is
+    `StrikeLimits.press_depth`, and it is the same requirement the press
+    sensor has, for the same reason.
+
+    And the arm has to be capable of reaching that floor when nothing is
+    there, or its own tracking error reads as a hand. It is: measured, an
+    unobstructed press converges to within about 3 mm, which is why the
+    threshold is 8 mm rather than something tighter.
+
+    Reads are wrapped because `poll` runs on the control thread inside a
+    committed strike, and an exception escaping here reaches
+    `RobotApp._control_loop`, which answers a failed policy tick by
+    e-stopping -- freezing the arm mid-swing, directly above the hand it
+    was aiming at. A dropped reading costs one round scored as a dodge.
+    """
+
+    def __init__(
+        self,
+        height_source,
+        threshold: float = 0.008,
+        settle: float = 0.15,
+    ) -> None:
+        # () -> (reached_z, commanded_z) in metres, base frame.
+        self.height_source = height_source
+        self.threshold = threshold
+        # Long enough for an unobstructed press to have arrived. Measured,
+        # it is within 3 mm about 60 ms into the hold; this is that with
+        # room to spare, and still half of what the load channel needs.
+        self.settle = settle
+        self._pressing_since: float | None = None
+        self._fired = False
+        # Diagnostics: the largest settled shortfall seen, in metres.
+        self.peak_rise = 0.0
+        self.read_failures = 0
+
+    def arm(self, blank_for: float | None = None) -> None:
+        # `blank_for` is accepted and ignored -- `pressing` replaces it.
+        self._fired = False
+        self._pressing_since = None
+
+    def poll(self, pressing: bool = False, **kwargs) -> ContactEvent | None:
+        if self._fired:
+            return None
+        if not pressing:
+            self._pressing_since = None
+            return None
+        now = time.perf_counter()
+        if self._pressing_since is None:
+            self._pressing_since = now
+            return None
+        if now - self._pressing_since < self.settle:
+            return None
+        try:
+            reached, commanded = self.height_source()
+        except Exception:
+            self.read_failures += 1
+            return None
+        short = float(reached) - float(commanded)
+        self.peak_rise = max(self.peak_rise, short)
+        if short < self.threshold:
+            return None
+        self._fired = True
+        log.debug("height: stopped %.1f mm above the %.1f mm floor "
+                  "(threshold %.1f mm) after %.0f ms pressing",
+                  short * 1e3, float(commanded) * 1e3, self.threshold * 1e3,
+                  (now - self._pressing_since) * 1e3)
+        return ContactEvent(now, "tool_height", strength=min(short / 0.03, 1.0))
+
+
 class ServoPressContactSensor(ContactSensor):
     """Detect contact from what the arm is still pushing against once it stops.
 

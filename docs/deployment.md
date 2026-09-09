@@ -155,6 +155,20 @@ tried alongside and is not usable: it separated the same three
 conditions by 0.006 A, exactly one 6.5 mA quantisation step, and smaller
 than the jitter within a single run.
 
+**`--contact height` is the recommended one.** During that same hold the
+encoders answer the question directly: the strike commands a floor below
+any plausible hand, and whatever the paddle stops short by is the
+thickness of what was in the way. It needs no torque model, no baseline,
+and half the settling time, and it resolves 0.1 mm at the tool against a
+hand worth twenty-odd millimetres.
+
+Both need the floor to be *below* the hand, which is what
+`StrikeLimits.press_depth` is for, and both need to know where the table
+is. Driven to the joint angles at which the gripper rests on it, FK
+reports the tool at **+0.2 mm** -- the riser is absorbed into the
+calibration, so model z is height above the work surface directly, and
+`safety.min_height` is that height in the same units.
+
 The adapter's 5 V buck is specified for a Raspberry Pi, so it can power a
 control board in the two-board layout. An Orange Pi 5 can draw up to 4 A
 -- give it its own supply.
