@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from tlod.types import Frame
-from tlod.vision.calibration import Extrinsics, Intrinsics, solve_extrinsics, synthetic_projector
+from tlod.vision.calibration import (
+    Extrinsics, Intrinsics, Projector, solve_extrinsics, synthetic_projector,
+)
 from tlod.vision.hands import HandLocator, Hand2D, INDEX_MCP, PINKY_MCP
 from tlod.vision.objects import ColorBlobDetector
 from tlod.vision.scene import HandPath, SceneHandDetector, SyntheticHandScene
@@ -141,3 +143,61 @@ def test_color_blob_detects_a_disc_on_the_table(projector):
 def test_color_blob_ignores_noise(projector):
     img = np.zeros((480, 640, 3), np.uint8)
     assert ColorBlobDetector(projector).detect(Frame(img, 0.0)) == []
+
+
+class TestFisheye:
+    """A 145 deg lens cannot be described by the pinhole model at all.
+
+    These check the two things that make a fisheye calibration usable
+    rather than merely stored: that it round-trips through the projection
+    it was fitted with, and that nothing silently falls back to pinhole
+    maths on the way to a base-frame coordinate.
+    """
+
+    @staticmethod
+    def _wide() -> Intrinsics:
+        # Roughly the Arducam B0589: 145 deg across 640 px.
+        f = (640 / 2.0) / np.tan(np.deg2rad(145.0) / 2.0)
+        K = np.array([[f, 0, 320.0], [0, f, 240.0], [0, 0, 1.0]])
+        return Intrinsics(K, np.array([-0.02, 0.004, -0.001, 0.0002]),
+                          (640, 480), 0.4, model="fisheye")
+
+    def test_project_and_normalize_are_inverses(self):
+        intr = self._wide()
+        # Well off-axis, where the two models disagree most.
+        points = np.array([[0.30, 0.22, 1.0], [-0.45, 0.05, 1.0], [0.02, -0.38, 1.0]])
+        pixels = intr.project(points)
+        back = intr.normalize(pixels)
+        expected = points[:, :2] / points[:, 2:3]
+        assert np.allclose(back, expected, atol=1e-3)
+
+    def test_the_model_survives_a_save_and_load(self, tmp_path):
+        intr = self._wide()
+        path = tmp_path / "fisheye.npz"
+        intr.save(path)
+        loaded = Intrinsics.load(path)
+        assert loaded.model == "fisheye" and loaded.fisheye
+        assert np.allclose(loaded.dist, intr.dist)
+
+    def test_a_file_without_a_model_key_loads_as_pinhole(self, tmp_path):
+        """Calibrations shot before the fisheye model existed."""
+        path = tmp_path / "old.npz"
+        np.savez(path, K=np.eye(3), dist=np.zeros(5),
+                 resolution=np.array([640, 480]), rms=0.5)
+        assert Intrinsics.load(path).model == "pinhole"
+
+    def test_pixels_round_trip_to_the_base_frame(self):
+        """The whole chain, which is where a half-applied model hides: it
+        reprojects beautifully near the optical axis and is centimetres
+        out at the edge of the table."""
+        intr = self._wide()
+        extr = Extrinsics(np.eye(3), np.array([0.0, 0.0, 0.5]), 0.0)
+        proj = Projector(intr, extr)
+        for point in ([0.10, 0.05, 0.9], [-0.28, 0.20, 0.7], [0.35, -0.30, 1.2]):
+            pixel = proj.project(np.array(point))
+            assert pixel is not None
+            origin, direction = proj.ray(*pixel)
+            offset = np.array(point) - origin
+            # The ray must pass through the point it came from.
+            cross = np.linalg.norm(np.cross(direction, offset))
+            assert cross < 1e-3, f"{point} came back {cross * 1000:.2f} mm off the ray"

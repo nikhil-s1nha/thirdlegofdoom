@@ -42,18 +42,73 @@ import numpy as np
 @dataclass(slots=True)
 class Intrinsics:
     K: np.ndarray            # 3x3
-    dist: np.ndarray         # (5,) or (8,)
+    dist: np.ndarray         # pinhole: (5,) or (8,).  fisheye: (4,)
     resolution: tuple[int, int]
     rms: float = 0.0         # reprojection error from calibration, pixels
+    # Which lens model the coefficients belong to. The default five-term
+    # Brown-Conrady model is a perturbation of a pinhole and stops being
+    # able to describe a lens somewhere around 120 degrees: the fit does
+    # not merely get worse, it cannot represent the shape at all, and the
+    # residual piles up at the frame edges while the centre still looks
+    # excellent. A 145-degree lens needs the equidistant fisheye model.
+    #
+    # Carried on the intrinsics rather than chosen at each call site so a
+    # fisheye calibration cannot be paired with pinhole projection --
+    # which would reproject beautifully near the optical axis and put the
+    # arm centimetres out at the edge of the table, with nothing failing.
+    model: str = "pinhole"   # "pinhole" | "fisheye"
+
+    @property
+    def fisheye(self) -> bool:
+        return self.model == "fisheye"
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        np.savez(path, K=self.K, dist=self.dist, resolution=np.array(self.resolution), rms=self.rms)
+        np.savez(path, K=self.K, dist=self.dist, resolution=np.array(self.resolution),
+                 rms=self.rms, model=self.model)
 
     @classmethod
     def load(cls, path: str | Path) -> Intrinsics:
         d = np.load(path)
-        return cls(d["K"], d["dist"], tuple(int(v) for v in d["resolution"]), float(d["rms"]))
+        # Files written before the fisheye model existed have no "model"
+        # key and are all pinhole.
+        model = str(d["model"]) if "model" in d.files else "pinhole"
+        return cls(d["K"], d["dist"], tuple(int(v) for v in d["resolution"]),
+                   float(d["rms"]), model)
+
+    # -- the lens, applied ---------------------------------------------------
+    def normalize(self, pixels: np.ndarray) -> np.ndarray:
+        """Pixels -> undistorted normalised image coordinates, shape (N, 2).
+
+        The inverse of the lens: what the pixel would have been on an
+        ideal pinhole camera of focal length 1.
+        """
+        pts = np.asarray(pixels, np.float64).reshape(-1, 1, 2)
+        if self.fisheye:
+            out = cv2.fisheye.undistortPoints(pts, self.K, self.dist.reshape(4, 1))
+        else:
+            out = cv2.undistortPoints(pts, self.K, self.dist)
+        return out.reshape(-1, 2)
+
+    def project(self, points: np.ndarray, rvec=None, tvec=None) -> np.ndarray:
+        """Points in some frame -> pixels, shape (N, 2).
+
+        `rvec`/`tvec` place those points relative to the camera; omit both
+        when the points are already in camera coordinates.
+        """
+        pts = np.asarray(points, np.float64).reshape(-1, 1, 3)
+        rvec = np.zeros(3) if rvec is None else np.asarray(rvec, np.float64)
+        tvec = np.zeros(3) if tvec is None else np.asarray(tvec, np.float64)
+        if self.fisheye:
+            # cv2.fisheye.projectPoints insists on its own shapes and,
+            # unlike the pinhole version, returns (N, 1, 2) either way.
+            out, _ = cv2.fisheye.projectPoints(
+                pts.reshape(-1, 1, 3), rvec.reshape(3, 1), tvec.reshape(3, 1),
+                self.K, self.dist.reshape(4, 1),
+            )
+        else:
+            out, _ = cv2.projectPoints(pts, rvec, tvec, self.K, self.dist)
+        return out.reshape(-1, 2)
 
     @classmethod
     def approximate(cls, resolution: tuple[int, int], hfov_deg: float = 70.0) -> Intrinsics:
@@ -116,10 +171,19 @@ def _board_object_points(pattern: tuple[int, int], square: float) -> np.ndarray:
 
 
 def calibrate_intrinsics(
-    images: list[np.ndarray], pattern: tuple[int, int] = (9, 6), square: float = 0.025
+    images: list[np.ndarray],
+    pattern: tuple[int, int] = (9, 6),
+    square: float = 0.025,
+    fisheye: bool = False,
 ) -> Intrinsics:
-    """Standard chessboard intrinsics. Aim for 15+ views covering the whole
-    frame, especially the corners, at varied tilts."""
+    """Chessboard intrinsics. Aim for 15+ views covering the whole frame,
+    especially the corners, at varied tilts.
+
+    Set `fisheye` for a lens much wider than about 120 degrees. The
+    pinhole model does not degrade gracefully past that point -- it
+    cannot express the projection at all, and no number of views brings
+    the residual down.
+    """
     objp = _board_object_points(pattern, square)
     obj_points, img_points = [], []
     shape = None
@@ -132,8 +196,21 @@ def calibrate_intrinsics(
         shape = img.shape[1::-1]
     if len(obj_points) < 5:
         raise RuntimeError(f"only {len(obj_points)} usable views; need at least 5 (ideally 15+)")
-    rms, K, dist, _, _ = cv2.calibrateCamera(obj_points, img_points, shape, None, None)
-    return Intrinsics(K, dist.ravel(), shape, float(rms))
+
+    if not fisheye:
+        rms, K, dist, _, _ = cv2.calibrateCamera(obj_points, img_points, shape, None, None)
+        return Intrinsics(K, dist.ravel(), shape, float(rms))
+
+    K = np.eye(3)
+    D = np.zeros((4, 1))
+    rms, K, D, _, _ = cv2.fisheye.calibrate(
+        [p.reshape(-1, 1, 3).astype(np.float64) for p in obj_points],
+        [p.reshape(-1, 1, 2).astype(np.float64) for p in img_points],
+        shape, K, D,
+        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW,
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+    )
+    return Intrinsics(K, D.ravel(), shape, float(rms), model="fisheye")
 
 
 def extrinsics_from_board(
@@ -163,21 +240,29 @@ def solve_extrinsics(
     if len(points_base) < 4:
         raise RuntimeError(f"need at least 4 correspondences, got {len(points_base)}")
 
+    # solvePnP has no fisheye form, so undo the lens first and solve
+    # against an ideal camera. For pinhole this is the same computation
+    # either way; doing it uniformly keeps one path.
+    normalized = intr.normalize(points_image).reshape(-1, 1, 2)
+    eye, none = np.eye(3), np.zeros(5)
+
     ok, rvec, tvec = cv2.solvePnP(
-        points_base, points_image, intr.K, intr.dist, flags=cv2.SOLVEPNP_ITERATIVE
+        points_base, normalized, eye, none, flags=cv2.SOLVEPNP_ITERATIVE
     )
     if not ok:
         raise RuntimeError("solvePnP failed")
     if len(points_base) >= 6:
-        rvec, tvec = cv2.solvePnPRefineLM(points_base, points_image, intr.K, intr.dist, rvec, tvec)
+        rvec, tvec = cv2.solvePnPRefineLM(points_base, normalized, eye, none, rvec, tvec)
 
     # solvePnP gives base -> camera; we want the camera placed in base.
     R_cb, _ = cv2.Rodrigues(rvec)
     R = R_cb.T
     t = (-R_cb.T @ tvec).ravel()
 
-    proj, _ = cv2.projectPoints(points_base, rvec, tvec, intr.K, intr.dist)
-    rms = float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - points_image) ** 2, axis=1))))
+    # Residuals in pixels, through the real lens -- the number a person
+    # judges the calibration by has to be in the units they can see.
+    proj = intr.project(points_base, rvec, tvec)
+    rms = float(np.sqrt(np.mean(np.sum((proj - points_image) ** 2, axis=1))))
     return Extrinsics(R, t, rms)
 
 
@@ -207,8 +292,7 @@ class Projector:
 
     def ray(self, u: float, v: float) -> tuple[np.ndarray, np.ndarray]:
         """(origin, unit direction) in base coordinates for a pixel."""
-        pts = np.array([[[u, v]]], dtype=np.float64)
-        undistorted = cv2.undistortPoints(pts, self.intr.K, self.intr.dist).reshape(2)
+        undistorted = self.intr.normalize([(u, v)])[0]
         d_cam = np.array([undistorted[0], undistorted[1], 1.0])
         d_base = self.extr.R @ d_cam
         return self.extr.t.copy(), d_base / np.linalg.norm(d_base)
@@ -234,9 +318,7 @@ class Projector:
         p_cam = self.extr.R.T @ (p - self.extr.t)
         if p_cam[2] <= 1e-6:
             return None
-        rvec = np.zeros(3)
-        proj, _ = cv2.projectPoints(p_cam.reshape(1, 3), rvec, np.zeros(3), self.intr.K, self.intr.dist)
-        u, v = proj.reshape(2)
+        u, v = self.intr.project(p_cam.reshape(1, 3))[0]
         return float(u), float(v)
 
 
