@@ -127,8 +127,11 @@ class LegLink:
         boot_timeout: float = 6.0,
         transport: object | None = None,
         on_line: Callable[[str, float], None] | None = None,
+        exclude: tuple[str, ...] = (),
     ) -> None:
         self.port = port
+        # Ports already spoken for by another board, skipped when probing.
+        self.exclude = exclude
         self.baudrate = baudrate
         self.ack_timeout = ack_timeout
         # Opening the port asserts DTR, which resets most Arduino boards;
@@ -178,7 +181,7 @@ class LegLink:
         except ImportError as e:  # pragma: no cover - depends on the install
             raise LegError("the leg needs pyserial: pip install -e '.[leg]'") from e
 
-        port = self.port or find_leg_port(baudrate=self.baudrate)
+        port = self.port or find_leg_port(exclude=self.exclude, baudrate=self.baudrate)
         if not port:
             raise LegError(
                 "no Arduino answered with a heartbeat. Plug it in, check "

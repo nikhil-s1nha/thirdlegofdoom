@@ -69,6 +69,8 @@ uart = ["pyserial>=3.5"]
 # `uart`, named separately because it is a different piece of hardware on
 # a different board -- installing one should not imply the other is wired.
 leg = ["pyserial>=3.5"]
+# The NeoPixel eyes on the XIAO SAMD21 (tlod.eyes), a third board again.
+eyes = ["pyserial>=3.5"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

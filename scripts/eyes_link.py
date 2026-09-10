@@ -3,9 +3,9 @@
 Runs on the Orange Pi, alongside (or instead of) `tlod vision-serve`. It
 reuses the same camera/detector/locator pipeline to find the hand, then
 writes plain ASCII `x,y,z\\n` lines over its own USB cable to the Seeed
-XIAO SAMD21 running `xiao_neopixel_breathe_rainbow.ino` (see the Robot
-Eyes handoff notes). That sketch reads at 9600 baud over USB (the SAMD21's
-native USB-CDC serial, not a UART pin pair), computes
+XIAO SAMD21 running the two-ring emotion sketch (see docs/hardware.md,
+and `tlod.eyes` for the protocol). That sketch reads at 9600 baud over
+USB (the SAMD21's native USB-CDC serial, not a UART pin pair), computes
 `distance = sqrt(x^2+y^2+z^2)`, and switches emotion against its
 NEAR_THRESHOLD/FAR_THRESHOLD constants -- so the wire format is just a
 plain CSV line per update, no framing of any kind, because that is what
@@ -16,9 +16,12 @@ testing link between the Orange Pi and the Raspberry Pi control board
 over real UART pins (see docs/deployment.md) -- a different transport, a
 different pair of boards, and a different (framed) wire format. The
 Arduino here is a third, independent board on its own USB port; this
-script is deliberately its own small program rather than a `tlod`
-subcommand, since it is a side accessory unrelated to the arm control
-loop and has no business sharing failure modes with `vision-serve`.
+script stays its own small program rather than a `tlod` subcommand,
+since it is a side accessory unrelated to the arm control loop and has
+no business sharing failure modes with `vision-serve`. The protocol
+itself does live in `tlod.eyes`, along with `tlod eyes selftest` for
+checking the board on its own -- one implementation of the wire format,
+two front ends.
 
 The eyes sketch's thresholds (20 near / 60 far) were placeholders picked
 before the real xyz source was known. `--scale` converts this rig's
@@ -48,8 +51,13 @@ from tlod.config import Config
 
 
 def list_serial_ports() -> list[str]:
-    from serial.tools import list_ports
-
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        # The whole point of this branch is to help someone who has not
+        # got set up yet, so it must not be the thing that traces back.
+        print("  pyserial is not installed: pip install -e '.[eyes]'")
+        return []
     return sorted(p.device for p in list_ports.comports())
 
 
@@ -110,11 +118,25 @@ def main() -> int:
         hand_height=cfg.vision.hand_height, palm_width_m=cfg.vision.palm_width_m,
     )
 
-    import serial
-    eyes = serial.Serial(args.port, args.baud, timeout=0)
-    print(f"  eyes link: {args.port} @ {args.baud} baud, scale x{args.scale:g}, "
-          f"rate <= {args.rate:g}/s" if args.rate > 0 else
-          f"  eyes link: {args.port} @ {args.baud} baud, scale x{args.scale:g}")
+    from tlod.eyes import EyesError, EyesLink
+
+    # Through EyesLink rather than a bare serial port, because this sketch
+    # answers *every* line it is sent. A write-only link leaves those
+    # replies to fill the kernel's receive buffer, and once it is full the
+    # board's own USB writes block and the animation stops -- the eyes
+    # freeze while this script happily reports thousands sent. Reading is
+    # not a nicety here, it is what keeps them running. It also means the
+    # distance the board computed comes back, so a wrong scale or a board
+    # that cannot parse floats is visible instead of silent.
+    eyes = EyesLink(args.port, baudrate=args.baud, scale=args.scale,
+                    precision=args.precision)
+    try:
+        eyes.connect()
+    except EyesError as e:
+        print(f"  {e}")
+        return 1
+    rate = f", rate <= {args.rate:g}/s" if args.rate > 0 else ""
+    print(f"  eyes link: {args.port} @ {args.baud} baud, scale x{args.scale:g}{rate}")
 
     preview = None
     if args.preview:
@@ -128,6 +150,7 @@ def main() -> int:
     last_sent = 0.0
     last_index = -1
     sent = 0
+    dropped = 0
 
     camera.start()
     time.sleep(1.0)  # let autoexposure/autofocus settle before the first read
@@ -160,20 +183,29 @@ def main() -> int:
             last_sent = now
 
             hand = nearest_hand(observations)
-            x, y, z = (hand.position * args.scale).tolist()
-            line = f"{x:.{args.precision}f},{y:.{args.precision}f},{z:.{args.precision}f}\n"
-            eyes.write(line.encode("ascii"))
+            x, y, z = hand.position.tolist()
+            try:
+                reply = eyes.send_point(x, y, z)
+            except EyesError as e:
+                # One bad update is not worth ending the run over, but a
+                # steady stream of them is worth seeing.
+                dropped += 1
+                print(f"\r  dropped {dropped}: {e}", end="", flush=True)
+                continue
             sent += 1
-            print(f"\r  sent {sent}: {line.strip()}", end="", flush=True)
+            warn = "" if reply.agrees else "  <-- board disagrees on the distance"
+            print(f"\r  sent {sent}: {reply.distance:6.1f} -> {reply.emotion:13s}{warn}",
+                  end="", flush=True)
     except KeyboardInterrupt:
         print("\n  interrupted")
     finally:
         camera.stop()
         detector.close()
-        eyes.close()
+        eyes.disconnect()
         if preview is not None:
             preview.stop()
-    print(f"\n  sent {sent} position updates")
+    print(f"\n  sent {sent} position updates"
+          + (f", dropped {dropped}" if dropped else ""))
     return 0
 
 
