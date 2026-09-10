@@ -29,6 +29,7 @@ import numpy as np
 MARKER_COLOURS = ("green", "blue", "yellow", "magenta", "red")
 
 from tlod.eyes import EMOTIONS as EYE_EMOTIONS
+from tlod import leg as leg_mod
 from tlod.leg import COMMANDS as LEG_COMMANDS
 from tlod.config import Config
 
@@ -2207,6 +2208,8 @@ def cmd_leg(args) -> int:
     from tlod.leg import LegError, LegLink
 
     cfg = Config.load(args.config)
+    if getattr(args, "plain_open", False):
+        leg_mod.PLAIN_OPEN = True
     lines: list[tuple[str, float]] = []
 
     link = LegLink(
@@ -2834,6 +2837,13 @@ def main(argv: list[str] | None = None) -> int:
                         "the leg starts moving before the door has finished. "
                         "It cannot help with a collision inside the sketch's "
                         "own delay(200); that one needs a reflash")
+    s.add_argument("--plain-open", action="store_true", dest="plain_open",
+                   help="open the port exactly as the Arduino IDE does: plain "
+                        "constructor, DTR left asserted, HUPCL left alone. "
+                        "Those two settings are the only things this driver "
+                        "does to the port that a serial monitor does not, so "
+                        "this isolates them. The board will reset on both open "
+                        "and close again, which is what they were suppressing")
     s.add_argument("--duration", type=float, default=10.0, help="seconds to `monitor` for")
     s.set_defaults(func=cmd_leg)
 
