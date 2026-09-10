@@ -216,6 +216,7 @@ def build_strike_limits(cfg: Config):
         strike_speed=min(defaults.strike_speed, cap),
         retract_speed=min(defaults.retract_speed, cap),
         tip_offset=cfg.arm.tip_offset,
+        torque_limit=cfg.arm.strike_torque,
         press_depth=cfg.arm.press_depth,
         # Clamped here rather than left to warn. `hover_height +
         # press_depth <= max_drop` is the invariant, and a deeper press

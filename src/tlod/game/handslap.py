@@ -163,7 +163,7 @@ class Difficulty:
     # <= StrikeLimits.max_hover, which is max_drop less press_depth. This
     # was 0.08 -- equal to max_drop, correct only while the strike aimed
     # at the hand plane rather than below it.
-    hover_height: float = 0.063       # travel and impact, not reaction time
+    hover_height: float = 0.055       # travel and impact, not reaction time
     strike_duration: float = 0.25     # the measured floor; slower is allowed, faster is not
     feint_probability: float = 0.45   # the human's main scoring opportunity
     mean_wait: float = 1.8            # seconds of expected hesitation
@@ -214,8 +214,11 @@ class Difficulty:
             # right while the strike aimed at the hand plane, wrong the
             # moment press_depth put the floor below it, since the drop
             # must now cover the hover *and* the press. The ceiling is
-            # StrikeLimits.max_hover, and it is 0.063.
-            "easy": cls(hover_height=0.063,     # the most travel that can still land
+            # StrikeLimits.max_hover, and it is 0.055 -- `max_drop` less
+            # `press_depth` less `HOVER_SLACK`, the last of which exists
+            # because a hover that arrives high lifts the floor and the
+            # floor is what contact is measured against.
+            "easy": cls(hover_height=0.055,     # the most travel that can still land
                         strike_duration=0.30,   # a measured row: 0.35 s, 7.9 mm
                         feint_probability=0.65, mean_wait=2.4, settle_bonus=1.4),
             "normal": cls(),                    # the floor: 0.25 -> 0.31 s, 8.8 mm
@@ -225,7 +228,7 @@ class Difficulty:
             # shorter hover gives away less wind-up and lands softer at
             # the same duration; it does not change how long the human
             # gets, which the duration sets on its own.
-            "hard": cls(hover_height=0.06, strike_duration=0.25,
+            "hard": cls(hover_height=0.052, strike_duration=0.25,
                         feint_probability=0.25, mean_wait=1.3, settle_bonus=3.5),
         }[name]
 
