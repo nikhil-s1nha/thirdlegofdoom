@@ -51,8 +51,16 @@ from tlod.vision.hands import PALM_BIAS, HandLocator  # noqa: E402
 
 cfg = Config.load(sys.argv[1] if len(sys.argv) > 1 else "configs/opi.yaml")
 projector = build_projector(cfg)
-camera = build_camera(cfg)
-detector = build_detector(cfg)
+# A scripted detector or a mock camera needs a scene to read hands from,
+# the same wiring build_app() does. Without it this only ran against real
+# hardware, which is a poor property for a script whose whole job is
+# telling you whether the real hardware is lying to you.
+scene = None
+if cfg.vision.detector == "scripted" or cfg.camera.source == "mock":
+    from tlod.vision.scene import SyntheticHandScene
+    scene = SyntheticHandScene(projector)
+camera = build_camera(cfg, scene=scene)
+detector = build_detector(cfg, scene)
 locator = HandLocator(projector, depth_mode=cfg.vision.depth_mode,
                       hand_height=cfg.vision.hand_height,
                       palm_width_m=cfg.vision.palm_width_m)
@@ -64,33 +72,35 @@ print("\n  x is forward from the base, y is to the left, millimetres.")
 print("  Hold still, then measure the middle of your palm with a ruler.")
 print("  Ctrl-C to stop.\n")
 
-camera.open()
+# `with` rather than start/stop by hand: Camera is a context manager and
+# its grab thread has to be joined even when this exits on Ctrl-C.
 try:
-    last = 0.0
-    while True:
-        frame = camera.read()
-        if frame is None:
-            continue
-        hands = detector.detect(frame)
-        if time.perf_counter() - last < 0.5:
-            continue
-        last = time.perf_counter()
-        if not hands:
-            print("  no hand in view")
-            continue
-        obs = locator.locate(hands[0])
-        if obs is None:
-            print("  hand seen, but its ray misses the assumed plane")
-            continue
-        u, v = hands[0].palm_center
-        p = obs.position
-        print(f"  palm at x {p[0] * 1e3:+7.1f}  y {p[1] * 1e3:+7.1f}  "
-              f"z {p[2] * 1e3:+6.1f} mm     (pixel {u:.0f}, {v:.0f}, "
-              f"{hands[0].handedness.lower()})")
+    with camera:
+        last = 0.0
+        while True:
+            frame = camera.read()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            if time.perf_counter() - last < 0.5:
+                continue
+            last = time.perf_counter()
+            hands = detector.detect(frame)
+            if not hands:
+                print("  no hand in view")
+                continue
+            obs = locator.locate(hands[0])
+            if obs is None:
+                print("  hand seen, but its ray misses the assumed plane")
+                continue
+            u, v = hands[0].palm_center
+            p = obs.position
+            print(f"  palm at x {p[0] * 1e3:+7.1f}  y {p[1] * 1e3:+7.1f}  "
+                  f"z {p[2] * 1e3:+6.1f} mm     (pixel {u:.0f}, {v:.0f}, "
+                  f"{hands[0].handedness.lower()})")
 except KeyboardInterrupt:
     print("\n  stopped")
 finally:
-    camera.close()
     close = getattr(detector, "close", None)
     if callable(close):
         close()
