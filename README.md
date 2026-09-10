@@ -38,6 +38,8 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `bench` | measure IK, camera and loop latency |
 | `record` / `replay` | capture a session, replay it deterministically |
 | `vision-serve` / `control` | optional two-board split: vision on one, kinematics on the other |
+| `leg` | the Arduino paddle: `open`, `close`, `home`, `slap`, `strike`, `monitor` |
+| `eyes` | the NeoPixel eyes: set a mood, send a point, `selftest` |
 | `power` | measure what a move actually costs the supply |
 | `vision-check` | verify vision numerically \+ MJPEG preview; for headless boards |
 | `probe` | read the arm with torque off; safest first hardware test |
@@ -61,6 +63,8 @@ src/tlod/
   vision/         camera, calibration, hands, tracking, objects, scene, recording
   runtime/        signal (mailbox), loop (fixed rate), app (threads + Policy)
   game/           handslap, opponent, contact, touch
+  leg.py          the Arduino paddle on its own USB port
+  eyes.py         the NeoPixel eyes on a XIAO, on another one
   viz/            overlay and viewer
 ```
 
@@ -105,6 +109,21 @@ hardware are the same code path.
   calibrated against one version of the strike, the strike changed, and
   the threshold stayed. It is not noise and it is not calibration — the
   clusters move. See [docs/hit-detection.md](docs/hit-detection.md).
+- **The third leg reports nothing.** Two hobby servos on an Arduino, so
+  no encoder and no feedback: the board tells you it took the word, never
+  where the paddle went. Three sharp edges in the sketch — `slap` leaves
+  the paddle down until something sends `home`, `home` acknowledges with
+  an *empty line*, and `open` blocks the board for 200 ms — and opening
+  the port resets the board, so the first beat is what says it is ready.
+  See [docs/hardware.md](docs/hardware.md).
+- **The eyes never speak first, and say nothing when nothing changed.**
+  No heartbeat, and `Emotion:` is printed only on a real mood change — so
+  silence is not evidence of anything, and a write-only sender cannot
+  tell a working board from a dead one. Worse, it will *stop* it working:
+  the board replies to every line, and unread replies fill the buffer
+  until its own writes block and the animation freezes. `tlod eyes
+  selftest` is the check that actually proves the pixels are driven.
+  See [docs/hardware.md](docs/hardware.md).
 - **`configs/default.yaml` is not a base layer.** `Config.load` reads the
   single file you pass; everything absent falls back to the dataclass
   defaults in `config.py`, not to `default.yaml`. Editing it does not

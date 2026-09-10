@@ -96,6 +96,139 @@ and does not resolve on Python 3.13; install it only on a machine where
 you are running lerobot's calibration commands, which need not be the
 board wired to the arm. Point `arm.calibration` at the JSON afterwards.
 
+## The third leg: an Arduino on its own USB port
+
+Separate from the arm entirely. An Arduino, USB to the Orange Pi, two
+hobby servos on pins 7 and 8, running a fixed sketch. `tlod.leg` drives
+it; `tlod leg` is the command.
+
+| pin | servo | what it does | positions |
+|---|---|---|---|
+| 7 | `servos[0]` | jaw | 90 open, 145 shut |
+| 8 | `servos[1]` | paddle | 120 up (home), 40 down |
+
+Four commands in, one line back, plus `<3` every 500 ms unasked:
+
+| command | does | replies |
+|---|---|---|
+| `open` | jaw 90, then **after 200 ms** paddle 40 | `OPEN` |
+| `close` | jaw 145 | `CLOSE` |
+| `home` | paddle 120 | *an empty line* |
+| `slap` | paddle 40 | `s` |
+
+9600 baud, newline-terminated, `Serial.readStringUntil('\n')` on the far
+side. Send commands one at a time and wait for the reply.
+
+**These are hobby servos, not bus servos.** No encoder, no feedback, no
+`read()`. The board cannot say where the paddle is, only that it took the
+word — so unlike `Present_Load` on the STS3215, there is nothing here to
+detect contact with, and nothing to verify a move happened. The reply's
+arrival time is the only timestamp available, and `Ack.stamp` is it.
+
+**`slap` does not come back.** It drives the paddle to 40 and leaves it
+there; a second `slap` moves nothing until something has sent `home`.
+`LegLink.strike()` is the whole gesture, and its `dwell` is paddle travel
+time — which, being part of the strike, wants recalibrating whenever the
+strike changes. See [hit-detection.md](hit-detection.md).
+
+**`home` acknowledges with an empty line.** `Serial.println("")`. Nothing
+tells it apart from a blank line arriving for any other reason, so
+replies can only be matched positionally. If you edit the sketch, make it
+print `HOME`.
+
+**`open` blocks the sketch for 200 ms.** The `delay(200)` is inside the
+command handler, so `loop()` neither beats nor reads during it. An `open`
+reply is never faster than 200 ms, a heartbeat can be that late, and 200
+ms of incoming bytes at 9600 baud is about 192 — three times the
+Arduino's 64-byte receive buffer. Waiting for each reply is what keeps
+that buffer from overflowing.
+
+**Opening the port resets the board.** DTR is asserted on open and most
+Arduinos reset on it, so the first second or two after connecting belongs
+to the bootloader and anything sent then is lost. `LegLink.connect()`
+waits for the first heartbeat rather than guessing at a sleep — the beat
+is proof that `setup()` has run.
+
+**It is a second `/dev/ttyACM*`, and the numbering is not stable.** Two
+USB devices now enumerate in whatever order they came up, so the arm and
+the leg can swap between boots. `tlod leg` probes for the heartbeat when
+no port is configured, the same way `tlod ports --probe` asks each port
+whether six servos answer; the probe writes nothing, so pointing it at
+the servo bus by mistake is harmless. Set `leg.port` once it is known.
+
+```bash
+tlod leg monitor          # listen only: is it there, is the sketch running
+tlod leg strike           # slap, dwell, home
+tlod leg open --repeat 3
+```
+
+## The eyes: NeoPixel rings on a XIAO SAMD21
+
+A fourth USB device, independent of the arm, the paddle and the camera.
+Two 16-pixel NeoPixel rings daisy-chained on **D10** (ring 1 `DOUT` ->
+ring 2 `DIN`), so 32 pixels on one data line: `[0..15]` is the left eye,
+`[16..31]` the right. Animated as three moods. `tlod.eyes` drives it,
+`tlod eyes` is the command, and `scripts/eyes_link.py` streams the
+tracked hand at it.
+
+| in | means |
+|---|---|
+| `h` / `c` / `a` | set the mood: happy, concentrated, angry |
+| `x,y,z` | a point; the **board** takes `sqrt(x²+y²+z²)` and picks the mood |
+
+| out | when |
+|---|---|
+| `Distance: 24.15` | every point it parsed |
+| `Emotion: ANGRY` | **only when the mood actually changed** |
+| `Bad input, expected: x,y,z` | anything it could not parse |
+
+**It never speaks first.** `setup()` prints nothing and there is no
+heartbeat, so unlike the paddle board there is no passive way to know it
+is alive — silence proves nothing. `?` is the probe: it parses as neither
+a mood key nor a point, so `Bad input` comes back guaranteed, and it
+cannot disturb what is on the LEDs. That is `EyesLink.ping()`, and it is
+what `tlod eyes` uses to find the board.
+
+**The mood line is edge-triggered.** `setEmotion()` returns early when
+the mood is unchanged. So silence after `h` means *either* "already
+happy" *or* "not listening", and nothing tells them apart. This is why
+`tlod eyes selftest` cycles `h -> c -> a -> h`: from any starting mood
+that is at least three genuine transitions, and every one must be
+announced. Anything less is not evidence the pixels are being driven.
+
+**Something has to read the replies.** The board answers every line it is
+sent. A host that only writes leaves those bytes filling the kernel
+receive buffer; once it is full the SAMD21's USB-CDC writes have nowhere
+to go and the animation loop stalls behind them — the eyes freeze while
+the sender happily reports thousands delivered. `EyesLink` runs a reader
+thread, which is as much about keeping the board alive as about reading.
+
+**`sscanf("%f")` may not work.** newlib-nano omits scanf float support
+unless the core links `-u _scanf_float`, and on SAMD21 that is not a
+given. When it is missing, every well-formed point comes back `Bad input`
+and the mood never moves. `tlod eyes selftest` names this specifically,
+because from the outside it looks identical to a wiring fault.
+
+**Units are not obvious, and the defaults do not fit this rig.** The
+sketch's thresholds are 20 near / 60 far, in whatever units arrive. This
+project works in metres and the arm's reach is ~0.08–0.40 m, so raw
+metres are always "nearer than 20" and the eyes are permanently angry.
+`eyes.scale` defaults to 100 (metres to centimetres), which puts the
+near boundary inside the workspace — but 60 cm is past the end of the
+arm's reach, so **HAPPY is not reachable from a point** until the sketch's
+constants are retuned. `tlod eyes point X Y Z` prints the mood a given
+position should produce, which is the quickest way to choose new ones.
+
+**Do not open this port at 1200 baud.** On SAMD21 that is the bootloader
+knock, not a baud rate — it disconnects the running sketch.
+
+```bash
+tlod eyes selftest            # the one that answers "are the LEDs working"
+tlod eyes point 0.25 0 0.10   # send a position, see what mood it should give
+tlod eyes angry               # set a mood directly
+python scripts/eyes_link.py --port /dev/ttyACM2   # stream the tracked hand
+```
+
 ## Camera
 
 Fixed mount, angled down over the table. Steeper is better — error from a
