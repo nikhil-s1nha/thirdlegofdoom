@@ -21,8 +21,12 @@ Three signals, and they are not the same measurement:
   load     Present_Load, addr 60. The PWM duty the servo is *commanding*.
            Torque_Limit hard-clamps it, and the strike lowers that limit
            so the arm yields on contact. A clamped signal cannot rise.
-  current  Present_Current, addr 69, in amps. What the motor actually
-           draws. Not clamped by Torque_Limit, but quantised at 6.5 mA.
+  current  Present_Current, addr 69. Retired: it separated nothing from a
+           book from a hand by 0.006 A, one 6.5 mA quantisation step, and
+           the fifteen-byte sync read it needed was costing transactions
+           on a bus that already drops the occasional one. The column
+           stays and reads zero, because the null result is worth being
+           able to see rather than rediscover.
   lag      Commanded height minus reached height. A servo held back by
            something falls further behind its command.
 
