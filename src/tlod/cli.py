@@ -957,24 +957,41 @@ def cmd_move(args) -> int:
 def cmd_flourish(args) -> int:
     """Run flourishes one at a time, so each can be judged on its own.
 
-    A review tool, not part of the game. The game picks a flourish by
-    mood and buries it in the pause after a round, which is the right
-    thing for playing and the wrong thing for deciding whether a spin
-    reads as a spin. This runs exactly the gesture named, from HOME, and
-    waits for you between them.
+    A review tool, not part of the game. The game picks by mood and buries
+    the gesture in the pause after a round, which is right for playing and
+    useless for deciding whether a spin reads as a spin.
 
-    It reports what the profile was *asked* for against what it actually
-    delivered, because those differ here and the difference is the point:
-    a swing of amplitude A at f Hz needs a peak joint speed the flourish
-    may not be allowed to spend, and the motion profile silently clips
-    it. A move whose delivered column is well under its asked column is
-    one the rig cannot perform at that size, however good it looks in the
-    table.
+    It reports asked against delivered, and the peak speed and acceleration
+    each take actually reached, because those are the two ceilings that
+    decide how big a gesture can be and the old table was sized against
+    only one of them. `--sweep` walks the speed ceiling so the rig can say
+    where its own limit is rather than being told.
     """
     from tlod.arm.controller import ArmController
     from tlod.arm.model import HOME
     from tlod.arm.primitives import FLOURISHES, MOODS, Flourish
     from tlod.types import JOINT_NAMES
+
+    def cycles_of(mv, i):
+        c = mv.cycles
+        return float(c[i]) if isinstance(c, tuple) else float(c)
+
+    def reach(mv, i):
+        """The largest excursion this joint can actually make.
+
+        `sin(pi*s) * sin(2*pi*c*s)` does not peak at 1 for every c -- at one
+        cycle it peaks at 0.770 -- so the nominal amplitude is not a target
+        the waveform ever hits, and measuring against it reports a clip that
+        is really just the shape of the swing.
+        """
+        c = cycles_of(mv, i)
+        u = np.linspace(0.0, 1.0, 20001)
+        return abs(mv.amplitudes[i]) * float(
+            np.abs(np.sin(np.pi * u) * np.sin(2.0 * np.pi * c * u)).max())
+
+    def describe(mv):
+        return ", ".join(f"{JOINT_NAMES[i]} {a:+.2f}x{cycles_of(mv, i):g}"
+                         for i, a in enumerate(mv.amplitudes) if a)
 
     names = list(args.names) if args.names else list(FLOURISHES)
     unknown = [n for n in names if n not in FLOURISHES]
@@ -985,25 +1002,29 @@ def cmd_flourish(args) -> int:
 
     if args.list:
         moods = {n: [m for m, ns in MOODS.items() if n in ns] for n in FLOURISHES}
-        print(f"  {'name':8s} {'cycles':>6s}  {'moves':38s} fires on")
+        print(f"  {'name':8s} {'secs':>5s}  {'joints (amplitude x cycles)':52s} fires on")
         for n, mv in FLOURISHES.items():
-            moved = ", ".join(f"{JOINT_NAMES[i]} {a:+.2f}"
-                              for i, a in enumerate(mv.amplitudes) if a)
-            print(f"  {n:8s} {mv.cycles:6.1f}  {moved:38s} {', '.join(moods[n]) or '-'}")
+            print(f"  {n:8s} {mv.duration or 0:5.2f}  {describe(mv):52s} "
+                  f"{', '.join(moods[n]) or '-'}")
         return 0
 
     cfg = Config.load(args.config)
     if args.real:
         cfg = cfg.with_overrides(arm={"backend": "feetech"})
-    controller = ArmController(build_arm(cfg), build_limits(cfg),
-                               cfg.runtime.control_hz,
+    limits = build_limits(cfg)
+    if args.accel:
+        limits.max_accel = args.accel
+        limits.max_jerk = max(limits.max_jerk, args.accel * 12.0)
+    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
                                governor=build_governor(cfg))
     controller.start()
-    print(f"  backend {cfg.arm.backend}   duration {args.duration:.2f}s   "
-          f"speed {args.speed:.2f} rad/s")
+    speeds = ([float(s) for s in args.sweep.split(",")] if args.sweep
+              else [args.speed])
+    print(f"  backend {cfg.arm.backend}   accel {limits.max_accel:.1f} rad/s^2   "
+          f"speed {', '.join(f'{s:.2f}' for s in speeds)} rad/s")
     print("  THE ARM WILL MOVE. Every flourish is joint space with no target and")
-    print("  an envelope that is zero at both ends, so each one returns to the")
-    print("  pose it started from. Ctrl-C stops and parks.")
+    print("  an envelope that is zero at both ends, so each returns to the pose")
+    print("  it started from. Ctrl-C stops and parks.")
     if not args.yes:
         try:
             input("  press Enter when ready, Ctrl-C to abort... ")
@@ -1012,6 +1033,17 @@ def cmd_flourish(args) -> int:
             controller.stop(park=True)
             return 130
 
+    def health():
+        """Rail voltage and latched faults, if the backend has them."""
+        try:
+            d = controller.diagnostics()
+        except Exception:
+            return ""
+        volts = d.get("voltage") or []
+        faults = [f for f in (d.get("faults") or []) if f]
+        out = f"  rail {min(volts):.1f}-{max(volts):.1f} V" if volts else ""
+        return out + (f"  FAULTS {faults}" if faults else "")
+
     dt = 1.0 / max(cfg.runtime.control_hz, 1.0)
     rc = 0
     try:
@@ -1019,50 +1051,64 @@ def cmd_flourish(args) -> int:
             move = FLOURISHES[name]
             amps = np.asarray(move.amplitudes, float)
             moved = [i for i, a in enumerate(amps) if a]
-            controller.goto_joints(HOME, duration=args.settle)
+            rows = []
 
-            for take in range(1, args.repeat + 1):
-                label = f"{name}" + (f" ({take}/{args.repeat})" if args.repeat > 1 else "")
-                print(f"\n  {label}: " + ", ".join(
-                    f"{JOINT_NAMES[i]} {amps[i]:+.2f} rad" for i in moved)
-                    + f"  x{move.cycles:g}")
+            for speed in speeds:
+                for take in range(1, args.repeat + 1):
+                    controller.goto_joints(HOME, duration=args.settle)
+                    start_q = controller.commanded.copy()
+                    motion = Flourish(move, duration=args.duration, speed=speed)
+                    print(f"\n  {name}  {describe(move)}  "
+                          f"{motion.duration:.2f}s @ {speed:.2f} rad/s"
+                          + (f"  take {take}" if args.repeat > 1 else ""))
+                    motion.start(controller)
+                    peak_cmd = np.zeros(len(amps))
+                    peak_arm = np.zeros(len(amps))
+                    peak_v = 0.0
+                    prev, prev_t = start_q.copy(), time.perf_counter()
+                    t0 = prev_t
+                    while time.perf_counter() - t0 < motion.duration + 6.0:
+                        done = motion.step(controller, dt)
+                        now, q = time.perf_counter(), controller.commanded
+                        peak_cmd = np.maximum(peak_cmd, np.abs(q - start_q))
+                        if now > prev_t:
+                            peak_v = max(peak_v, float(np.abs(q - prev).max() / (now - prev_t)))
+                        prev, prev_t = q.copy(), now
+                        try:
+                            peak_arm = np.maximum(
+                                peak_arm, np.abs(controller.backend.read().q - start_q))
+                        except Exception:
+                            pass
+                        if done:
+                            break
+                        time.sleep(dt)
+                    elapsed = time.perf_counter() - t0
+                    drift = float(np.abs(controller.commanded - start_q).max())
 
-                start = controller.commanded.copy()
-                motion = Flourish(move, duration=args.duration, speed=args.speed)
-                motion.start(controller)
-                peak_cmd = np.zeros(len(amps))
-                peak_arm = np.zeros(len(amps))
-                t0 = time.perf_counter()
-                # The plan runs for `duration`; the return can take longer,
-                # so allow it and report what it cost rather than cutting
-                # it off at the plan and calling that the answer.
-                while time.perf_counter() - t0 < args.duration + 6.0:
-                    done = motion.step(controller, dt)
-                    peak_cmd = np.maximum(peak_cmd, np.abs(controller.commanded - start))
-                    try:
-                        q = controller.backend.read().q
-                        peak_arm = np.maximum(peak_arm, np.abs(q - start))
-                    except Exception:
-                        pass
-                    if done:
-                        break
-                    time.sleep(dt)
-                elapsed = time.perf_counter() - t0
-                drift = float(np.abs(controller.commanded - start).max())
+                    print(f"    {'joint':14s} {'nominal':>8s} {'possible':>9s} "
+                          f"{'sent':>7s} {'arm':>7s} {'%':>5s} {'deg':>6s}")
+                    for i in moved:
+                        can = reach(move, i)
+                        print(f"    {JOINT_NAMES[i]:14s} {abs(amps[i]):8.2f} {can:9.2f} "
+                              f"{peak_cmd[i]:7.2f} {peak_arm[i]:7.2f} "
+                              f"{peak_cmd[i] / can * 100.0:5.0f} "
+                              f"{np.degrees(peak_arm[i]):6.0f}")
+                    clipped = [JOINT_NAMES[i] for i in moved
+                               if peak_cmd[i] < reach(move, i) - 0.05]
+                    print(f"    {elapsed:.2f}s   peak {peak_v:.2f} rad/s of {speed:.2f}"
+                          f"   back within {drift * 1e3:.1f} mrad" + health())
+                    if clipped:
+                        print(f"    clipped: {', '.join(clipped)}")
+                    if drift > 2e-3:
+                        print(f"    DID NOT RETURN: {drift:.4f} rad from its start")
+                        rc = 1
+                    rows.append((speed, peak_cmd[moved].max() if moved else 0.0, peak_v))
 
-                print(f"    {'joint':14s} {'asked':>7s} {'commanded':>10s} {'arm':>7s}")
-                for i in moved:
-                    print(f"    {JOINT_NAMES[i]:14s} {abs(amps[i]):7.2f} "
-                          f"{peak_cmd[i]:10.2f} {peak_arm[i]:7.2f}")
-                clipped = [JOINT_NAMES[i] for i in moved
-                           if peak_cmd[i] < abs(amps[i]) - 0.05]
-                print(f"    took {elapsed:.2f}s, back within {drift*1e3:.1f} mrad")
-                if clipped:
-                    print(f"    clipped by the {args.speed:.1f} rad/s limit: "
-                          f"{', '.join(clipped)}")
-                if drift > 2e-3:
-                    print(f"    DID NOT RETURN: {drift:.4f} rad from where it began")
-                    rc = 1
+            if len(speeds) > 1:
+                print(f"\n  {name}: where more speed stops buying more gesture")
+                print(f"    {'ceiling':>8s} {'delivered':>10s} {'reached':>8s}")
+                for speed, got, vmax in rows:
+                    print(f"    {speed:8.2f} {got:10.2f} {vmax:8.2f}")
 
             if name != names[-1] and not args.no_pause:
                 try:
@@ -2070,9 +2116,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--list", action="store_true",
                    help="print the table -- joints, sizes, which mood fires each -- and exit")
     s.add_argument("--duration", type=float, default=1.2,
-                   help="seconds per gesture (Personality.flourish_duration)")
-    s.add_argument("--speed", type=float, default=2.5,
+                   help="seconds, for moves that do not carry their own")
+    s.add_argument("--speed", type=float, default=3.5,
                    help="rad/s ceiling (Personality.flourish_speed)")
+    s.add_argument("--accel", type=float, default=None,
+                   help="rad/s^2 ceiling; the servo register caps near 39")
+    s.add_argument("--sweep", default=None, metavar="A,B,C",
+                   help="run each move at these speed ceilings and show where "
+                        "more speed stops buying more gesture")
     s.add_argument("--repeat", type=int, default=1, help="takes per flourish")
     s.add_argument("--settle", type=float, default=1.0,
                    help="seconds to return HOME before each, so they start alike")

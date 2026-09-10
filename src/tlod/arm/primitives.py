@@ -663,47 +663,91 @@ class Feint(Motion):
 
 @dataclass(frozen=True, slots=True)
 class Move:
-    """One flourish: how far each joint swings, and how many times."""
+    """One flourish: how far each joint swings, how often, and for how long.
+
+    `cycles` is per joint when it is a tuple, because the good gestures are
+    the ones where the joints do different things at once: a nod is the arm
+    rising once while the wrist dips twice, and a chomp is the wrist coming
+    up once while the gripper snaps. One cycle count for the whole arm can
+    only make every joint do the same thing at the same time, which is what
+    made the old table read as a set of twitches.
+
+    `duration` is per move for the same reason. A spin wants to be slow --
+    amplitude at fixed acceleration is bought with time -- and a chomp
+    wants to be quick, and no single number is both. None means "whatever
+    the caller's default is".
+    """
 
     amplitudes: tuple[float, ...]      # radians, JOINT_NAMES order
-    cycles: float
+    cycles: float | tuple[float, ...]  # one for all joints, or one each
+    duration: float | None = None      # seconds; None = the caller's
 
 
-# Big, slow gestures. Amplitude and speed trade against each other and
-# the trade is not negotiable: peak joint acceleration for a swing of
-# amplitude A at f Hz is A(2*pi*f)^2, against a configured 35 rad/s^2. So
-# a half-radian wiggle at 10 Hz asks for ~2000 and arrives as a tremble,
-# while the *same* half radian over a second and a bit asks for 14 and
-# arrives whole. Wanting bigger movements therefore means wanting slower
-# ones, and at 1.2 s a swing can be over a radian -- 60-plus degrees,
-# which is unmistakable from the other side of a room.
+# Sized against both limits, which is what the earlier tables were not.
+# Amplitude at fixed acceleration is bought with time: a swing of
+# amplitude A at f Hz needs A(2*pi*f)^2, against 35 rad/s^2 here, and the
+# servo's Goal_Acceleration register is one byte, so ~39 rad/s^2 is the
+# ceiling no config can raise. The limit the old table missed is speed:
+# `_write(max_speed=...)` is obeyed verbatim, and at the 2.5 rad/s it used
+# to pass, eight of eleven moves were clipped -- a spin asked 2.20 rad and
+# delivered 1.29, so the "126 degree" entry arrived as 74. Every move here
+# is checked against 3.5 rad/s, which the rig already sustains through a
+# strike, and against the acceleration ceiling.
 #
-# Still timid on the joints that translate the tool relative to the ones
-# that do not: a wrist roll of a radian moves the gripper nowhere, where
-# a radian of shoulder pan would sweep it two hand-widths across the
-# table. The roll and the gripper are where the theatre is cheapest.
+# Direction matters more than it looks. HOME puts the tool 71 mm above the
+# table and positive shoulder_lift, elbow_flex and wrist_flex all drive it
+# *down*, so the old bow and droop -- lift +0.55 -- were aiming at the
+# table and hitting it. Gestures that want to be big go up: negative.
+#
+# The roll and the gripper still carry what they can, because they are
+# where theatre is cheapest -- a radian of wrist roll moves the gripper
+# nowhere, where a radian of shoulder pan sweeps it across the table.
 FLOURISHES: dict[str, Move] = {
-    #          pan   lift  elbow wrist roll  grip
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.10, 0.00), 1.0),
-    "spin":   Move((0.00, 0.00, 0.00, 0.00, 2.20, 0.00), 0.5),
-    "wag":    Move((0.45, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
-    "nod":    Move((0.00, 0.00, 0.00, 0.75, 0.00, 0.00), 1.0),
-    "bow":    Move((0.00, 0.55, 0.00, 0.45, 0.00, 0.00), 0.5),
-    "bob":    Move((0.00, 0.35, -0.45, 0.00, 0.00, 0.00), 1.0),
-    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.90), 1.0),
-    "jig":    Move((0.30, 0.22, 0.00, 0.00, 0.00, 0.00), 2.0),
-    "droop":  Move((0.00, 0.55, 0.00, 0.40, 0.00, 0.00), 0.5),
-    "strut":  Move((0.28, 0.00, 0.00, 0.00, 0.95, 0.00), 1.0),
-    "flail":  Move((0.35, 0.28, -0.30, 0.00, 1.00, 0.00), 1.0),
+    #                pan    lift  elbow  wrist   roll   grip
+    # One big one-way roll, slow because that is what buys the size: 109
+    # degrees, against the 74 the old 2.20-rad entry actually delivered.
+    "spin": Move((0.00, 0.00, 0.00, 0.00, 1.90, 0.00), 0.5, 1.8),
+    # Three roll swings of 36 degrees rather than one of 27, which is the
+    # difference between a shimmy and a wobble.
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.62, 0.00), 1.5, 1.7),
+    # Further and faster: 31 degrees of pan in a second, from 18 in 1.2 s.
+    "wag": Move((0.58, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 1.05),
+    # Rise once, dip twice while up -- a nod from a standing start rather
+    # than a wrist twitch. Needs the per-joint cycle counts.
+    "nod": Move((0.00, -0.40, 0.00, 0.35, 0.00, 0.00),
+                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 1.4),
+    # Out further and back, but only so far: this is the one gesture that
+    # travels *toward* the table, and `safety.min_height` does not protect
+    # it -- `clamp_pose` guards Cartesian commands and a flourish writes
+    # joint space directly. Clearance here is this table's job and nothing
+    # else's. These amplitudes bottom out 29 mm up; 0.50/-0.66 reached
+    # 20 mm, which is not enough air for a gesture nobody is watching the
+    # height of.
+    "bob": Move((0.00, 0.42, -0.55, 0.00, 0.00, 0.00), 1.0, 1.2),
+    # Point up, then snap twice. The snap is acceleration-limited, not
+    # speed-limited: at 35 rad/s^2 a 20-degree bite cannot come round
+    # faster than about 0.75 s, and 39 is all the servo has.
+    "chomp": Move((0.00, 0.00, 0.00, -0.30, 0.00, 0.38),
+                  (1.0, 1.0, 1.0, 0.5, 1.0, 2.0), 1.6),
+    # Two hops side to side while it rises once. The lift is a half cycle
+    # on purpose: a whole one is a sine, which spends half its time going
+    # *down*, and down from HOME is 71 mm of air and then the table -- at
+    # a whole cycle this move passed 12 mm off it.
+    "jig": Move((0.42, -0.34, 0.00, 0.00, 0.00, 0.00),
+                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 1.6),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
 # result so the game reads as a performer rather than a scoreboard.
+#
+# bow, droop, strut and flail are gone. The first two aimed at the table;
+# the last two were smaller, muddier versions of spin and jig, spending
+# shoulder travel -- the expensive kind -- to look like less.
 MOODS: dict[str, tuple[str, ...]] = {
-    "gloat": ("spin", "shimmy", "strut", "flail", "chomp"),   # it landed one
-    "sulk": ("droop", "bow", "nod"),                          # it missed
-    "smug": ("wag", "shimmy", "jig"),                         # its bluff worked
-    "caught": ("nod", "droop", "bow"),                        # the human held
+    "gloat": ("spin", "shimmy", "chomp"),   # it landed one
+    "sulk": ("nod", "bob"),                 # it missed
+    "smug": ("wag", "jig"),                 # its bluff worked
+    "caught": ("nod", "wag"),               # the human held through it
     "idle": ("bob", "jig", "chomp"),
 }
 
@@ -726,11 +770,13 @@ class Flourish(Motion):
     # How close to the starting configuration counts as back there.
     HOME_EPSILON = 1e-3
 
-    def __init__(self, move: Move, duration: float = 1.2, speed: float = 2.5) -> None:
+    def __init__(self, move: Move, duration: float = 1.2, speed: float = 3.5) -> None:
         super().__init__()
         self.move = move
-        self.duration = max(duration, 1e-3)
+        self.duration = max(move.duration or duration, 1e-3)
         self.speed = speed
+        self._cycles = np.broadcast_to(
+            np.asarray(move.cycles, float), np.shape(move.amplitudes)).copy()
         self._q0: np.ndarray | None = None
         # Worst case the command is stranded a whole amplitude from home
         # when the plan runs out, and walking it back is rate-limited to
@@ -752,7 +798,7 @@ class Flourish(Motion):
         # is zero at s=0 and s=1 whatever the amplitude, so the arm ends
         # where it started without needing to be driven back.
         envelope = np.sin(np.pi * s)
-        swing = np.sin(2.0 * np.pi * self.move.cycles * s)
+        swing = np.sin(2.0 * np.pi * self._cycles * s)
         amplitudes = np.asarray(self.move.amplitudes, float)
         controller._write(self._q0 + amplitudes * swing * envelope,
                           max_speed=self.speed, dt=dt)
@@ -781,7 +827,7 @@ class Flourish(Motion):
         return self.finished
 
 
-def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 2.5) -> Flourish:
+def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 3.5) -> Flourish:
     """A flourish suiting `mood`, picked at random so it does not stale.
 
     Repetition is what makes a performance stop being funny, and this one
