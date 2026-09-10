@@ -189,7 +189,7 @@ class LegLink:
             )
         self.port = port
         try:
-            ser = serial.Serial(port, self.baudrate, timeout=0.1)
+            ser = _open_without_resetting(serial, port, self.baudrate)
         except Exception as e:
             raise LegError(f"cannot open {port}: {e}") from e
         # Whatever the bootloader left behind is not protocol.
@@ -416,20 +416,72 @@ class LegLink:
 
 
 # -- finding the thing ------------------------------------------------------
+
+def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0.1):
+    """Open the port without rebooting the board on the other end.
+
+    Opening a serial port asserts DTR, and on an Arduino DTR is wired to
+    RESET. So the plain `serial.Serial(port, ...)` restarts the sketch
+    every time anything connects -- and this sketch's `setup()` writes 90
+    to *both* servos, which swings the door open and parks the leg
+    mid-travel before a single command has been sent.
+
+    Measured on the rig, that cost about five seconds and made every
+    gesture happen in two steps: the reset moved the servos, then the
+    command moved them again from somewhere unexpected. The board was
+    never slow -- `close` acked in 17 ms and `open` in 215, which is its
+    own `delay(200)` and nothing else. All of the wait was before the
+    command went out.
+
+    Setting DTR low *before* opening leaves RESET alone. The sketch keeps
+    running, its servos stay where they were, and the first heartbeat
+    arrives within its own 500 ms interval instead of after a bootloader.
+
+    Not every driver and platform honours it -- CH340 and FTDI parts
+    differ, and a board wired with the reset-enable trace cut does not
+    care either way -- so a failure here falls back to the ordinary open
+    rather than refusing to talk to the leg at all. If the two-step
+    movement comes back, that fallback is where to look; the fix in
+    hardware is the usual 10 uF between RESET and GND.
+    """
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baudrate
+    ser.timeout = timeout
+    try:
+        ser.dtr = False
+        ser.rts = False
+    except Exception:            # pragma: no cover - backend without modem lines
+        log.debug("leg: cannot hold DTR low on %s; the board may reset", port)
+    try:
+        ser.open()
+    except Exception:
+        # Some stacks refuse the pre-open setting rather than ignoring it.
+        log.debug("leg: no-reset open failed on %s, falling back", port)
+        return serial.Serial(port, baudrate, timeout=timeout)
+    return ser
+
+
 def heartbeat_answers(port: str, timeout: float = 6.0, baudrate: int = BAUDRATE) -> bool:
     """Is the leg behind this port? Listens for `<3`; writes nothing.
 
     Read-only, so it is safe to point at the servo bus by mistake -- the
-    adapter will simply never say `<3`. It is not free of side effects
-    though: opening a port resets the Arduino behind it, which is why
-    `timeout` has to allow for the bootloader as well as a beat interval.
+    adapter will simply never say `<3`.
+
+    Opens with DTR held low, the same as `LegLink`, so probing does not
+    reboot the board it is looking for. It used to, and probing walks
+    *every* candidate port -- so a single `tlod leg slap` could reset the
+    Arduino more than once before the command went out, and each reset
+    ran a `setup()` that writes 90 to both servos. `timeout` still allows
+    for a bootloader because a board that does reset anyway needs the
+    room.
     """
     try:
         import serial
     except ImportError:
         return False
     try:
-        ser = serial.Serial(port, baudrate, timeout=0.1)
+        ser = _open_without_resetting(serial, port, baudrate)
     except Exception:
         return False
     try:

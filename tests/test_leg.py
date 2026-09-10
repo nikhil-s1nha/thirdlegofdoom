@@ -591,3 +591,91 @@ class TestTheDoorIsNeverClosedOntoTheLeg:
         link.strike(dwell=0.0)
         assert link.seen[-1] == "home", (
             f"strike ended on {link.seen[-1]!r}, leaving the leg down")
+
+
+class _FakeSerialModule:
+    """Enough of pyserial to see how the port gets opened."""
+
+    def __init__(self, allow_preopen_dtr: bool = True) -> None:
+        self.allow = allow_preopen_dtr
+        self.opened: list[dict] = []
+        module = self
+
+        class Serial:
+            def __init__(self, port=None, baudrate=9600, timeout=None):
+                self.port, self.baudrate, self.timeout = port, baudrate, timeout
+                self._dtr = None
+                self.is_open = False
+                if port is not None:            # the reset-y constructor form
+                    module.opened.append({"port": port, "dtr": None, "form": "direct"})
+                    self.is_open = True
+
+            @property
+            def dtr(self):
+                return self._dtr
+
+            @dtr.setter
+            def dtr(self, value):
+                if not module.allow:
+                    raise OSError("this backend will not set DTR before open")
+                self._dtr = value
+
+            rts = dtr
+
+            def open(self):
+                module.opened.append({"port": self.port, "dtr": self._dtr, "form": "deferred"})
+                self.is_open = True
+
+            def reset_input_buffer(self):
+                pass
+
+        self.Serial = Serial
+
+
+class TestOpeningThePortDoesNotRebootTheBoard:
+    """DTR is wired to RESET on an Arduino, and `setup()` moves both servos.
+
+    So a plain open restarts the sketch, which writes 90 to servo 0 and
+    servo 1 -- the door swings open and the leg parks mid-travel -- and
+    only then does the command go out. On the rig that read as a five
+    second delay and every gesture happening in two steps, from
+    positions nothing had asked for.
+    """
+
+    def test_dtr_is_held_low_before_the_port_opens(self):
+        from tlod.leg import _open_without_resetting
+
+        fake = _FakeSerialModule()
+        _open_without_resetting(fake, "/dev/ttyUSB0", 9600)
+
+        assert len(fake.opened) == 1
+        opened = fake.opened[0]
+        assert opened["form"] == "deferred", (
+            "used the constructor that asserts DTR, which resets the board")
+        assert opened["dtr"] is False, "DTR was not held low, so the sketch restarts"
+
+    def test_a_backend_that_refuses_still_gets_a_port(self):
+        """Not every driver honours a pre-open DTR, and the leg still has to work.
+
+        CH340 and FTDI parts differ, and a board with the reset-enable
+        trace cut does not care either way. Refusing to talk to the leg
+        because the nicety failed would trade a cosmetic problem for a
+        total one.
+        """
+        from tlod.leg import _open_without_resetting
+
+        fake = _FakeSerialModule(allow_preopen_dtr=False)
+        ser = _open_without_resetting(fake, "/dev/ttyUSB0", 9600)
+        assert ser is not None
+        assert fake.opened, "fell back to nothing at all"
+
+    def test_probing_uses_the_same_open(self):
+        """`find_leg_port` walks every candidate, so a resetting probe
+        reboots the board more than once before a command goes out."""
+        import inspect
+
+        from tlod import leg
+
+        body = inspect.getsource(leg.heartbeat_answers)
+        assert "_open_without_resetting" in body
+        assert "serial.Serial(" not in body

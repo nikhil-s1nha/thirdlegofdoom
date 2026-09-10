@@ -228,3 +228,23 @@ vision:
 
 runtime:
   prediction_horizon: 0.15
+
+leg:
+  # The third leg's Arduino. Pinned rather than probed: probing opens
+  # every candidate port looking for the heartbeat, and this board is a
+  # CH340 part whose DTR line is wired to RESET -- so a probe used to
+  # reboot it, and `setup()` writes 90 to both servos, swinging the door
+  # open and parking the leg mid-travel before any command went out.
+  #
+  # The driver now holds DTR low so opening does not reset it, but naming
+  # the port skips the search entirely, which is faster and cannot touch
+  # anything else on the way past.
+  #
+  # ttyUSB0, not ttyACM0: the arm's servo bus is the ACM device (native
+  # USB CDC) and this is a USB-serial adapter, so the two do not compete
+  # for the same name the way two Arduinos would.
+  port: /dev/ttyUSB0
+  # Not driven from the game yet -- nothing in runtime/ or game/ builds a
+  # LegService. Turning this on today changes nothing; it is here so the
+  # port above is not the only thing in this section.
+  enabled: false
