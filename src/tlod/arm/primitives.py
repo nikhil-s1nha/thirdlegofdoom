@@ -235,6 +235,16 @@ class Motion(abc.ABC):
     def _on_start(self, controller: ArmController) -> None:
         pass
 
+    def observe(self, tool_z: float) -> None:
+        """Feed the measured tool height, if the caller already has one.
+
+        Optional, and a no-op for every motion that does not care. It
+        exists so a motion can know where the arm *is* without reading the
+        servo bus itself: the caller driving it is often reading the pose
+        already, and a second sync read per tick during a strike is not
+        free on a half-duplex bus that drops the occasional transaction.
+        """
+
     @abc.abstractmethod
     def step(self, controller: ArmController, dt: float) -> bool: ...
 
@@ -343,6 +353,17 @@ class Strike(Motion):
 
     name = "strike"
 
+    # What counts as the arm having stopped. Measured from a bench trace:
+    # after the plan ended the paddle was still 16 mm above its command
+    # and travelling at ~0.18 m/s, and it went on moving for another
+    # ~360 ms -- first carrying 14 mm past on momentum, then creeping
+    # back. Both phases are slow enough that a per-tick threshold alone
+    # would call them stopped, so the reference height is only re-based
+    # when it actually moves: slow creep accumulates against it and keeps
+    # the timer reset until the arm is genuinely done.
+    STILL_EPSILON: float = 0.0015     # metres of drift that still counts as stopped
+    STILL_DWELL: float = 0.06         # seconds of not moving before we believe it
+
     def __init__(
         self,
         target_xyz,
@@ -361,6 +382,9 @@ class Strike(Motion):
         self._restored = False
         self._controller = None
         self._holding_since: float | None = None
+        # Stillness, fed by observe(). See _arm_still.
+        self._still_ref: float | None = None
+        self._moved_at: float | None = None
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
@@ -408,6 +432,8 @@ class Strike(Motion):
 
         self._controller = controller
         self._holding_since = None
+        self._still_ref = None
+        self._moved_at = None
         set_limit = getattr(controller.backend, "set_torque_limit", None)
         if callable(set_limit):
             set_limit(self.limits.torque_limit)
@@ -421,6 +447,38 @@ class Strike(Motion):
             set_limit(self.limits.normal_torque_limit)
         self._restored = True
 
+    def observe(self, tool_z: float) -> None:
+        """Record where the paddle actually is. Called by whoever is stepping us."""
+        now = time.perf_counter()
+        if self._still_ref is None or abs(tool_z - self._still_ref) > self.STILL_EPSILON:
+            # Re-base only on real movement. Holding the reference across
+            # small ticks is the point: a slow creep never exceeds the
+            # threshold on any single tick, but it does accumulate against
+            # a fixed reference, and a creep is exactly what the arm does
+            # while it recovers from overshooting the floor.
+            self._still_ref = float(tool_z)
+            self._moved_at = now
+
+    def _arm_still(self, controller) -> bool:
+        """Has the paddle stopped moving?
+
+        Not "has it arrived" -- on a hit it never arrives, it stalls
+        against the hand and stops there. Stopping is the thing both
+        outcomes have in common and the thing that separates them: stopped
+        at the floor is a dodge, stopped above it is a hand.
+
+        Falls back to `controller.settled()` when nobody is feeding
+        observe(), which is the old behaviour: the *commanded* setpoint
+        has stopped. That is a strictly worse question -- it is true while
+        the paddle is still 16 mm up and travelling at 0.18 m/s -- but a
+        caller that does not observe has nothing better to offer, and
+        waiting for a stillness that can never be established would hang
+        every strike until the timeout.
+        """
+        if self._moved_at is None:
+            return controller.settled()
+        return time.perf_counter() - self._moved_at >= self.STILL_DWELL
+
     def step(self, controller, dt) -> bool:
         if self.finished:
             return True
@@ -432,7 +490,20 @@ class Strike(Motion):
             s = minimum_jerk(self.elapsed / self.duration)
             controller._write(self._q0 + (self._q1 - self._q0) * s,
                               max_speed=self.limits.strike_speed, dt=dt)
-            if self._complete(controller, self.duration):
+            # The plan has to have run out *and* the arm has to have
+            # stopped. Waiting on the plan alone is what made every
+            # downstream reading a measurement of the swing rather than of
+            # what the swing hit: `Motion._complete` asks
+            # `controller.settled()`, which is true once the commanded
+            # setpoint stops changing, and the arm is nowhere near it then.
+            # The timeout is still the backstop, because a paddle stalled
+            # against something that yields slowly might never go quiet.
+            plan_done = self.elapsed >= self.duration
+            timed_out = self.elapsed >= self.duration + self.settle_timeout
+            if plan_done and (self._arm_still(controller) or timed_out):
+                if timed_out and not self._arm_still(controller):
+                    log.warning("strike: arm never went still; pressing anyway "
+                                "after %.0f ms", self.elapsed * 1e3)
                 if self.limits.press_hold > 0.0:
                     self._holding_since = time.perf_counter()
                 else:

@@ -519,6 +519,13 @@ class HandSlapGame(StateMachine):
     def _state_strike(self, robot, controller, dt) -> None:
         tool = controller.pose().xyz()
         hand = self._hand_for_scoring(robot)
+        # Hand the motion the height we just read, so it can tell whether
+        # the arm has actually stopped without paying for a second sync
+        # read on the same tick. `Strike` ends its descent on this rather
+        # than on the commanded setpoint going quiet, which it does while
+        # the paddle is still well above the floor and moving.
+        if self.motion is not None:
+            self.motion.observe(float(tool[2]))
         # Whether the paddle has stopped travelling and is leaning on
         # whatever is under it. Only a load-based sensor uses this, and it
         # is the only thing that tells one apart from the swing's own

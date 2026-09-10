@@ -173,7 +173,8 @@ class TestHybridConfig:
             target = {"play": "cmd_play", "hybrid": "cmd_hybrid",
                       "record": "cmd_record", "vision-check": "cmd_vision_check"}[command]
             with mock.patch.object(
-                    cli, target, lambda args: seen.update({command: args.camera}) or 0):
+                    cli, target,
+                    lambda args, c=command: seen.update({c: args.camera}) or 0):
                 assert cli.main([command]) == 0
         assert seen == dict.fromkeys(seen, None), seen
 

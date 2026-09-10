@@ -67,6 +67,7 @@ from tlod.arm.controller import ArmController  # noqa: E402
 from tlod.arm.primitives import Strike, StrikeLimits  # noqa: E402
 from tlod.cli import build_arm, build_governor, build_limits  # noqa: E402
 from tlod.config import Config  # noqa: E402
+from tlod.game.contact import CollisionPlaneContactSensor  # noqa: E402
 from tlod.types import Pose  # noqa: E402
 
 WATCHED = (1, 2, 3)          # shoulder_lift, elbow_flex, wrist_flex
@@ -95,13 +96,34 @@ if torque is not None:
 # hold is switched off and this script does the holding -- which keeps
 # "how long did the drop take" an honest number.
 limits.press_hold = 0.0
+# CollisionPlaneContactSensor.settle -- how far into the press the game
+# takes its one reading. Imported rather than repeated so this cannot
+# drift away from the sensor it is reporting on.
+SENSOR_SETTLE = CollisionPlaneContactSensor(lambda: 0.0).settle
 plane = cfg.vision.hand_height                 # where a flat palm sits
 hover = Pose(x, y, plane + limits.hover_height)
-# The floor Strike will command from a full-height hover, computed the
-# same way it computes it, so the printout can say how far short of its
-# own target the arm stopped.
-floor = max(plane - limits.press_depth,
-            hover.z - limits.clamp_drop(hover.z - plane))
+def commanded_floor(start_z: float) -> float:
+    """Where `Strike` will actually send the paddle from `start_z`.
+
+    This has to be Strike._on_start's arithmetic exactly, and for a while
+    it was not. The old version measured the drop to the *hand plane* and
+    took max() against a floor below it -- `max(plane - press_depth,
+    start - clamp_drop(start - plane))` -- which is the bug Strike itself
+    was fixed for: the second term lands on the plane, and max() of the
+    plane against something below it returns the plane. So the bench
+    reported the hand plane as the floor and held the arm there, while
+    the strike it had just run commanded 17 mm lower.
+
+    It only showed up when the hover came up short, because with a full
+    hover both terms clamp to the same place. A 12 mm low hover was enough
+    to make "floor was 28 mm (-5 mm short)" out of a strike that had in
+    fact commanded 11 mm and stopped 16 mm above it.
+    """
+    floor = plane - limits.press_depth
+    return max(floor, start_z - limits.clamp_drop(start_z - floor))
+
+
+floor = commanded_floor(hover.z)
 
 print(f"\n  strike bench: over ({x:+.3f}, {y:+.3f}), target plane {plane * 1000:.0f} mm")
 print(f"  hover {hover.z * 1000:.0f} mm, floor {floor * 1000:.0f} mm, "
@@ -150,8 +172,7 @@ try:
 
         motion = Strike([x, y, plane], limits, duration=0.25)
         motion.start(controller)
-        bottom = Pose(x, y, max(plane - limits.press_depth,
-                                started.z - limits.clamp_drop(started.z - plane)))
+        bottom = Pose(x, y, commanded_floor(started.z))
         trace = []
         t0 = time.perf_counter()
         while not motion.step(controller, period):
@@ -202,6 +223,36 @@ try:
         print(f"    peak during swing: load {load_peak:+.3f} at {load_at * 1000:4.0f} ms"
               f" (ceiling {limits.torque_limit / 1000:.3f}), "
               f"current {amp_peak:+.3f} A at {amp_at * 1000:4.0f} ms")
+        # When the arm actually stopped, and what the game's sensor would
+        # have read before it did.
+        #
+        # This is the question the trace answers and the summary used to
+        # hide. `Strike` reports done when the *commanded* setpoint has
+        # settled, which is not the arm: the paddle still has travel left
+        # in it and carries on past, then recovers. Meanwhile
+        # CollisionPlaneContactSensor waits `settle` (120 ms) into the
+        # press and reads once. If the arm is still moving then, the
+        # reading is not the shortfall -- it is a snapshot of the rebound,
+        # and it is wrong in whichever direction the arm happens to be
+        # going.
+        if hold:
+            zs = [r[1] for r in hold]
+            final = float(np.mean(zs[-5:]))
+            stop_at = hold[-1][0]
+            for i, (t, *_) in enumerate(hold):
+                if all(abs(r[1] - final) <= 0.001 for r in hold[i:]):
+                    stop_at = t
+                    break
+            hold_t0 = hold[0][0]
+            print(f"    settled at {final * 1000:.0f} mm, "
+                  f"{(stop_at - hold_t0) * 1000:.0f} ms into the hold "
+                  f"({(final - bottom.z) * 1000:+.0f} mm short of the floor)")
+            at_read = next((r for r in hold if r[0] - hold_t0 >= SENSOR_SETTLE), None)
+            if at_read is not None:
+                print(f"    the game would read {at_read[1] * 1000:.0f} mm at "
+                      f"{SENSOR_SETTLE * 1000:.0f} ms "
+                      f"({(at_read[1] - bottom.z) * 1000:+.0f} mm short) "
+                      f"-- {(at_read[1] - final) * 1000:+.0f} mm off the settled value")
         if settled:
             sl = np.mean([np.max(r[3] - load_base) for r in settled])
             sa = np.mean([np.max(r[4] - amp_base) for r in settled])

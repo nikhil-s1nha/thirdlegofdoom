@@ -99,6 +99,88 @@ def test_strike_goes_below_the_plane_but_only_by_press_depth(controller):
         f"tool stopped at {lowest * 1e3:.1f} mm, never reaching under the plane"
 
 
+def test_strike_does_not_finish_while_the_arm_is_still_moving(controller):
+    """The bug the whole contact chain rested on.
+
+    `Motion._complete` asks `controller.settled()`, which is true once the
+    *commanded* setpoint stops changing. On the real arm that is true
+    while the paddle is 16 mm above its floor and travelling at 0.18 m/s,
+    and it goes on moving for another ~360 ms. Everything downstream --
+    `pressing`, and through it every contact sensor -- was therefore
+    reading an arm in flight and calling the gap a hand.
+
+    A lagging arm is simulated here by feeding observe() a height that
+    trails the command, because MockArm tracks its command exactly and so
+    cannot reproduce the failure on its own.
+    """
+    limits = StrikeLimits()
+    target = np.array([0.22, 0.0, 0.05])
+    drive(Hover(target, limits, duration=0.4), controller)
+
+    strike = Strike(target, limits, duration=0.2)
+    strike.start(controller)
+    # The arm "moves" for 0.5 s, well past the plan's 0.2 s but inside
+    # settle_timeout, so this tests the stillness gate and not the backstop.
+    moving_for = 0.5
+    assert moving_for < strike.settle_timeout, "would test the timeout instead"
+    t0 = time.perf_counter()
+    moving_until = t0 + moving_for
+    finished_at = None
+    while time.perf_counter() - t0 < 3.0:
+        now = time.perf_counter()
+        # A steadily descending height while moving, then a fixed one.
+        strike.observe(0.20 - 0.05 * min(now - t0, moving_for))
+        if strike.step(controller, 0.005):
+            finished_at = now - t0
+            break
+        assert not strike.pressing or now >= moving_until, (
+            f"pressing at {(now - t0) * 1e3:.0f} ms, while the arm is still moving")
+        time.sleep(0.005)
+
+    assert finished_at is not None, "strike never finished"
+    # It must have waited out the motion plus the stillness dwell, rather
+    # than stopping when the plan ran out at 0.2 s.
+    assert finished_at >= moving_for + Strike.STILL_DWELL, (
+        f"finished at {finished_at * 1e3:.0f} ms; the arm was moving until "
+        f"{moving_for * 1e3:.0f} ms")
+
+
+def test_strike_presses_as_soon_as_the_arm_stops(controller):
+    """Stopped, not arrived. On a hit the paddle never arrives -- it stalls
+    on the hand -- so waiting for arrival would hang every hit."""
+    limits = StrikeLimits()
+    target = np.array([0.22, 0.0, 0.05])
+    drive(Hover(target, limits, duration=0.4), controller)
+
+    strike = Strike(target, limits, duration=0.2)
+    strike.start(controller)
+    # Blocked well above the floor from the outset, as a hand would.
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < 3.0:
+        strike.observe(0.09)
+        if strike.step(controller, 0.005):
+            break
+        time.sleep(0.005)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.2 + Strike.STILL_DWELL + limits.press_hold + 0.4, (
+        f"a blocked strike took {elapsed * 1e3:.0f} ms; it should press and go, "
+        "not wait out the settle_timeout")
+
+
+def test_strike_still_completes_when_nobody_observes(controller):
+    """Every caller that does not feed observe() keeps the old behaviour.
+
+    Falling back matters more than it looks: waiting for a stillness that
+    can never be established would hang each strike until settle_timeout,
+    turning a silent improvement into a silent 0.75 s tax.
+    """
+    limits = StrikeLimits()
+    target = np.array([0.22, 0.0, 0.05])
+    drive(Hover(target, limits, duration=0.4), controller)
+    strike = Strike(target, limits, duration=0.2)
+    assert drive(strike, controller, limit=3.0), "strike never finished unobserved"
+
+
 def test_strike_respects_max_drop(controller):
     """A caller asking for a huge strike gets a capped one."""
     limits = StrikeLimits(max_drop=0.05, hover_height=0.25)
