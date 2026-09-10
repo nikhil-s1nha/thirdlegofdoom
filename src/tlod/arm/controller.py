@@ -274,10 +274,40 @@ class ArmController:
         with self._lock:
             return self.backend.diagnostics()
 
-    def pose(self) -> Pose:
+    def uncompensate(self, fk: Pose) -> Pose:
+        """The inverse of `compensate`: forward kinematics -> real tool.
+
+        The flex depends on horizontal radius, which the correction does
+        not change, so this is exact rather than an approximation.
+        """
+        if not self.flex_gain and not self.flex_offset:
+            return fk
+        radius = float(np.hypot(fk.x, fk.y))
+        return Pose(fk.x, fk.y,
+                    fk.z - self.flex_gain * radius - self.flex_offset)
+
+    def pose_fk(self) -> Pose:
+        """Where the *output shafts* put the tool, straight from the model.
+
+        Only for callers that mean the kinematic frame specifically --
+        diagnostics, and the tests that pin FK. Everything about the game
+        wants `pose`.
+        """
         with self._lock:
             q = self.backend.read().q[:5]
         return model.tool_pose(q)
+
+    def pose(self) -> Pose:
+        """Where the tool actually is, as far as this arm can tell.
+
+        Forward kinematics less the flex, so it is in the same frame as
+        the targets `solve` accepts and as the hand positions the camera
+        reports. That consistency is the whole point: `Strike` reads a
+        start height here and computes a drop against a hand plane from
+        the vision pipeline, and when those two were in different frames
+        the strike aimed 25 mm high and the feint moved three millimetres.
+        """
+        return self.uncompensate(self.pose_fk())
 
     @property
     def commanded(self) -> np.ndarray:
@@ -506,8 +536,7 @@ class ArmController:
         ballistic strike, where the point is that it is fast and a second
         pass would be a second, slower descent.
         """
-        aimed = self.compensate(target)
-        result, _, _ = self.solve(aimed, position_only=position_only, compensate=False)
+        result, _, _ = self.solve(target, position_only=position_only)
         if not result.ok:
             log.warning("goto_pose: IK failed, %.1f mm off", result.pos_error * 1e3)
             return False
@@ -516,10 +545,7 @@ class ArmController:
         if reaim is False or self.REAIM_PASSES <= 0:
             return True
 
-        # In the compensated frame: `compensate` has already raised the
-        # target by the droop the encoders cannot see, so this loop's job
-        # is only to make forward kinematics arrive at that raised point.
-        wanted = aimed.xyz()
+        wanted = target.xyz()
         for _ in range(self.REAIM_PASSES):
             error = wanted - self.pose().xyz()
             if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
@@ -528,7 +554,7 @@ class ArmController:
             # the corrected point rather than nudging joints keeps the
             # safety clamp and the IK branch choice in the loop.
             aim = Pose(*(wanted + error))
-            again, _, _ = self.solve(aim, position_only=position_only, compensate=False)
+            again, _, _ = self.solve(aim, position_only=position_only)
             if not again.ok:
                 break
             # Short, because it is a small correction from a standstill.

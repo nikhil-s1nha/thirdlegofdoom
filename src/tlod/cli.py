@@ -534,7 +534,11 @@ def cmd_play(args) -> int:
             actually got to arrives on the poll's `tool_xyz`, which the
             game has already read this tick.
             """
-            return float(model.tool_pose(app.controller.commanded[:5]).z)
+            # Real frame, matching the hand plane the sensor compares it
+            # against. Straight forward kinematics here put the floor and
+            # the hand 33 mm apart in different frames.
+            return float(app.controller.uncompensate(
+                model.tool_pose(app.controller.commanded[:5])).z)
 
         if args.contact == "press":
             # Servo load, held still at the bottom. The geometric sensor
