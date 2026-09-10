@@ -9,8 +9,8 @@ that object instead. The arm has already driven twelve poses by then.
 So look first. This draws every blob of the chosen colour, marks the one
 that would win, and moves nothing.
 
-    python3 scripts/marker_view.py red --camera 1
-    python3 scripts/marker_view.py --marker red --camera 1
+    python3 scripts/marker_view.py --marker red
+    python3 scripts/marker_view.py -c configs/opi.yaml --marker red
 
 Then hold the marker where the gripper will be. If the crosshair jumps to
 something else in the room, choose a different colour or remove the
@@ -34,19 +34,35 @@ MIN_AREA = 45                        # matches find_marker's own threshold
 # always taken. `marker_view.py red --camera 1` reading the colour as a
 # camera index and dying on int("red") is a worse first experience than
 # either spelling deserves.
+def _camera(value):
+    """An index or a device path, whichever was typed."""
+    return int(value) if str(value).lstrip("-").isdigit() else value
+
+
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("marker_pos", nargs="?", default=None,
                     help=f"marker colour: {', '.join(MARKER_BANDS)}")
-parser.add_argument("camera_pos", nargs="?", type=int, default=None,
-                    help="v4l2 index (positional form)")
+parser.add_argument("camera_pos", nargs="?", type=_camera, default=None,
+                    help="v4l2 index or device path (positional form)")
 parser.add_argument("--marker", default=None, choices=sorted(MARKER_BANDS))
-parser.add_argument("--camera", type=int, default=None, help="v4l2 index")
+parser.add_argument("--camera", type=_camera, default=None,
+                    help="v4l2 index or /dev/v4l/by-id/... path; defaults to "
+                         "camera.index from the config")
+parser.add_argument("-c", "--config", default=None, help="YAML config path")
 parser.add_argument("--port", type=int, default=8080)
 args = parser.parse_args()
 
 colour = args.marker or args.marker_pos or "green"
-index = args.camera if args.camera is not None else (
-    args.camera_pos if args.camera_pos is not None else 5)
+# The config, not a number baked in here. This script exists to be run
+# immediately before `calibrate extrinsics`, against the same camera, and
+# a default of 5 meant it opened a different device -- or nothing -- while
+# the config had a by-id path pinned precisely so nobody had to think
+# about indices again.
+index = args.camera if args.camera is not None else args.camera_pos
+if index is None:
+    from tlod.config import Config  # noqa: E402
+
+    index = Config.load(args.config).camera.index
 PORT = args.port
 if colour not in MARKER_BANDS:
     raise SystemExit(f"marker must be one of {', '.join(MARKER_BANDS)}, not {colour!r}")
