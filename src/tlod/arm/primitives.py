@@ -669,37 +669,42 @@ class Move:
     cycles: float
 
 
-# Amplitudes are timid on the joints that translate the tool and generous
-# on the ones that do not: a 26-degree wrist roll is unmistakable across a
-# room and moves the gripper nowhere, where the same angle at the shoulder
-# would sweep it through 10 cm of table.
+# Big, slow gestures. Amplitude and speed trade against each other and
+# the trade is not negotiable: peak joint acceleration for a swing of
+# amplitude A at f Hz is A(2*pi*f)^2, against a configured 35 rad/s^2. So
+# a half-radian wiggle at 10 Hz asks for ~2000 and arrives as a tremble,
+# while the *same* half radian over a second and a bit asks for 14 and
+# arrives whole. Wanting bigger movements therefore means wanting slower
+# ones, and at 1.2 s a swing can be over a radian -- 60-plus degrees,
+# which is unmistakable from the other side of a room.
 #
-# One swing each, and a slow one, because the motion profile is not a
-# suggestion. Peak joint acceleration for a swing of amplitude A at f Hz
-# is A(2*pi*f)^2, so a 0.5 rad wiggle at 10 Hz asks for ~2000 rad/s^2
-# against a configured 35 and arrives as a 1.5-degree tremble -- correctly
-# smoothed into nothing. At one cycle over 0.8 s the same amplitude needs
-# ~28 rad/s^2 and survives. A single deliberate gesture also simply reads
-# better than a buzz.
+# Still timid on the joints that translate the tool relative to the ones
+# that do not: a wrist roll of a radian moves the gripper nowhere, where
+# a radian of shoulder pan would sweep it two hand-widths across the
+# table. The roll and the gripper are where the theatre is cheapest.
 FLOURISHES: dict[str, Move] = {
     #          pan   lift  elbow wrist roll  grip
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.45, 0.00), 1.0),
-    "wag":    Move((0.13, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
-    "nod":    Move((0.00, 0.00, 0.00, 0.25, 0.00, 0.00), 1.0),
-    "bob":    Move((0.00, 0.10, -0.13, 0.00, 0.00, 0.00), 1.0),
-    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.60), 1.0),
-    "droop":  Move((0.00, 0.13, 0.00, 0.10, 0.00, 0.00), 0.5),
-    "strut":  Move((0.09, 0.00, 0.00, 0.00, 0.35, 0.00), 1.0),
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.10, 0.00), 1.0),
+    "spin":   Move((0.00, 0.00, 0.00, 0.00, 2.20, 0.00), 0.5),
+    "wag":    Move((0.45, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
+    "nod":    Move((0.00, 0.00, 0.00, 0.75, 0.00, 0.00), 1.0),
+    "bow":    Move((0.00, 0.55, 0.00, 0.45, 0.00, 0.00), 0.5),
+    "bob":    Move((0.00, 0.35, -0.45, 0.00, 0.00, 0.00), 1.0),
+    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.90), 1.0),
+    "jig":    Move((0.30, 0.22, 0.00, 0.00, 0.00, 0.00), 2.0),
+    "droop":  Move((0.00, 0.55, 0.00, 0.40, 0.00, 0.00), 0.5),
+    "strut":  Move((0.28, 0.00, 0.00, 0.00, 0.95, 0.00), 1.0),
+    "flail":  Move((0.35, 0.28, -0.30, 0.00, 1.00, 0.00), 1.0),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
 # result so the game reads as a performer rather than a scoreboard.
 MOODS: dict[str, tuple[str, ...]] = {
-    "gloat": ("shimmy", "strut", "chomp"),      # it landed one
-    "sulk": ("droop", "nod"),                   # it missed
-    "smug": ("wag", "shimmy"),                  # its bluff worked
-    "caught": ("nod", "droop"),                 # the human held through it
-    "idle": ("bob", "chomp"),
+    "gloat": ("spin", "shimmy", "strut", "flail", "chomp"),   # it landed one
+    "sulk": ("droop", "bow", "nod"),                          # it missed
+    "smug": ("wag", "shimmy", "jig"),                         # its bluff worked
+    "caught": ("nod", "droop", "bow"),                        # the human held
+    "idle": ("bob", "jig", "chomp"),
 }
 
 
@@ -718,12 +723,23 @@ class Flourish(Motion):
 
     name = "flourish"
 
-    def __init__(self, move: Move, duration: float = 0.8, speed: float = 2.0) -> None:
+    # How close to the starting configuration counts as back there.
+    HOME_EPSILON = 1e-3
+
+    def __init__(self, move: Move, duration: float = 1.2, speed: float = 2.5) -> None:
         super().__init__()
         self.move = move
         self.duration = max(duration, 1e-3)
         self.speed = speed
         self._q0: np.ndarray | None = None
+        # Worst case the command is stranded a whole amplitude from home
+        # when the plan runs out, and walking it back is rate-limited to
+        # `speed`. The inherited 0.75 s would expire mid-return on exactly
+        # the big gestures this branch exists for -- a 2.2 rad spin needs
+        # 0.88 s at 2.5 rad/s -- so size the backstop to the move.
+        reach = float(np.max(np.abs(np.asarray(move.amplitudes, float))))
+        self.settle_timeout = max(Motion.settle_timeout,
+                                  reach / max(self.speed, 1e-6) + 0.25)
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
@@ -740,12 +756,32 @@ class Flourish(Motion):
         amplitudes = np.asarray(self.move.amplitudes, float)
         controller._write(self._q0 + amplitudes * swing * envelope,
                           max_speed=self.speed, dt=dt)
-        if self._complete(controller, self.duration):
+        if self.elapsed < self.duration:
+            return False
+        # Finished has to mean back where it started, which is not the
+        # same as out of plan. The envelope is zero at s=1, but the arm
+        # only gets there if the profile kept up, and these amplitudes
+        # deliberately outrun the speed a flourish is allowed: a spin asks
+        # 5.8 rad/s of a 2.5 rad/s budget, so the command trails the plan
+        # by design. On a loop that misses ticks the last write lands
+        # short, and `settled()` is then true of the stale offset the
+        # profile came to rest at -- handing back an arm parked ten
+        # degrees off the pose it promised to return to. Measured under
+        # load that is exactly what happened. So ask where the arm is,
+        # not whether it has stopped.
+        strayed = float(np.abs(controller.commanded - self._q0).max())
+        if strayed <= self.HOME_EPSILON and controller.settled():
+            self.finished = True
+        elif self.elapsed >= self.duration + self.settle_timeout:
+            # The backstop still wins over wedging the state machine, but
+            # it is a bug rather than a round, so it says so.
+            log.warning("flourish: %.3f rad from where it started after %.0f ms; "
+                        "abandoning the return", strayed, self.elapsed * 1e3)
             self.finished = True
         return self.finished
 
 
-def flourish(mood: str, rng=None, duration: float = 0.8, speed: float = 2.0) -> Flourish:
+def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 2.5) -> Flourish:
     """A flourish suiting `mood`, picked at random so it does not stale.
 
     Repetition is what makes a performance stop being funny, and this one

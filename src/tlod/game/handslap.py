@@ -88,10 +88,16 @@ class Personality:
     """How much the robot performs, as opposed to plays.
 
     The premise is a silly robot, so it fidgets while it waits and reacts
-    when a round ends. Both are free: `ready` is time spent deciding when
-    to commit, and `settle` was already 0.6 s of doing nothing between
-    rounds, so a taunt costs no tempo at all -- it fills a pause that was
-    there anyway.
+    when a round ends.
+
+    The fidget is free -- `ready` is time already spent deciding when to
+    commit. The reaction is not, quite: `settle` was 0.6 s of doing
+    nothing, and a gesture big enough to read across a room takes about
+    twice that, because amplitude and speed trade against each other
+    under a fixed acceleration limit and this branch has chosen
+    amplitude. So a round here runs roughly half a second longer than a
+    deadpan one. That is the price of the performance, and on this branch
+    it is worth paying; `--deadpan` is how you stop paying it.
 
     What is deliberately *not* here is any performance during a commit.
     A feint scores only while it is credible, and a robot mugging on the
@@ -106,10 +112,10 @@ class Personality:
     """
 
     enabled: bool = True
-    sway_radius: float = 0.010        # metres, horizontal only
-    sway_period: float = 2.4          # seconds per lap
-    flourish_duration: float = 0.8    # one slow swing; see FLOURISHES
-    flourish_speed: float = 2.0       # rad/s; jaunty, not violent
+    sway_radius: float = 0.022        # metres, horizontal only
+    sway_period: float = 1.8          # seconds per lap
+    flourish_duration: float = 1.2    # one big slow swing; see FLOURISHES
+    flourish_speed: float = 2.5       # rad/s; jaunty, not violent
 
 
 @dataclass(slots=True)
@@ -643,7 +649,7 @@ class HandSlapGame(StateMachine):
         # The dwell, and then however much of the reaction is still
         # playing -- capped, so a motion that never reports done cannot
         # wedge the game in a victory dance.
-        if self.in_state < 0.6 or (not idle and self.in_state < 1.6):
+        if self.in_state < 0.6 or (not idle and self.in_state < 2.4):
             return
         self.last_result = ""
         self.transition("ready" if self._hand(robot) is not None else "idle")
