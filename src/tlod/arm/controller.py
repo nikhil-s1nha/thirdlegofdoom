@@ -123,8 +123,14 @@ class ArmController:
         limits: SafetyLimits | None = None,
         control_hz: float = 100.0,
         governor: PowerGovernor | None = None,
+        flex_gain: float = 0.0,
+        flex_offset: float = 0.0,
     ) -> None:
         self.backend = backend
+        # Sag the encoders cannot see, as metres of droop per metre of
+        # horizontal reach plus a constant. See `compensate`.
+        self.flex_gain = flex_gain
+        self.flex_offset = flex_offset
         # Off by default: the simulator has no power supply to overload,
         # and a governor silently slowing a simulated arm would make every
         # timing conclusion drawn from it wrong in a way nothing reports.
@@ -345,9 +351,58 @@ class ArmController:
         return self.profile.rest_time >= dwell
 
     # -- pose control ------------------------------------------------------
-    def solve(self, target: Pose, *, position_only: bool = True, seed: np.ndarray | None = None):
+    def compensate(self, target: Pose) -> Pose:
+        """Raise a target by the droop that no sensor on this arm can see.
+
+        There are two height errors and they need different treatment.
+        The first is the servos settling low under load: they are
+        proportional position controllers, so they come to rest where
+        their restoring torque balances gravity. The encoders see that
+        one, which is why `goto_pose` can correct it by re-aiming at what
+        forward kinematics reports.
+
+        The second is the arm bending *after* the output shaft -- link
+        deflection, gearbox backlash, mount compliance. The shaft is
+        exactly where the encoder says; the tool is not. Nothing on this
+        machine observes it, so no amount of closing the loop on the
+        encoders can remove it, and a ruler is the only instrument that
+        sees it at all.
+
+        Measured on this rig at a commanded 69 mm, with the encoder-side
+        droop already corrected -- forward kinematics reading 67-69 mm
+        throughout -- against a ruler on the paddle:
+
+            radius 0.224 m   ruler 52 mm   gap 15.4 mm
+            radius 0.316 m   ruler 44 mm   gap 25.0 mm
+            radius 0.396 m   ruler 36 mm   gap 33.0 mm
+
+        The slope between consecutive points is 103.7 and 100.3 mm per
+        metre, so it is a straight line in the reach, which is what a
+        bending beam should be: deflection goes with the moment arm.
+        `0.102 * r - 0.0074` fits all three inside 0.3 mm.
+
+        It is a *feed-forward* correction, not a loop, because the thing
+        it corrects is unobservable -- and it depends on radius, which
+        raising z does not change, so one shot is exact rather than
+        iterative.
+        """
+        if not self.flex_gain and not self.flex_offset:
+            return target
+        radius = float(np.hypot(target.x, target.y))
+        return Pose(target.x, target.y,
+                    target.z + self.flex_gain * radius + self.flex_offset)
+
+    def solve(self, target: Pose, *, position_only: bool = True, seed: np.ndarray | None = None,
+              compensate: bool = True):
         """IK against the safety-clamped target, warm-started from the last
-        command so successive solves stay on the same branch."""
+        command so successive solves stay on the same branch.
+
+        `compensate=False` for a target that has already been raised by
+        `compensate()` -- the re-aiming in `goto_pose` works in the
+        compensated frame and would otherwise apply it twice.
+        """
+        if compensate:
+            target = self.compensate(target)
         safe, violations = self.limits.clamp_pose(target)
         if violations:
             self.stats.guard_hits += 1
@@ -451,7 +506,8 @@ class ArmController:
         ballistic strike, where the point is that it is fast and a second
         pass would be a second, slower descent.
         """
-        result, _, _ = self.solve(target, position_only=position_only)
+        aimed = self.compensate(target)
+        result, _, _ = self.solve(aimed, position_only=position_only, compensate=False)
         if not result.ok:
             log.warning("goto_pose: IK failed, %.1f mm off", result.pos_error * 1e3)
             return False
@@ -460,7 +516,10 @@ class ArmController:
         if reaim is False or self.REAIM_PASSES <= 0:
             return True
 
-        wanted = target.xyz()
+        # In the compensated frame: `compensate` has already raised the
+        # target by the droop the encoders cannot see, so this loop's job
+        # is only to make forward kinematics arrive at that raised point.
+        wanted = aimed.xyz()
         for _ in range(self.REAIM_PASSES):
             error = wanted - self.pose().xyz()
             if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
@@ -469,7 +528,7 @@ class ArmController:
             # the corrected point rather than nudging joints keeps the
             # safety clamp and the IK branch choice in the loop.
             aim = Pose(*(wanted + error))
-            again, _, _ = self.solve(aim, position_only=position_only)
+            again, _, _ = self.solve(aim, position_only=position_only, compensate=False)
             if not again.ok:
                 break
             # Short, because it is a small correction from a standstill.

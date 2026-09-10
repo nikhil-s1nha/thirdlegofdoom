@@ -44,6 +44,11 @@ class ArmConfig:
     # near full extension most of the budget goes on holding the arm up.
     # See StrikeLimits.torque_limit.
     strike_torque: int = 350
+    # Droop the encoders cannot see, as metres of sag per metre of
+    # horizontal reach, plus a constant. Zero disables it. See
+    # ArmController.compensate for the measurement.
+    flex_gain: float = 0.0
+    flex_offset: float = 0.0
     # How far below the hand surface the paddle tip is commanded, metres.
     # Configurable because `tip_offset` changed what it means: it used to
     # be measured to the tool point and so was really 17 mm *plus a

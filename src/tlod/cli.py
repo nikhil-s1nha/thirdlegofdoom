@@ -356,7 +356,9 @@ def cmd_touch(args) -> int:
     policy = TouchObjectsPolicy()
     camera = build_camera(cfg)
     controller = ArmController(build_arm(cfg), build_limits(cfg),
-                               cfg.runtime.control_hz, governor=build_governor(cfg))
+                               cfg.runtime.control_hz, governor=build_governor(cfg),
+                               flex_gain=cfg.arm.flex_gain,
+                               flex_offset=cfg.arm.flex_offset)
 
     print("  THE ARM WILL MOVE. Clear the workspace, keep hands away.")
     print("  Put red, green, blue or yellow objects on the table.")
@@ -711,7 +713,9 @@ def build_app(cfg: Config, render: bool = False):
     # servos through here -- `hybrid --real` and `play --real` -- which
     # were the only entry points driving hardware without it.
     controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
-                               governor=build_governor(cfg))
+                               governor=build_governor(cfg),
+                               flex_gain=cfg.arm.flex_gain,
+                               flex_offset=cfg.arm.flex_offset)
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
     policy = policies.get(cfg.runtime.policy, IdlePolicy)()
 
@@ -1017,7 +1021,9 @@ def cmd_move(args) -> int:
 
     limits = build_limits(cfg)
     controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
-                               governor=build_governor(cfg))
+                               governor=build_governor(cfg),
+                               flex_gain=cfg.arm.flex_gain,
+                               flex_offset=cfg.arm.flex_offset)
     controller.start()
     print(f"  backend {cfg.arm.backend}")
     start = controller.pose()
@@ -1119,7 +1125,9 @@ def cmd_flourish(args) -> int:
         cfg = cfg.with_overrides(arm={"servo_accel": args.servo_accel})
     controller = ArmController(build_arm(cfg), build_limits(cfg),
                                cfg.runtime.control_hz,
-                               governor=build_governor(cfg))
+                               governor=build_governor(cfg),
+                               flex_gain=cfg.arm.flex_gain,
+                               flex_offset=cfg.arm.flex_offset)
     controller.start()
     speeds = ([float(s) for s in args.sweep.split(",")] if args.sweep
               else [args.speed])
@@ -1371,7 +1379,9 @@ def cmd_control(args) -> int:
 
     policies = {"idle": IdlePolicy, "track_hand": TrackHandPolicy}
     controller = ArmController(build_arm(cfg), build_limits(cfg), cfg.runtime.control_hz,
-                               governor=build_governor(cfg))
+                               governor=build_governor(cfg),
+                               flex_gain=cfg.arm.flex_gain,
+                               flex_offset=cfg.arm.flex_offset)
     health = None
     if controller.governor is not None:
         from tlod.arm.power import HealthMonitor

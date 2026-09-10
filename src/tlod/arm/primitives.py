@@ -365,9 +365,13 @@ class GoToPose(GoTo):
         self.pose = pose
         self.ok = False
         self._reaims = 0
+        self._aimed = pose
 
     def _on_start(self, controller) -> None:
-        result, _, _ = controller.solve(self.pose, position_only=True)
+        # Compensated once, here, and the re-aiming below then works in
+        # that frame -- see `ArmController.compensate`.
+        self._aimed = controller.compensate(self.pose)
+        result, _, _ = controller.solve(self._aimed, position_only=True, compensate=False)
         self.ok = result.ok
         self.q_target = result.q
         super()._on_start(controller)
@@ -394,13 +398,14 @@ class GoToPose(GoTo):
         done = super().step(controller, dt)
         if not done or self._reaims >= self.REAIM_PASSES:
             return done
-        wanted = self.pose.xyz()
+        wanted = self._aimed.xyz()
         error = wanted - controller.pose().xyz()
         if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
             return True
         # Aim past the target by however far it fell short, then let the
         # base class run another min-jerk to it from here.
-        result, _, _ = controller.solve(Pose(*(wanted + error)), position_only=True)
+        result, _, _ = controller.solve(Pose(*(wanted + error)), position_only=True,
+                                        compensate=False)
         if not result.ok:
             return True
         self._reaims += 1
