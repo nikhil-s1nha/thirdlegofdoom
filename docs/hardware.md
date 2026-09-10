@@ -236,21 +236,28 @@ leg:
 
 ### Two rules the sketch does not enforce
 
-**`close` does not retract the leg.** It drives servo 0 to 145 and leaves
-servo 1 wherever it was, so closing while the leg is at 40 shuts the door
-onto a deployed leg and holds it there -- a hobby servo stalled against a
-mechanical stop for as long as the board has power, which is how one gets
-cooked. `LegLink.retract()` sends `home` then `close`, always in that
-order, and is the only thing that should ever close the door.
+Both were once the driver's problem and are now the sketch's, which is
+the better place: the guard holds however the board is driven, including
+from a serial terminal that has never heard of `tlod`.
 
-**`open` leaves the leg down.** It ends at servo 1 = 40, and `slap` also
-writes 40, so a slap straight after an open moves nothing at all.
-`LegLink.deploy()` sends `open` then `home`, which is what makes the leg
-*ready* rather than merely out.
+**`close` homes the leg before shutting the door.** It did not always,
+and a `close` sent with the leg down shut the door onto it and held it
+there -- a hobby servo stalled against a mechanical stop for as long as
+the board had power.
 
-    deploy()   open  -> home           door open, leg out, leg lifted
+**`open` waits 500 ms between the door and the leg.** At 200 ms the leg
+started down into a door still swinging, and hit it.
+
+**`open` still leaves the leg down**, at 30, which is where `slap` also
+puts it -- so a `slap` immediately after an `open` moves nothing. Send
+`home` first, or let `strike` do it.
+
+    deploy()   open                   the sketch waits for the door
     strike()   slap  -> dwell -> home  the gesture
-    retract()  home  -> close          leg up FIRST, then the door
+    retract()  close                   the sketch homes the leg first
+
+`deploy` and `retract` are one word each because the board sequences them
+itself. They used to send `home` either side, from when it did not.
 
 ### The arm has to be out of the way first
 

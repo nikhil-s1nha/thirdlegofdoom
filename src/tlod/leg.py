@@ -414,63 +414,32 @@ class LegLink:
         """`slap`: paddle down to 40, and it stays there. See `strike`."""
         return self.send("slap")
 
-    # How long to let a servo actually travel before sending the next
-    # command. The board has no feedback -- `servo.write()` sets a target
-    # and returns immediately -- so every wait anywhere in this protocol
-    # is a guess at travel time, including the sketch's own delay(200).
-    SETTLE: float = 0.4
+    def deploy(self) -> Ack:
+        """Door open, leg out. One word: the sketch does the sequencing.
 
-    def deploy(self, settle: float | None = None) -> Ack:
-        """Leg clear, door open, leg lifted ready to slap.
+        `open` is door to 90, a 500 ms wait for it to finish swinging,
+        then the leg to 30. This used to send `home` either side of it --
+        once to clear the leg before the door moved, once after because
+        `open` left the leg somewhere `slap` could not fall from. Both
+        are the board's job now, and doing them twice only adds travel.
 
-        Homes *first*. The door swings through the space the leg occupies
-        when it is down, so opening with the leg at 40 drives the door
-        into it -- and where the leg was left is a matter of history,
-        since the sketch has no auto-home and `slap` leaves it down.
-        Lifting it before anything else makes the starting state known
-        rather than inherited.
-
-        Then `open`, which the sketch expands to: door to 90, delay(200),
-        leg to 40. Then home again, because that leaves the leg down and
-        `slap` also writes 40, so a slap straight after an open moves
-        nothing at all.
-
-        **`settle` cannot fix a collision inside `open`.** That 200 ms is
-        the board's own guess at how long the door takes to swing, and if
-        the door is slower than that the leg starts down into a door
-        still moving -- with nothing this side of the serial link able to
-        intervene. The fix for that is one character in the sketch. See
-        `docs/hardware.md`.
+        Leaves the leg **down** at 30, which is where `slap` also puts it.
+        So the first `strike` after a deploy homes before it can fall --
+        see `strike`.
         """
-        wait = self.SETTLE if settle is None else settle
-        self.home()
-        time.sleep(wait)
-        ack = self.open_hand()
-        time.sleep(wait)
-        self.home()
-        return ack
+        return self.open_hand()
 
-    def retract(self, settle: float | None = None) -> Ack:
-        """Leg up first, *then* the door shut. Never the other way round.
+    def retract(self) -> Ack:
+        """Leg up, door shut. Also one word now.
 
-        The sketch's `close` drives servo 0 to 145 and does not touch the
-        leg, so closing while the leg is still at 40 shuts the door onto
-        a deployed leg and holds it there. That is a hobby servo stalled
-        against a mechanical stop for as long as the board stays powered,
-        which is how one gets cooked -- and nothing in the sketch
-        prevents it, so it has to be a rule here.
-
-        Returns `close`'s Ack: the door being shut is the thing a caller
-        wants confirmed.
-
-        `settle` is the gap between the two, and it matters for the same
-        reason it does in `deploy`: `home` returns as soon as the board
-        has taken the word, not when the leg has arrived, so closing
-        immediately shuts the door on a leg that is still on its way up.
+        `close` homes the leg to 120 before driving the door to 145. It
+        did not always, and a `close` sent with the leg down shut the
+        door onto it and held it there -- a hobby servo stalled against a
+        mechanical stop for as long as the board had power. That guard
+        lives in the sketch, which is the right place for it: it holds
+        however the board is driven, including from a serial terminal
+        that has never heard of this file.
         """
-        wait = self.SETTLE if settle is None else settle
-        self.home()
-        time.sleep(wait)
         return self.close_hand()
 
     def strike(self, dwell: float = 0.25) -> Ack:
