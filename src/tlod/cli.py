@@ -906,6 +906,7 @@ def cmd_calibrate(args) -> int:
             intr = run_intrinsics(
                 camera, pattern=_pattern(args.pattern), square=args.square,
                 views=args.views, timeout=args.timeout, fisheye=args.fisheye,
+                hfov_deg=cfg.camera.hfov_deg,
                 on_progress=lambda n, total, *_: print(f"    view {n}/{total}", flush=True),
             )
         intr.save(out)
