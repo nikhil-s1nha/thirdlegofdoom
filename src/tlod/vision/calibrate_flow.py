@@ -51,13 +51,23 @@ log = logging.getLogger(__name__)
 # on the floor outranks a blue marker on the gripper and the camera gets
 # calibrated against the roller. Check with scripts/marker_view.py before
 # letting the arm move.
+# Red is two bands, not one: its hue sits at both ends of the circle and
+# a single range cannot express it. Its saturation floor is also higher
+# than the others', because skin is a desaturated red and a hand in frame
+# would otherwise be the largest red blob in the room.
 MARKER_BANDS = {
     "green": ((40, 90, 60), (85, 255, 255)),
     "blue": ((95, 90, 60), (130, 255, 255)),
     "yellow": ((20, 110, 90), (35, 255, 255)),
     "magenta": ((140, 90, 60), (172, 255, 255)),
+    "red": (((0, 140, 70), (8, 255, 255)), ((172, 140, 70), (180, 255, 255))),
 }
 MARKER_HSV = MARKER_BANDS["green"]
+
+
+def _bands(spec):
+    """Normalise a marker spec to a list of (lo, hi) pairs."""
+    return [spec] if isinstance(spec[0][0], (int, float)) else list(spec)
 
 
 def _spread_enough(corners: np.ndarray, previous: list[np.ndarray], min_shift: float) -> bool:
@@ -156,7 +166,10 @@ def run_intrinsics(
 def find_marker(image: np.ndarray, hsv_band=MARKER_HSV, min_area: int = 120):
     """Centroid of the largest blob in the marker colour, or None."""
     hsv = cv2.cvtColor(cv2.GaussianBlur(image, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array(hsv_band[0]), np.array(hsv_band[1]))
+    mask = None
+    for lo, hi in _bands(hsv_band):
+        part = cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask = part if mask is None else cv2.bitwise_or(mask, part)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

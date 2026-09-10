@@ -25,7 +25,7 @@ import numpy as np
 # Kept in step with MARKER_BANDS in tlod.vision.calibrate_flow, and named
 # here rather than imported from it so that `tlod --help` does not have to
 # load OpenCV. cmd_calibrate checks the two agree.
-MARKER_COLOURS = ("green", "blue", "yellow", "magenta")
+MARKER_COLOURS = ("green", "blue", "yellow", "magenta", "red")
 
 from tlod.config import Config
 
