@@ -511,6 +511,12 @@ def cmd_play(args) -> int:
         # once for HandSlapGame -- so the check was reading a throwaway
         # and could never have changed what ran.
         limits = build_strike_limits(cfg)
+        # Tunable from the command line because it is the knob that
+        # decides whether a blocked paddle reads as blocked. Too deep and
+        # it presses through a palm to its floor, and reaching the floor
+        # is exactly what the sensor calls a dodge.
+        if args.press_depth is not None:
+            limits.press_depth = args.press_depth
 
         # There is one sensor and no way to ask for another. The
         # alternatives all read torque, and what they measured is in
@@ -2248,6 +2254,14 @@ def main(argv: list[str] | None = None) -> int:
     # is a way to run the wrong one by accident -- which is exactly what
     # its `proximity` default did for several commits after `height`
     # landed. The encoders answer it directly, so they answer it.
+    s.add_argument("--press-depth", type=float, default=None, dest="press_depth",
+                   metavar="M",
+                   help="how far below the hand surface the paddle is aimed, "
+                        "metres. Deeper makes contact certain and shallower "
+                        "keeps the paddle off the table -- but too deep and it "
+                        "presses through a palm to its floor, which reads as a "
+                        "dodge because reaching the floor is what a dodge is. "
+                        "0.017 is the default; try 0.008 if hits score as dodges")
     s.add_argument("--contact", choices=("plane", "press"), default="plane",
                    help="which contact sensor: 'plane' asks how far short of "
                         "its floor the paddle stopped, read from the encoders; "
