@@ -374,9 +374,9 @@ class CollisionPlaneContactSensor(ContactSensor):
     def __init__(
         self,
         floor_source,
-        margin: float = 0.004,
+        margin: float = 0.002,
         settle: float = 0.12,
-        band_fraction: float = 0.5,
+        band_fraction: float = 0.15,
     ) -> None:
         # () -> commanded floor height, metres. Where the paddle actually
         # reached comes in on `tool_xyz`, which the caller has already read
@@ -388,27 +388,34 @@ class CollisionPlaneContactSensor(ContactSensor):
         # loop e-stopped, and the arm froze above the hand. The commanded
         # position is cached in the controller and costs nothing.
         self.floor_source = floor_source
-        # How far above the floor counts as "stopped short", as an
-        # absolute floor under `band_fraction`. On its own this was the
-        # bug: it assumed an unobstructed press converges to within about
-        # 3 mm of its floor, and on this arm it does not. Measured, with
-        # the floor at 11 mm and nothing on the table, the paddle stalls
-        # at 14-16 mm -- 3-5 mm short, because at Torque_Limit 350 it
-        # cannot close the last few millimetres against its own friction.
-        # A 4 mm margin therefore sat exactly on the empty-table stall
-        # point and every round was a coin flip.
+        # The absolute floor under `band_fraction`, for a band too thin
+        # for a fraction to mean anything. It is not the working
+        # threshold; `band_fraction` is, and on any sane geometry it wins.
         self.margin = margin
         # The threshold that actually decides, as a fraction of the band
         # between the floor and the hand.
         #
         # Scale-free, which is the point. Absolute millimetres have to be
         # re-tuned whenever press_depth, the torque limit or the arm's
-        # load changes, and each of those moves the stall point. "Did the
-        # paddle end up nearer the hand or nearer the floor" does not
-        # move: measured on this rig the empty table stalls at 24% of the
-        # band and a hand stops it at 85%, so half-way separates them with
-        # room on both sides and would still do so if the band changed
-        # size.
+        # load changes, and each of those moves where the paddle ends up.
+        #
+        # This was 0.5, measured against an arm whose descent quit on
+        # first touch: an empty table left the paddle 24% of the way up
+        # the band and a hand stopped it at 85%, so half-way separated
+        # them. Making the descent wait for the arm moved *both* clusters
+        # down about 7 mm, because the paddle now presses into a hand
+        # rather than resting on it. Measured again on the same rig,
+        # floor 11 mm and hand plane 28 mm:
+        #
+        #     empty table   6-10 mm   -5 to -1 mm short   (below the floor)
+        #     a hand       17-23 mm   +6 to +12 mm short
+        #
+        # The gap is 10-17 mm, so the threshold belongs at about 2.5 mm --
+        # 15% of the band, with ~3.5 mm of room on either side. At 50% it
+        # sat above most of the hand cluster and scored real hits as
+        # dodges, which is the opposite of the failure it was introduced
+        # to fix and a good reminder that a threshold calibrated against
+        # one version of the motion does not survive changing the motion.
         #
         # `hand_xyz` is a fixed plane from `vision.hand_height`, not a
         # depth measurement -- one camera cannot get depth, so the pixel

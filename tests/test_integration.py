@@ -235,14 +235,19 @@ class TestTheThresholdSitsBetweenTheClusters:
     FLOOR, HAND = 0.011, 0.028
     # (paddle height in metres, was there really a hand)
     #
-    # Empty-table rows are from the run after the descent was fixed to
-    # wait for the arm; the 20-21 mm readings from the run before it are
-    # deliberately absent, because those were the descent quitting early
-    # rather than the arm's real stall point, and fitting a threshold to
-    # them would push it up into the hand cluster.
+    # All measured on the build that waits for the arm before ending the
+    # descent. Rows from before that are deliberately absent: the paddle
+    # quit on first touch then, which put both clusters ~7 mm higher, and
+    # a threshold fitted to those numbers sits above most of the real
+    # hits on this build. That mistake is the reason this class exists.
+    #
+    # Empty rows are strike_bench over an empty table ("descent arrived"
+    # on every one). Hand rows are a play session.
     ROUNDS = [
-        (0.010, False), (0.014, False), (0.015, False), (0.016, False),
-        (0.024, True), (0.026, True), (0.027, True),
+        (0.006, False), (0.009, False), (0.010, False), (0.010, False),
+        (0.017, True), (0.017, True), (0.018, True), (0.018, True),
+        (0.018, True), (0.019, True), (0.019, True), (0.020, True),
+        (0.023, True),
     ]
 
     def sensor(self):
@@ -268,10 +273,23 @@ class TestTheThresholdSitsBetweenTheClusters:
                 f"{'hit' if fired else 'dodge'}; there was "
                 f"{'a hand' if was_hand else 'nothing'} there. {s.report()}")
 
+    def test_the_threshold_lands_between_the_two_clusters(self):
+        """Not merely correct on the rows -- centred between them."""
+        s = self.sensor()
+        t = s._threshold(self.FLOOR, self.HAND)
+        empty = max(z for z, hand in self.ROUNDS if not hand) - self.FLOOR
+        blocked = min(z for z, hand in self.ROUNDS if hand) - self.FLOOR
+        assert empty < t < blocked, (
+            f"threshold {t * 1e3:.1f} mm is not between the clusters "
+            f"({empty * 1e3:+.0f} / {blocked * 1e3:+.0f} mm)")
+        # Room on both sides, so a millimetre of drift does not flip rounds.
+        assert min(t - empty, blocked - t) > 0.002, (
+            f"threshold {t * 1e3:.1f} mm is within 2 mm of a cluster edge")
+
     def test_the_threshold_is_a_fraction_of_the_band_not_a_constant(self):
         s = self.sensor()
         band = self.HAND - self.FLOOR
-        assert s._threshold(self.FLOOR, self.HAND) == 0.5 * band
+        assert s._threshold(self.FLOOR, self.HAND) == s.band_fraction * band
         # And it never drops below the absolute floor, however thin the band.
         assert s._threshold(self.FLOOR, self.FLOOR + 0.002) == s.margin
 
