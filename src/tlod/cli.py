@@ -14,12 +14,18 @@ perception stack for real.
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
+
+# Kept in step with MARKER_BANDS in tlod.vision.calibrate_flow, and named
+# here rather than imported from it so that `tlod --help` does not have to
+# load OpenCV. cmd_calibrate checks the two agree.
+MARKER_COLOURS = ("green", "blue", "yellow", "magenta")
 
 from tlod.config import Config
 
@@ -891,7 +897,15 @@ def cmd_calibrate(args) -> int:
     """
     import cv2
 
-    from tlod.vision.calibrate_flow import run_extrinsics, run_intrinsics
+    from tlod.vision.calibrate_flow import (
+        MARKER_BANDS,
+        find_marker,
+        run_extrinsics,
+        run_intrinsics,
+    )
+
+    if set(MARKER_BANDS) != set(MARKER_COLOURS):
+        raise SystemExit("marker colour lists have drifted apart; fix cli.MARKER_COLOURS")
     from tlod.vision.calibration import Intrinsics
 
     cfg = Config.load(args.config)
@@ -975,7 +989,7 @@ def cmd_calibrate(args) -> int:
         camera = build_camera(cfg)
         controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
         print("  THE ARM WILL MOVE. Clear the workspace, keep hands away.")
-        print("  Attach a green marker to the gripper, visible from the camera.")
+        print(f"  Attach a {args.marker} marker to the gripper, visible from the camera.")
         input("  press Enter when ready, Ctrl-C to abort... ")
 
     controller.start()
@@ -984,6 +998,8 @@ def cmd_calibrate(args) -> int:
             time.sleep(1.0)
             extr, residuals = run_extrinsics(
                 camera, controller, intr,
+                locate=functools.partial(find_marker,
+                                         hsv_band=MARKER_BANDS[args.marker]),
                 on_progress=lambda i, n, *_: print(f"    pose {i}/{n}", flush=True),
             )
     finally:
@@ -1373,6 +1389,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
+    s.add_argument("--marker", default="green", choices=sorted(MARKER_COLOURS),
+                   help="colour of the marker on the gripper (extrinsics). Pick "
+                        "one absent from the rest of the frame: the largest blob "
+                        "of that colour wins, whatever it belongs to")
     s.add_argument("--preview", type=int, default=0, metavar="PORT",
                    help="serve the annotated camera view on this port while "
                         "capturing, e.g. 8080; for headless boards")
