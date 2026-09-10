@@ -250,15 +250,18 @@ def run_extrinsics(
     gripper: float | None = 0.0,
     locate=None,
     on_progress=None,
-) -> tuple[Extrinsics, list[float]]:
+) -> tuple[Extrinsics, list[float], np.ndarray, float]:
     """Drive the arm to known poses and find the marker in each frame.
 
     `locate(image) -> (u, v) | None` defaults to colour-blob detection of
     a green marker on the gripper. Pass your own to click manually.
 
-    Returns the extrinsics and the per-point reprojection errors, which
-    are the honest quality signal: a low RMS with one wild outlier means
-    one mislocated marker, not a bad camera.
+    Returns the extrinsics, the per-point reprojection errors, the marker
+    offset it solved for, and the RMS it would have had without solving
+    for that offset. The residuals are the honest quality signal: a low
+    RMS with one wild outlier means one mislocated marker, not a bad
+    camera. The two RMS figures together say whether the marker sitting
+    off the tool point was the problem.
     """
     poses = poses or calibration_poses()
     locate = locate or find_marker
@@ -275,6 +278,13 @@ def run_extrinsics(
 
     points_base: list[np.ndarray] = []
     points_image: list[tuple[float, float]] = []
+    # The tool's orientation at each pose, so the solve can also recover
+    # where the marker sits on the gripper. A fixed offset in the base
+    # frame would be harmless -- the solve absorbs it into the camera
+    # position -- but the gripper rotates between poses, so the same
+    # offset points somewhere different each time and no camera pose
+    # explains all of them.
+    tool_R: list[np.ndarray] = []
 
     for i, pose in enumerate(poses, 1):
         if not controller.goto_pose(pose, duration=move_time):
@@ -301,8 +311,10 @@ def run_extrinsics(
         # FK, not the requested pose: the arm lands where it lands, and
         # using the commanded value would fold servo error into the
         # camera calibration.
-        actual = model.fk(controller.state().q[:5])[:3, 3]
+        T = model.fk(controller.state().q[:5])
+        actual = T[:3, 3]
         points_base.append(actual)
+        tool_R.append(T[:3, :3])
         points_image.append(uv)
         if on_progress:
             on_progress(i, len(poses), frame.image, uv, actual)
@@ -314,15 +326,29 @@ def run_extrinsics(
             "thing that colour in frame, and is not occluded by the arm."
         )
 
-    extrinsics = solve_extrinsics(np.array(points_base), np.array(points_image), intrinsics)
+    from tlod.vision.calibration import (
+        Projector,
+        solve_extrinsics_with_marker_offset,
+    )
 
-    from tlod.vision.calibration import Projector
+    points_base_a = np.array(points_base)
+    points_image_a = np.array(points_image)
+    naive = solve_extrinsics(points_base_a, points_image_a, intrinsics)
+    extrinsics, offset = solve_extrinsics_with_marker_offset(
+        points_base_a, np.array(tool_R), points_image_a, intrinsics)
+    # Only if it actually helps. The offset is partly degenerate with the
+    # camera position -- both move the marker in the image -- so on a pose
+    # set with little orientation spread it can chase noise. Keeping the
+    # better of the two costs nothing and cannot lose.
+    if naive.rms <= extrinsics.rms:
+        extrinsics, offset = naive, np.zeros(3)
 
+    marker = points_base_a + np.einsum("nij,j->ni", np.array(tool_R), offset)
     projector = Projector(intrinsics, extrinsics)
     residuals = []
-    for base, (u, v) in zip(points_base, points_image, strict=True):
+    for base, (u, v) in zip(marker, points_image, strict=True):
         projected = projector.project(base)
         residuals.append(
             float(np.hypot(projected[0] - u, projected[1] - v)) if projected else float("inf")
         )
-    return extrinsics, residuals
+    return extrinsics, residuals, offset, naive.rms

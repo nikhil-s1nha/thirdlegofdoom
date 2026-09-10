@@ -80,7 +80,7 @@ def test_extrinsics_recovers_a_known_camera_pose():
     controller.start()
     camera = MarkerCamera(truth, controller)
 
-    extr, residuals = run_extrinsics(
+    extr, residuals, offset, naive_rms = run_extrinsics(
         camera, controller, truth.intr, settle=0.02, move_time=0.15
     )
     controller.backend.disconnect()
@@ -91,6 +91,9 @@ def test_extrinsics_recovers_a_known_camera_pose():
     angle = np.degrees(np.arccos(np.clip((np.trace(extr.R.T @ truth.extr.R) - 1) / 2, -1, 1)))
     assert angle < 1.0, f"orientation off by {angle:.2f} deg"
     assert max(residuals) < 5.0
+    # This camera puts the marker exactly at the tool point, so solving
+    # for an offset must not invent one.
+    assert np.linalg.norm(offset) < 0.005, f"invented a {offset} m offset"
 
 
 def test_extrinsics_refuses_with_too_few_points():
@@ -104,3 +107,70 @@ def test_extrinsics_refuses_with_too_few_points():
         run_extrinsics(blind, controller, truth.intr, settle=0.0, move_time=0.1,
                        locate=lambda img: None)
     controller.backend.disconnect()
+
+
+def test_a_marker_off_the_tool_point_is_solved_for_not_absorbed():
+    """The 8.6 px extrinsics against a 0.165 px intrinsics, explained.
+
+    The marker is tape on a jaw, not the point forward kinematics
+    reports. A *fixed* offset in the base frame would be harmless -- the
+    solve absorbs it into the camera position and reprojects perfectly,
+    just placing the camera slightly wrong. What makes it bite is that
+    the gripper rotates between poses, so the same offset points
+    somewhere different each time and no single camera pose explains all
+    of them.
+    """
+    from tlod.vision.calibration import (
+        solve_extrinsics,
+        solve_extrinsics_with_marker_offset,
+    )
+
+    truth = synthetic_projector((640, 480), (0.42, 0.04, 0.44), (0.22, 0.0, 0.1))
+    rng = np.random.default_rng(0)
+
+    tool_t, tool_R = [], []
+    for pose in calibration_poses():
+        r = model.ik_position(pose.xyz())
+        if not r.ok:
+            continue
+        T = model.fk(r.q)
+        tool_t.append(T[:3, 3])
+        tool_R.append(T[:3, :3])
+    tool_t, tool_R = np.array(tool_t), np.array(tool_R)
+
+    offset = np.array([0.0, 0.012, -0.008])          # 14 mm of tape on a jaw
+    marker = tool_t + np.einsum("nij,j->ni", tool_R, offset)
+    pixels = np.array([truth.project(m) for m in marker]) + rng.normal(0, 0.3, (len(marker), 2))
+
+    naive = solve_extrinsics(tool_t, pixels, truth.intr)
+    fixed, found = solve_extrinsics_with_marker_offset(tool_t, tool_R, pixels, truth.intr)
+
+    assert fixed.rms < naive.rms / 1.5, (
+        f"solving for the offset did not help: {naive.rms:.2f} -> {fixed.rms:.2f} px")
+    naive_err = np.linalg.norm(naive.t - truth.extr.t)
+    fixed_err = np.linalg.norm(fixed.t - truth.extr.t)
+    assert fixed_err < naive_err, (
+        f"camera placed no better: {naive_err * 1e3:.1f} -> {fixed_err * 1e3:.1f} mm")
+    # The offset is partly degenerate with camera position -- both move the
+    # marker in the image -- so this recovers its scale, not its exact value.
+    assert 0.004 < np.linalg.norm(found) < 0.030
+
+
+def test_no_offset_means_no_offset_invented():
+    from tlod.vision.calibration import solve_extrinsics_with_marker_offset
+
+    truth = synthetic_projector((640, 480), (0.42, 0.04, 0.44), (0.22, 0.0, 0.1))
+    rng = np.random.default_rng(1)
+    tool_t, tool_R = [], []
+    for pose in calibration_poses():
+        r = model.ik_position(pose.xyz())
+        if r.ok:
+            T = model.fk(r.q)
+            tool_t.append(T[:3, 3])
+            tool_R.append(T[:3, :3])
+    tool_t, tool_R = np.array(tool_t), np.array(tool_R)
+    pixels = np.array([truth.project(t) for t in tool_t]) + rng.normal(0, 0.3, (len(tool_t), 2))
+
+    extr, found = solve_extrinsics_with_marker_offset(tool_t, tool_R, pixels, truth.intr)
+    assert np.linalg.norm(found) < 0.005, f"invented {np.linalg.norm(found) * 1e3:.1f} mm"
+    assert np.linalg.norm(extr.t - truth.extr.t) < 0.01
