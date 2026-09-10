@@ -985,11 +985,35 @@ class TestCollisionPlaneContact:
         assert tip_floor > table_z, "the paddle is commanded at or below the table"
         assert tip_floor - table_z >= 0.004, (
             f"only {(tip_floor - table_z) * 1e3:.1f} mm of air under the paddle")
-        # And deep enough that a thin hand still stops the paddle well
-        # clear of the threshold.
+        # And deep enough that a hand still stops the paddle clear of the
+        # threshold.
+        #
+        # This used to assume a 20 mm hand and assert the floor was below
+        # it, on the reasoning that the paddle needs room to be stopped
+        # in. The rig disagrees, and the disagreement is the whole
+        # hit/dodge problem: what matters is not how thick the hand is but
+        # **where the paddle comes to rest on it**, and that is not the
+        # top of the palm either. Flesh yields under the servos' push, so
+        # the resting height is where push-down force meets palm
+        # resistance -- measured at 24-26 mm on this rig, and it drops to
+        # the floor entirely once the lean gets past about 10 mm.
+        #
+        # So the thing to guarantee is that the floor sits below that
+        # measured resting height by more than the threshold, and not so
+        # far below that the palm gets flattened on the way. Chasing the
+        # first half alone is what pushed press_depth to 15 mm and made
+        # every genuine hit score as a dodge.
         from tlod.game.contact import CollisionPlaneContactSensor
-        thin_hand = 0.020
-        assert thin_hand - tip_floor > CollisionPlaneContactSensor(lambda: 0.0).margin * 1.5
+        rests_at = 0.024          # measured, hand under the paddle
+        margin = CollisionPlaneContactSensor(lambda: 0.0).margin
+        assert rests_at - tip_floor > margin * 1.5, (
+            f"floor {tip_floor * 1e3:.0f} mm leaves only "
+            f"{(rests_at - tip_floor) * 1e3:.1f} mm under where a hand "
+            f"actually stops the paddle")
+        assert rests_at - tip_floor < 0.010, (
+            f"floor {tip_floor * 1e3:.0f} mm leans "
+            f"{(rests_at - tip_floor) * 1e3:.0f} mm into the palm; past ~10 mm "
+            f"it flattens and the paddle reaches the floor, which scores as a dodge")
 
     def test_a_strike_that_missed_the_hand_says_so(self):
         """"Reached its floor" is only a dodge if the paddle was over the hand.
