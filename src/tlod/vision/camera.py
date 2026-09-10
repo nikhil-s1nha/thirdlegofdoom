@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import re
 import threading
 import time
 
@@ -340,17 +341,53 @@ def capture_nodes() -> dict[int, str]:
     return nodes
 
 
-def list_cameras(max_index: int = 24) -> list[int]:
-    """Indices that open successfully. Noisy on some backends; best effort.
+def stable_paths() -> dict[int, str]:
+    """`/dev/videoN` -> a `/dev/v4l/by-id/...` path that survives a replug.
 
-    The ceiling was 6, which is below where a USB camera lands on an
-    Orange Pi 5 -- the Rockchip codecs take the low indices, so `tlod
-    cameras` reported nothing on a board with a camera plugged into it.
+    The index is not a property of the camera. It is the order the kernel
+    happened to enumerate things in, and on this board a USB camera shares
+    that numbering with six Rockchip codec nodes -- so unplugging the
+    camera, moving it and plugging it back in renumbers it, and every
+    command that named an index is now pointing at a video decoder.
+    Measured on this rig across one remount: the Arducam went from 1 to 0.
+
+    udev builds by-id from the device's own descriptor, so it names the
+    camera rather than its position in a queue. Passing that path as
+    `camera.index` is the way to stop having this conversation.
     """
+    import glob
+    import os
+
+    out: dict[int, str] = {}
+    for link in sorted(glob.glob("/dev/v4l/by-id/*")):
+        try:
+            target = os.path.realpath(link)
+        except OSError:
+            continue
+        m = re.fullmatch(r"/dev/video(\d+)", target)
+        if m is not None:
+            out.setdefault(int(m.group(1)), link)
+    return out
+
+
+def list_cameras(max_index: int = 24) -> list[int]:
+    """Indices that open successfully. Best effort.
+
+    Only capture nodes are probed. Opening every `/dev/videoN` in a range
+    was how this used to work and it hangs here: the Rockchip codec nodes
+    accept the open and then never answer, so `tlod cameras` printed the
+    first line of its own output and stopped, which reads exactly like the
+    camera being broken. `capture_nodes()` already knows which nodes claim
+    V4L2_CAP_VIDEO_CAPTURE, and nothing else was ever going to be a camera.
+    """
+    nodes = capture_nodes()
+    candidates = sorted(nodes) if nodes else list(range(max_index))
     found = []
-    for i in range(max_index):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            found.append(i)
-        cap.release()
+    for i in candidates:
+        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+        try:
+            if cap.isOpened():
+                found.append(i)
+        finally:
+            cap.release()
     return found

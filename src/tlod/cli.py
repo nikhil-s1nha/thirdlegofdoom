@@ -72,6 +72,15 @@ def build_projector(cfg: Config):
     )
 
 
+def camera_arg(value: str):
+    """A v4l2 index or a device path, whichever was typed.
+
+    cv2.VideoCapture takes either, and a path is the one worth typing:
+    indices are assigned in enumeration order and move on a replug.
+    """
+    return int(value) if str(value).lstrip("-").isdigit() else value
+
+
 def build_camera(cfg: Config, scene=None, render: bool = False):
     from tlod.vision.camera import MockCamera, OpenCVCamera
 
@@ -1838,7 +1847,7 @@ def cmd_cameras(args) -> int:
     opens far enough to fail with "Not a video capture device". The name
     is what tells them apart.
     """
-    from tlod.vision.camera import capture_nodes, list_cameras
+    from tlod.vision.camera import capture_nodes, list_cameras, stable_paths
 
     nodes = capture_nodes()
     if nodes:
@@ -1850,7 +1859,22 @@ def cmd_cameras(args) -> int:
     if not found:
         print("  (check `lsusb` for the camera; a hub that dropped it looks"
               " exactly like this)")
-    print("  Indices move across reboots and replugs -- never trust last week's.")
+
+    # The index is the order the kernel enumerated things in, not a
+    # property of the camera, and on this board it is shared with six
+    # Rockchip codec nodes. by-id comes from the device's own descriptor,
+    # so it survives a replug -- which remounting the camera is.
+    paths = {i: p for i, p in stable_paths().items() if i in found}
+    if paths:
+        print("\n  stable paths, which do not move when the camera is replugged:")
+        for i, path in sorted(paths.items()):
+            print(f"    {i:>3}  {path}")
+        first = paths[sorted(paths)[0]]
+        print(f"\n  put one in the config and stop chasing indices:\n"
+              f"    camera:\n      index: {first}")
+    else:
+        print("  Indices move across reboots and replugs -- never trust "
+              "last week's.")
     return 0
 
 
@@ -2086,8 +2110,9 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("hybrid", help="tier B: real camera and hand, simulated arm")
     s.add_argument("--duration", type=float, default=30.0)
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--policy", default="track_hand")
     s.add_argument("--view", action="store_true", help="open a window")
     s.add_argument("--real", action="store_true",
@@ -2103,16 +2128,18 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("bench", help="measure what is currently estimated")
     s.add_argument("what", choices=["ik", "camera", "loop", "all"], default="all", nargs="?")
     s.add_argument("--duration", type=float, default=5.0)
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_bench)
 
     s = sub.add_parser("record", help="capture a camera session to disk")
     s.add_argument("-o", "--output", default="recordings/session")
     s.add_argument("--duration", type=float, default=20.0)
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.set_defaults(func=cmd_record)
 
     s = sub.add_parser("replay", help="re-run a recording through the pipeline")
@@ -2176,8 +2203,9 @@ def main(argv: list[str] | None = None) -> int:
                         "table scores as hits. The end-of-run line prints the peak "
                         "it saw")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--seed", type=int, default=None)
     s.add_argument("--view", action="store_true")
     s.add_argument("--preview", type=int, default=0, metavar="PORT",
@@ -2260,8 +2288,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--to", default="255.255.255.255", help="control board host(s), comma separated")
     s.add_argument("--port", type=int, default=45800)
     s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--objects", action="store_true", help="also publish table objects")
     s.add_argument("--duration", type=float, default=0.0, help="0 = run until stopped")
     s.add_argument("--sim", action="store_true", help="synthetic camera, for testing the link")
@@ -2312,8 +2341,9 @@ def main(argv: list[str] | None = None) -> int:
                         "Pick one absent from the rest of the frame: the largest "
                         "blob of that colour wins, whatever it belongs to")
     s.add_argument("--duration", type=float, default=20.0)
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--with-arm", action="store_true", dest="with_arm",
                    help="also score accuracy against forward kinematics (moves the arm)")
     s.add_argument("--poses", type=int, default=8)
@@ -2341,8 +2371,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="where to write the result. Defaults to camera.intrinsics "
                         "or camera.extrinsics from the config, whichever this "
                         "subcommand produces")
-    s.add_argument("--camera", type=int, default=None,
-                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
+    s.add_argument("--camera", type=camera_arg, default=None,
+                   help="v4l2 index or /dev/v4l/by-id/... path; overrides "
+                        "camera.index. `tlod cameras` lists both")
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)

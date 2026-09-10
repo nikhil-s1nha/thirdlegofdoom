@@ -81,7 +81,7 @@ class PowerConfig:
 @dataclass(slots=True)
 class CameraConfig:
     source: str = "mock"                  # "mock" | "opencv"
-    index: int = 0
+    index: int | str = 0                  # v4l2 index, or a /dev/v4l/by-id path
     width: int = 1280
     height: int = 720
     fps: int = 60

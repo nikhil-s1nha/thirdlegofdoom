@@ -335,3 +335,74 @@ def test_a_wrong_plane_height_moves_the_hand_sideways(projector):
     cos = float(np.dot(drift_a, drift_b) /
                 (np.linalg.norm(drift_a) * np.linalg.norm(drift_b)))
     assert cos > 0.9, f"drift direction is not consistent across the table ({cos:.2f})"
+
+
+def test_list_cameras_only_probes_capture_nodes(monkeypatch):
+    """Opening every /dev/videoN in a range is what made `tlod cameras` hang.
+
+    The Rockchip codec nodes on this board accept the open and never
+    answer, so the command printed its first line and stopped -- which
+    reads exactly like the camera being broken. Only nodes that claim
+    V4L2_CAP_VIDEO_CAPTURE are worth touching, and nothing else was ever
+    going to be a camera.
+    """
+    from tlod.vision import camera as cam
+
+    opened = []
+
+    class FakeCap:
+        def __init__(self, index, *a):
+            opened.append(index)
+            self.index = index
+
+        def isOpened(self):
+            return self.index == 4
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cam, "capture_nodes", lambda: {4: "Arducam", 9: "rkvdec"})
+    monkeypatch.setattr(cam.cv2, "VideoCapture", FakeCap)
+    assert cam.list_cameras() == [4]
+    assert opened == [4, 9], "probed something that is not a capture node"
+
+
+def test_stable_paths_maps_by_id_links_to_indices(monkeypatch, tmp_path):
+    """The index is enumeration order; by-id is the device's own descriptor.
+
+    Measured on the rig: remounting the camera moved it from 1 to 0, and
+    every command naming an index was then pointing at a video decoder.
+    """
+    import os
+
+    from tlod.vision import camera as cam
+
+    link = tmp_path / "usb-Arducam_B0589-video-index0"
+    link.write_text("")
+    monkeypatch.setattr(cam.glob if hasattr(cam, "glob") else os, "path", os.path)
+    monkeypatch.setattr("glob.glob", lambda pat: [str(link)])
+    monkeypatch.setattr(os.path, "realpath", lambda p: "/dev/video3")
+    assert cam.stable_paths() == {3: str(link)}
+
+
+def test_stable_paths_ignores_links_that_are_not_video_nodes(monkeypatch):
+    """by-id also carries media and metadata nodes, which never open."""
+    import os
+
+    from tlod.vision import camera as cam
+
+    monkeypatch.setattr("glob.glob", lambda pat: ["/dev/v4l/by-id/x", "/dev/v4l/by-id/y"])
+    monkeypatch.setattr(os.path, "realpath",
+                        lambda p: "/dev/media0" if p.endswith("x") else "/dev/video7")
+    assert cam.stable_paths() == {7: "/dev/v4l/by-id/y"}
+
+
+def test_camera_arg_takes_an_index_or_a_path():
+    """`--camera 1` and `--camera /dev/v4l/by-id/...` both have to work;
+    cv2.VideoCapture accepts either and the path is the one that lasts."""
+    from tlod.cli import camera_arg
+
+    assert camera_arg("1") == 1
+    assert camera_arg("0") == 0
+    path = "/dev/v4l/by-id/usb-Arducam_B0589_4K_HDR-video-index0"
+    assert camera_arg(path) == path
