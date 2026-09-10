@@ -143,8 +143,19 @@ print(f"  holding {HOLD * 1000:.0f} ms at the bottom before retracting")
 print("\n  THE ARM WILL MOVE. Clear the workspace.")
 input("  press Enter when ready, Ctrl-C to abort... ")
 
+# The flex compensation has to be here too, or the bench and the game are
+# not measuring the same thing. `ArmController.compensate` raises every
+# Cartesian target by the droop no sensor can see -- 33 mm at full reach
+# on this rig -- and `pose()` takes it back off. Built without it, this
+# script commands and reports in the kinematic frame while `tlod play`
+# commands and reports in the real one, so the empty-table cluster
+# measured here and the hand cluster measured in a play session are in
+# frames a whole signal apart. That is exactly the mixed-frame bug the
+# strike itself was fixed for; the bench kept it.
 controller = ArmController(build_arm(cfg), build_limits(cfg), cfg.runtime.control_hz,
-                           governor=build_governor(cfg))
+                           governor=build_governor(cfg),
+                           flex_gain=cfg.arm.flex_gain,
+                           flex_offset=cfg.arm.flex_offset)
 controller.start()
 period = 1.0 / cfg.runtime.control_hz
 set_limit = getattr(controller.backend, "set_torque_limit", None)

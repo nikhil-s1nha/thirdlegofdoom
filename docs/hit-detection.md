@@ -207,6 +207,72 @@ above the hand so there was nothing to stop short of, or the hand simply
 compressed. Each has a different fix. Guessing between them is what
 several rounds of this cost.
 
+## The fifth wrong answer: scoring a miss as a dodge
+
+Added after a session where the arm went 7-14 in one run and 0-7 in the
+next with nothing changed in between, and the round lines gave no way to
+tell which had happened.
+
+A strike aimed off the hand reaches its floor. So does a strike the human
+dodged. Every height the sensor reads is identical:
+
+```
+paddle stopped 18 mm, floor 22 mm, hand 30 mm -> -4 mm short (needs 2)
+```
+
+That line is the same whether the hand moved or the paddle came down
+60 mm to the side of it, and the two have opposite fixes -- one is
+detection working correctly, the other is the aim and no threshold
+anywhere repairs it.
+
+The horizontal distance was available the whole time: `poll()` already
+receives both the tool position and the tracked hand. It is now on the
+round line, and rounds beyond `MISS_RADIUS` (50 mm, half a palm plus a
+little) are counted and called out at the end of the run:
+
+```
+paddle stopped 18 mm, floor 22 mm, hand 30 mm -> -4 mm short (needs 2)
+  [MISSED: came down 61 mm to the side of the hand, ...]
+```
+
+Why this rig produces them: `where_is_my_hand --truth 0.25 0.0` reports
+the palm at 264-267 mm, a standing ~24 mm bias, and its own residual
+analysis says no hand height explains the ray, so it is the extrinsics.
+`vision-check` agrees at 24 mm mean 19. A palm is about 90 mm across, so
+a 24 mm bias lands the paddle near the edge and sometimes past it --
+intermittently, which is the worst way for it to fail.
+
+## How deep to press, and why it is bounded on both sides
+
+`press_depth` has been at 17 mm, then 8, and both were wrong in opposite
+directions. The window is narrow enough to be worth writing down.
+
+**Too deep and the palm gets crushed to the floor**, which is a dodge by
+definition. Swept in one session with a hand deliberately left in the
+way, floor = the 30 mm hand plane less the press:
+
+| press | floor | where the paddle ended up | verdict |
+|---|---|---|---|
+| 25 mm | 5 mm | 4 mm | dodge, every round |
+| 20 mm | 10 mm | 6-9 mm | dodge, every round |
+| 15 mm | 15 mm | 19 mm when blocked | **hit** |
+| 8 mm | 22 mm | 24-26 mm when blocked | **hit** |
+
+**Too shallow and the floor climbs above a thin hand**, and then nothing
+can stop the paddle short of it. At 8 mm the floor is at 22 mm and a
+20 mm hand is *above* it: no band at all. A test says so in as many
+words, and was red for as long as 8 mm was configured.
+
+15 mm is the middle: clear below even a thin hand, well above the crush
+regime.
+
+If hits still read as dodges from there, **the next knob is
+`strike_torque` downward, not `press_depth`.** Less push-down authority
+means the palm holds the paddle higher and the shortfall grows. The trend
+is already recorded -- at 500 the paddle drove through on every strike of
+a session; at 350 the same hand held it 3-4 mm above the floor. Re-measure
+both clusters after changing it, per the rule above.
+
 ## The two ways the geometry can silently break
 
 - **The floor is at or above the hand.** Then a touched paddle and an
@@ -238,6 +304,14 @@ as hits. The end-of-run line prints the peak shortfall the session saw.
 Two things that void a bench run: a `SHORT of 91` hover warning (a short
 hover is a short drop, the variable being controlled for), and running at
 a different x,y from where the game plays.
+
+The bench builds its controller with `arm.flex_gain` / `arm.flex_offset`,
+the same as the game. It has to: without them it commands and reports in
+the kinematic frame while `tlod play` works in the real one, and at full
+reach those are 33 mm apart -- so the empty-table cluster measured here
+and the hand cluster measured in a play session would not be comparable
+at all. That is the same mixed-frame bug `Strike` and `Feint` were fixed
+for, which the bench kept for a while afterwards.
 
 ## Known loose end
 

@@ -30,9 +30,10 @@ The first two exist so the game is fully playable before hardware does.
 The third is what runs on the real arm, and `tlod play --real` offers no
 way to select anything else.
 
-    !! NOTHING BELOW THIS POINT IS CONSTRUCTED ANYWHERE !!
+    !! ONLY ONE THING BELOW THIS POINT IS REACHABLE !!
 
-`ServoLoadContactSensor`, `ServoPressContactSensor` and
+`ServoPressContactSensor` is, behind an explicit `--contact press`, and
+its docstring says why it came back. `ServoLoadContactSensor` and
 `SerialContactSensor` are kept for their measurements, not for their
 behaviour. Each one's docstring records what it read on this rig, and
 between them they are the argument for the sensor that replaced them --
@@ -282,6 +283,25 @@ class ServoLoadContactSensor(ContactSensor):
         # Diagnostics, for tuning the threshold on the first real session.
         self.peak_rise = 0.0
         self.read_failures = 0
+        # What the last judged round read, for `report()`. The geometric
+        # sensor has carried one since it landed and this did not, so
+        # selecting `--contact press` silently gave up the per-round line
+        # -- and then crashed at the end of the run reaching for a
+        # summary that was never written. Both are the same omission.
+        self.last: float | None = None
+
+    def peak_summary(self) -> str:
+        """End-of-run line. A fraction of rated torque, not a height."""
+        return (f"peak held load {self.peak_rise:.3f} of rated torque "
+                f"(needed {self.threshold:.3f}, after "
+                f"{self.settle * 1000:.0f} ms pressing)")
+
+    def report(self) -> str:
+        """What the last judged round actually looked like."""
+        if self.last is None:
+            return "no reading (the paddle never pressed long enough)"
+        return (f"held load {self.last:+.3f} of rated torque "
+                f"(needs {self.threshold:.3f}) after {self.settle * 1000:.0f} ms")
 
     def _load(self) -> np.ndarray | None:
         """Watched joints' load magnitudes, or None if there is no reading."""
@@ -428,9 +448,36 @@ class CollisionPlaneContactSensor(ContactSensor):
         self._pressing_since: float | None = None
         self._fired = False
         self.last: tuple[float, float, float] | None = None   # reached, floor, hand
+        # How far to the side of the tracked hand the paddle came down,
+        # metres, for the last judged round. See MISS_RADIUS.
+        self.last_lateral: float | None = None
         # Diagnostics: the largest settled shortfall seen, in metres.
         self.peak_rise = 0.0
         self.read_failures = 0
+        # Rounds where the paddle landed further than MISS_RADIUS from the
+        # hand. Those are not dodges and counting them as such is what
+        # made a whole aiming problem look like a threshold problem.
+        self.misses = 0
+
+    # Beyond this far from the tracked hand, horizontally, the paddle
+    # cannot have touched the palm -- so "it reached its floor" says
+    # nothing about whether the human dodged.
+    #
+    # This exists because the two failures are indistinguishable in the
+    # round line and have opposite fixes. A dodge means detection worked
+    # and the human was quick. A miss means the strike was aimed
+    # somewhere the hand was not, and no threshold anywhere repairs it.
+    # Measured on this rig: `where_is_my_hand --truth` reports a hand at
+    # a true (250, 0) mm as (264..267, +19) -- a standing ~24 mm bias --
+    # and `vision-check` puts accuracy against kinematics at 24 mm mean
+    # 19. A palm is about 90 mm across, so a 24 mm bias lands the paddle
+    # near the edge of the hand and sometimes past it, which is exactly
+    # the observed pattern of one session hitting 7 of 14 and the next
+    # hitting 0 of 7 with nothing changed in between.
+    #
+    # 50 mm is half a palm plus a little: inside it a stopped paddle is
+    # credible, outside it the round is not evidence either way.
+    MISS_RADIUS: float = 0.05
 
     @property
     def threshold(self) -> float:
@@ -452,12 +499,18 @@ class CollisionPlaneContactSensor(ContactSensor):
         self._fired = False
         self._pressing_since = None
         self.last = None
+        self.last_lateral = None
 
     def peak_summary(self) -> str:
         """End-of-run line. In millimetres, because this is not a torque."""
         need = self.margin if self.last is None else self._threshold(self.last[1], self.last[2])
-        return (f"peak shortfall {self.peak_rise * 1e3:.0f} mm "
+        line = (f"peak shortfall {self.peak_rise * 1e3:.0f} mm "
                 f"(needed {need * 1e3:.0f} mm, {self.band_fraction:.0%} of the band)")
+        if self.misses:
+            line += (f"; {self.misses} round(s) landed more than "
+                     f"{self.MISS_RADIUS * 1e3:.0f} mm from the hand and are not "
+                     f"evidence either way")
+        return line
 
     def report(self) -> str:
         """What the last judged round actually looked like, in millimetres."""
@@ -466,9 +519,21 @@ class CollisionPlaneContactSensor(ContactSensor):
         reached, floor, hand = self.last
         short = reached - floor
         need = self._threshold(floor, hand)
-        return (f"paddle stopped {reached * 1e3:.0f} mm, floor {floor * 1e3:.0f} mm, "
+        line = (f"paddle stopped {reached * 1e3:.0f} mm, floor {floor * 1e3:.0f} mm, "
                 f"hand {hand * 1e3:.0f} mm -> {short * 1e3:+.0f} mm short "
                 f"(needs {need * 1e3:.0f})")
+        # The half of the round the heights cannot show. Without this a
+        # paddle that came down 60 mm wide of the hand reads exactly like
+        # a paddle the human pulled away from, and the two have nothing
+        # in common except the word "dodged".
+        if self.last_lateral is not None:
+            if self.last_lateral > self.MISS_RADIUS:
+                line += (f"  [MISSED: came down {self.last_lateral * 1e3:.0f} mm "
+                         f"to the side of the hand, so this round says nothing "
+                         f"about hit or dodge -- check the aim, not the threshold]")
+            else:
+                line += f"  [{self.last_lateral * 1e3:.0f} mm off the hand centre]"
+        return line
 
     def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
              **kwargs) -> ContactEvent | None:
@@ -491,8 +556,19 @@ class CollisionPlaneContactSensor(ContactSensor):
         reached = float(tool_xyz[2])
         hand = float(hand_xyz[2]) if hand_xyz is not None else float("nan")
         self.last = (float(reached), float(floor), hand)
+        # Horizontal distance from the paddle to the tracked hand. Cheap
+        # -- both positions are already in hand -- and it is the only
+        # thing that separates a dodge from a strike aimed off the hand.
+        lateral = None
+        if hand_xyz is not None and len(hand_xyz) >= 2:
+            lateral = float(np.linalg.norm(
+                np.asarray(tool_xyz, float)[:2] - np.asarray(hand_xyz, float)[:2]))
+        was_miss = self.last_lateral is None and lateral is not None and lateral > self.MISS_RADIUS
+        self.last_lateral = lateral
         short = float(reached) - float(floor)
         self.peak_rise = max(self.peak_rise, short)
+        if was_miss:
+            self.misses += 1
         if short < self._threshold(float(floor), hand):
             return None
         self._fired = True
@@ -509,13 +585,21 @@ ToolHeightContactSensor = CollisionPlaneContactSensor
 class ServoPressContactSensor(ContactSensor):
     """Detect contact from what the arm is still pushing against once it stops.
 
-    UNUSED. It works -- 0.001 / 0.038 / 0.037 held still is a real
-    separation, and this docstring is the record of how that was found --
-    but it costs ~300 ms of six servos stalled at their torque limit
-    every single strike, and sustained stall current is what a 5 A supply
-    has least of; the bus started dropping transactions the afternoon
-    press_hold went to 450 ms. `CollisionPlaneContactSensor` answers the
-    same question from the encoders in 120 ms with no extra bus traffic.
+    OPT-IN, behind `--contact press`. It works -- 0.001 / 0.038 / 0.037
+    held still is a real separation, and this docstring is the record of
+    how that was found -- but it costs ~300 ms of six servos stalled at
+    their torque limit every single strike, and sustained stall current is
+    what a 5 A supply has least of; the bus started dropping transactions
+    the afternoon press_hold went to 450 ms. `CollisionPlaneContactSensor`
+    answers the same question from the encoders in 120 ms with no extra
+    bus traffic, so it stays the default.
+
+    What brought this back from UNUSED is reach. The geometric sensor asks
+    how far short of its floor the paddle stopped, and at 400 mm that
+    question loses its answer: an empty table settles +1..+2 mm short and a
+    hand +3..+5, one millimetre apart. Held load at the same reach read
+    0.008 empty against 0.040-0.052 on a hand, five runs each. Same rig,
+    same strike, and only one of the two still separates.
 
     This is the sensor that works on this arm, and it exists because the
     obvious one does not. `ServoLoadContactSensor` reads the same register
@@ -583,6 +667,25 @@ class ServoPressContactSensor(ContactSensor):
         # which is the number to set `threshold` from after a session.
         self.peak_rise = 0.0
         self.read_failures = 0
+        # What the last judged round read, for `report()`. The geometric
+        # sensor has carried one since it landed and this did not, so
+        # selecting `--contact press` silently gave up the per-round line
+        # -- and then crashed at the end of the run reaching for a
+        # summary that was never written. Both are the same omission.
+        self.last: float | None = None
+
+    def peak_summary(self) -> str:
+        """End-of-run line. A fraction of rated torque, not a height."""
+        return (f"peak held load {self.peak_rise:.3f} of rated torque "
+                f"(needed {self.threshold:.3f}, after "
+                f"{self.settle * 1000:.0f} ms pressing)")
+
+    def report(self) -> str:
+        """What the last judged round actually looked like."""
+        if self.last is None:
+            return "no reading (the paddle never pressed long enough)"
+        return (f"held load {self.last:+.3f} of rated torque "
+                f"(needs {self.threshold:.3f}) after {self.settle * 1000:.0f} ms")
 
     def _load(self) -> np.ndarray | None:
         try:
@@ -601,6 +704,7 @@ class ServoPressContactSensor(ContactSensor):
         self._baseline = None
         self._pressing_since = None
         self._armed_at = time.perf_counter()
+        self.last = None
 
     def poll(self, pressing: bool = False, **kwargs) -> ContactEvent | None:
         if self._fired:
@@ -626,6 +730,7 @@ class ServoPressContactSensor(ContactSensor):
         if now - self._pressing_since < self.settle:
             return None
         rise = float(np.max(load - self._baseline))
+        self.last = rise
         self.peak_rise = max(self.peak_rise, rise)
         if rise < self.threshold:
             return None

@@ -642,7 +642,25 @@ def cmd_play(args) -> int:
         if contact.read_failures:
             print(f"  {contact.read_failures} floor reads failed during strikes "
                   f"(scored as dodges rather than e-stopping mid-swing)")
-        if game.strikes and contact.peak_rise < contact.margin:
+        # Rounds the paddle came down nowhere near the hand. Reported
+        # separately from the verdicts because they are not verdicts:
+        # a strike aimed off the hand reaches its floor exactly like an
+        # unobstructed one, so it scores as a dodge and looks like a
+        # detection failure while being an aiming failure.
+        misses = getattr(contact, "misses", 0)
+        if misses:
+            print(f"  {misses} of {game.strikes} strikes came down more than "
+                  f"{contact.MISS_RADIUS * 1e3:.0f} mm from the hand -- those "
+                  f"rounds scored as dodges but never touched it.")
+            print("  That is aim, not the threshold: recheck `tlod calibrate "
+                  "extrinsics` and")
+            print("  `python3 scripts/where_is_my_hand.py --truth <x> <y>`.")
+        # `margin` is the geometric sensor's; the load sensor's is
+        # `threshold`. Both exist to answer "did anything ever stop it".
+        need = getattr(contact, "margin", None)
+        if need is None:
+            need = getattr(contact, "threshold", 0.0)
+        if game.strikes and contact.peak_rise < need:
             print("  no round ever stopped short. Either nothing was hit, or the")
             print("  floor is at or above the hand -- check the per-round line for")
             print("  a floor and a hand at the same height, and see press_depth and")
