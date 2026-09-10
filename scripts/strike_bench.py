@@ -169,9 +169,14 @@ def sample(t0):
             if state.load is not None else np.zeros(3))
     amps = (np.abs(np.asarray(state.current, float))[list(WATCHED)]
             if state.current is not None else np.zeros(3))
+    # Real frame, both of them. These used to be raw forward kinematics,
+    # which was self-consistent while the controller had no flex
+    # compensation and became a 37 mm lie the moment it did -- the
+    # summary above reads `controller.pose()` and printed "travelled 92
+    # -> 18 mm" over a trace whose own rows said 129 -> 55.
     return (time.perf_counter() - t0,
-            model.fk(state.q[:5])[2, 3],
-            model.fk(controller.commanded[:5])[2, 3],
+            controller.uncompensate(model.tool_pose(state.q[:5])).z,
+            controller.uncompensate(model.tool_pose(controller.commanded[:5])).z,
             load, amps)
 
 
