@@ -63,12 +63,21 @@ PINKY_MCP = 17
 PINKY_TIP = 20
 
 # How far along the wrist-to-knuckles axis the arm aims. 0.0 is the wrist
-# landmark, 1.0 the centre of the knuckle line. One line, because it is
-# the kind of number only the hardware can settle: 0.8 (which is what a
-# plain five-point centroid gives) landed on the edge of the index
-# finger, and 0.5 -- the anatomical middle of the palm -- was further off
-# still rather than nearer.
-PALM_BIAS = 1.0
+# landmark, 1.0 the centre of the knuckle line.
+#
+# This axis is *along* the hand only. Sideways, `palm_center` is the mean
+# of all four knuckles at every value of this, so no setting of it can
+# move the aim toward the index finger or away from it. Two sessions were
+# spent turning it for an error that turned out to be sideways -- the
+# test that settled it costs ten seconds: rotate the hand 180 degrees on
+# the table. The aim swapped from the index side to the pinky side, so
+# the offset is fixed in the table frame and this knob was never
+# connected to it. Sideways error is calibration; see vision.hand_height
+# in configs/opi.yaml.
+#
+# 0.5 is the anatomical middle of the palm, which is where the flat is
+# and what should be aimed at once the sideways offset is gone.
+PALM_BIAS = 0.5
 
 # Distance across the knuckles, index MCP to pinky MCP. Used to recover
 # metric depth from apparent size. Adult range is roughly 7-9 cm; the

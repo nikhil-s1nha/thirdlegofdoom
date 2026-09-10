@@ -43,7 +43,19 @@ safety:
 vision:
   num_hands: 1
   depth_mode: plane
-  hand_height: 0.022
+  # Measured, not assumed. `--contact height` reports where the paddle
+  # stops when a hand blocks it, and across a session that read 27-30 mm
+  # -- so a flat palm's top surface sits at 28 mm, not the 22 mm that was
+  # here. FK is trustworthy at that scale: driven to the joint angles
+  # where the gripper rests on the table it reports +0.2 mm.
+  #
+  # This is not just the strike's target. With depth_mode: plane it is
+  # the height the pixel ray is intersected against, and the camera looks
+  # down at an angle, so an error here moves the tracked hand *sideways*
+  # -- 0.87 mm per mm on this rig's geometry. The 6 mm that was wrong here
+  # was putting the aim ~5 mm off to one side of every hand, always the
+  # same side, which is what "it keeps hitting my index finger" was.
+  hand_height: 0.028
 
 runtime:
   prediction_horizon: 0.15
