@@ -64,6 +64,7 @@ def run_intrinsics(
     square: float = 0.025,
     views: int = 15,
     min_shift: float = 60.0,
+    min_area_frac: float = 0.02,
     timeout: float = 180.0,
     fisheye: bool = False,
     hfov_deg: float = 145.0,
@@ -77,6 +78,7 @@ def run_intrinsics(
     """
     kept_images: list[np.ndarray] = []
     kept_corners: list[np.ndarray] = []
+    too_small = 0
     deadline = time.perf_counter() + timeout
     last_index = -1
 
@@ -90,6 +92,20 @@ def run_intrinsics(
         corners = find_chessboard(frame.image, pattern)
         if corners is None:
             continue
+        # A board detected but small is worse than one not detected at
+        # all. cornerSubPix refines in an 11x11 window, so once corners
+        # are within a few pixels of each other that window spans its
+        # neighbours and the refined positions are smeared -- which does
+        # not fail, it produces confident nonsense. Seen on a 145 degree
+        # lens across a room: a board 40 px wide gave 137 px of
+        # reprojection error from views that all looked accepted.
+        h, w = frame.image.shape[:2]
+        hull = cv2.convexHull(corners.reshape(-1, 2).astype(np.float32))
+        if cv2.contourArea(hull) < min_area_frac * w * h:
+            too_small += 1
+            if too_small % 30 == 1:
+                log.warning("board detected but too small; hold it closer")
+            continue
         if not _spread_enough(corners, kept_corners, min_shift):
             continue
 
@@ -101,9 +117,13 @@ def run_intrinsics(
     if len(kept_images) < 5:
         raise RuntimeError(
             f"only captured {len(kept_images)} usable views of the board in "
-            f"{timeout:.0f}s. Check the pattern size matches --pattern (inner "
-            "corners, so an 8x8 board is 7x7), and that the board is well lit "
-            "and fully in frame."
+            f"{timeout:.0f}s."
+            + (f" {too_small} views were rejected for being too small in frame:"
+               " hold the board closer, so it fills at least a third of the"
+               " view." if too_small else
+               " Check the pattern size matches --pattern (inner corners, so"
+               " an 8x8 board is 7x7), and that the board is well lit and"
+               " fully in frame.")
         )
     return calibrate_intrinsics(kept_images, pattern, square, fisheye=fisheye,
                                 hfov_deg=hfov_deg)
