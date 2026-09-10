@@ -105,7 +105,7 @@ it; `tlod leg` is the command.
 | pin | servo | what it does | positions |
 |---|---|---|---|
 | 7 | `servos[0]` | **the hatch door** | 90 open, 145 shut |
-| 8 | `servos[1]` | the leg itself | 120 up (home), 40 down |
+| 8 | `servos[1]` | the leg itself | 120 up (home), 30 down |
 
 Servo 0 was called "the jaw" here for a while, which is worth correcting
 rather than quietly fixing: a jaw is something you may close whenever you
@@ -116,10 +116,32 @@ Four commands in, one line back, plus `<3` every 500 ms unasked:
 
 | command | does | replies |
 |---|---|---|
-| `open` | door 90, then **after 200 ms** leg 40 | `OPEN` |
-| `close` | door 145 -- *and nothing else* | `CLOSE` |
-| `home` | leg 120 | *an empty line* |
-| `slap` | leg 40 | `s` |
+| `open` | door 90, then **after 500 ms** leg 30 | `OPEN` |
+| `close` | leg 120 **first**, then door 145 | `CLOSE` |
+| `home` | leg 120 | `HOME` |
+| `slap` | leg 30 | `SLAP` |
+
+Three things about this sketch are load-bearing and were learned the hard
+way, so they are worth stating rather than leaving as numbers:
+
+**`setup()` attaches nothing.** It is `Serial.begin` and no more, and each
+command attaches its servo with the target angle *preloaded* before
+`attach()`. That is what stops a reset from moving anything: the earlier
+version attached both servos and wrote 90 in `setup()`, and 90 is the
+door's open position, so merely opening the serial port swung the hatch.
+The cost is that a reset leaves the servos unpowered rather than held --
+no holding torque, so anything deployed sags under its own weight.
+
+**`open` waits 500 ms between the door and the leg.** `servo.write()` sets
+a target and returns; the board has no feedback and cannot know when the
+door has finished swinging, so that delay is a measured guess at travel
+time. At 200 ms the leg started down into a door still moving and hit it.
+
+**`close` homes the leg before shutting the door.** It did not always, and
+a `close` sent with the leg down drove the door onto it and held it there
+-- a hobby servo stalled against a mechanical stop for as long as the
+board has power. `LegLink.retract()` still sends `home` then `close`,
+which is now belt-and-braces rather than the only guard.
 
 9600 baud, newline-terminated, `Serial.readStringUntil('\n')` on the far
 side. Send commands one at a time and wait for the reply.

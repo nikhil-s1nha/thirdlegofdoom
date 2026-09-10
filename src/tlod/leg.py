@@ -68,8 +68,11 @@ HEARTBEAT_INTERVAL = 0.5     # BEAT_INTERVAL in the sketch
 # a false "the leg died" mid-game is worse than noticing a second later.
 HEARTBEAT_TIMEOUT = 1.5
 
-# command -> the line the sketch answers with. `home` really is "".
-ACKS: dict[str, str] = {"open": "OPEN", "close": "CLOSE", "home": "", "slap": "s"}
+# command -> the line the sketch answers with. All four are words now;
+# `home` used to answer with an empty line and `slap` with a bare "s",
+# which were easy to lose among the heartbeats.
+ACKS: dict[str, str] = {"open": "OPEN", "close": "CLOSE",
+                        "home": "HOME", "slap": "SLAP"}
 COMMANDS: tuple[str, ...] = tuple(ACKS)
 
 
@@ -171,12 +174,20 @@ class LegLink:
         """Open the port and wait until the sketch is actually running.
 
         `on_reset` is called if the board turns out to have rebooted on
-        open, *before* `connect` returns. That is not a diagnostic nicety:
-        this sketch's `setup()` writes 90 to both servos and 90 is the
-        door's **open** position, so a reset swings the hatch open with no
-        command sent. Merely connecting can therefore move the door into
-        an arm that is not stowed, and the caller is the only thing that
-        knows whether that matters.
+        open, *before* `connect` returns.
+
+        This used to be a safety hook rather than a diagnostic: `setup()`
+        attached both servos and wrote 90, and 90 is the door's open
+        position, so merely connecting swung the hatch. The sketch no
+        longer does that -- `setup()` is `Serial.begin` and nothing else,
+        and the servos stay detached until a command attaches them. A
+        reset now leaves them unpowered rather than driving them
+        somewhere.
+
+        Which is better but not nothing: an unpowered servo has no
+        holding torque, so a door left open and a leg left out will sag
+        under their own weight rather than staying put. Worth knowing
+        before pulling the USB lead with the leg deployed.
         """
         if self._thread is not None:
             return
@@ -195,9 +206,10 @@ class LegLink:
         self.first_beat = time.perf_counter() - opened if got else float("nan")
         self.reset_on_connect = bool(got and self.first_beat > self.RESET_TELL)
         if self.reset_on_connect:
-            log.warning(
-                "leg: the board reset on connect (first beat after %.1f s), so "
-                "setup() ran and both servos went to 90 -- which OPENS the door",
+            log.info(
+                "leg: the board reset on connect (first beat after %.1f s). "
+                "setup() attaches nothing, so the servos went limp rather than "
+                "moving -- anything deployed will sag under its own weight",
                 self.first_beat)
             if on_reset is not None:
                 on_reset()
@@ -402,18 +414,43 @@ class LegLink:
         """`slap`: paddle down to 40, and it stays there. See `strike`."""
         return self.send("slap")
 
-    def deploy(self) -> Ack:
-        """Door open, leg out, leg lifted ready to slap.
+    # How long to let a servo actually travel before sending the next
+    # command. The board has no feedback -- `servo.write()` sets a target
+    # and returns immediately -- so every wait anywhere in this protocol
+    # is a guess at travel time, including the sketch's own delay(200).
+    SETTLE: float = 0.4
 
-        `open` alone leaves the leg at 40 -- down -- and `slap` writes 40
-        as well, so a slap straight after an open moves nothing at all.
-        Homing here is what makes the leg ready rather than merely out.
+    def deploy(self, settle: float | None = None) -> Ack:
+        """Leg clear, door open, leg lifted ready to slap.
+
+        Homes *first*. The door swings through the space the leg occupies
+        when it is down, so opening with the leg at 40 drives the door
+        into it -- and where the leg was left is a matter of history,
+        since the sketch has no auto-home and `slap` leaves it down.
+        Lifting it before anything else makes the starting state known
+        rather than inherited.
+
+        Then `open`, which the sketch expands to: door to 90, delay(200),
+        leg to 40. Then home again, because that leaves the leg down and
+        `slap` also writes 40, so a slap straight after an open moves
+        nothing at all.
+
+        **`settle` cannot fix a collision inside `open`.** That 200 ms is
+        the board's own guess at how long the door takes to swing, and if
+        the door is slower than that the leg starts down into a door
+        still moving -- with nothing this side of the serial link able to
+        intervene. The fix for that is one character in the sketch. See
+        `docs/hardware.md`.
         """
+        wait = self.SETTLE if settle is None else settle
+        self.home()
+        time.sleep(wait)
         ack = self.open_hand()
+        time.sleep(wait)
         self.home()
         return ack
 
-    def retract(self) -> Ack:
+    def retract(self, settle: float | None = None) -> Ack:
         """Leg up first, *then* the door shut. Never the other way round.
 
         The sketch's `close` drives servo 0 to 145 and does not touch the
@@ -425,8 +462,15 @@ class LegLink:
 
         Returns `close`'s Ack: the door being shut is the thing a caller
         wants confirmed.
+
+        `settle` is the gap between the two, and it matters for the same
+        reason it does in `deploy`: `home` returns as soon as the board
+        has taken the word, not when the leg has arrived, so closing
+        immediately shuts the door on a leg that is still on its way up.
         """
+        wait = self.SETTLE if settle is None else settle
         self.home()
+        time.sleep(wait)
         return self.close_hand()
 
     def strike(self, dwell: float = 0.25) -> Ack:

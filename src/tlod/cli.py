@@ -2256,9 +2256,9 @@ def cmd_leg(args) -> int:
                     ack = link.strike(
                         args.dwell if args.dwell is not None else cfg.leg.strike_dwell)
                 elif action == "deploy":
-                    ack = link.deploy()
+                    ack = link.deploy(settle=args.settle)
                 elif action == "retract":
-                    ack = link.retract()
+                    ack = link.retract(settle=args.settle)
                 else:
                     # Raw sketch commands, including `close`, which does
                     # not retract the leg. `retract` is the safe one.
@@ -2810,6 +2810,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dwell", type=float, default=None,
                    help="seconds the paddle stays down during `strike`; "
                         "overrides leg.strike_dwell")
+    s.add_argument("--settle", type=float, default=None,
+                   help="seconds to let a servo travel before sending the next "
+                        "command, during `deploy` and `retract`. The board has "
+                        "no feedback -- write() sets a target and returns -- so "
+                        "every wait here is a guess at travel time. Raise it if "
+                        "the leg starts moving before the door has finished. "
+                        "It cannot help with a collision inside the sketch's "
+                        "own delay(200); that one needs a reflash")
     s.add_argument("--duration", type=float, default=10.0, help="seconds to `monitor` for")
     s.set_defaults(func=cmd_leg)
 

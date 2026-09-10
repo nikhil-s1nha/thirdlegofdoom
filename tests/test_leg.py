@@ -129,12 +129,23 @@ def test_named_methods_send_the_wire_commands(leg):
     assert board.received == ["open", "close", "home", "slap"]
 
 
-def test_home_acks_with_an_empty_line_and_that_still_counts(leg):
-    """`Serial.println("")`. A blank line is the reply, not a lost one."""
+def test_every_command_acks_with_a_word_of_its_own(leg):
+    """All four replies are distinguishable from each other and from `<3`.
+
+    They were not always. `home` answered with `Serial.println("")` and
+    `slap` with a bare `s`, and a blank line among the heartbeats is a
+    reply that looks exactly like a dropped one. The sketch names them
+    now, and this reads the table rather than the strings so the next
+    rewording is one edit.
+    """
     link, _ = leg
-    ack = link.home()
-    assert ack.line == ""
-    assert ack.expected
+    for command in COMMANDS:
+        ack = link.send(command)
+        assert ack.line == ACKS[command]
+        assert ack.expected
+        assert ack.line, f"{command} answers with a blank line"
+    assert len(set(ACKS.values())) == len(ACKS), "two commands share a reply"
+    assert HEARTBEAT not in ACKS.values()
 
 
 def test_strike_slaps_then_homes(leg):
@@ -166,7 +177,7 @@ def test_heartbeats_are_not_mistaken_for_replies(leg):
     link, _ = leg
     time.sleep(0.2)
     ack = link.send("slap")
-    assert ack.line == "s"
+    assert ack.line == ACKS["slap"]
 
 
 def test_status_measures_the_beat_interval(leg):
@@ -276,7 +287,7 @@ def test_lines_split_across_reads_are_reassembled():
     link.connect()
     try:
         ack = link.slap()               # "s\r\n", a byte at a time
-        assert ack.line == "s"
+        assert ack.line == ACKS["slap"]
         assert ack.expected
         time.sleep(0.15)
         assert link.status().beats >= 2
@@ -313,7 +324,7 @@ def test_on_line_hook_sees_everything_including_heartbeats():
     try:
         link.slap()
         time.sleep(0.12)
-        assert "s" in seen
+        assert ACKS["slap"] in seen
         assert HEARTBEAT in seen
     finally:
         link.disconnect()
@@ -328,7 +339,7 @@ def test_a_hook_that_raises_does_not_kill_the_reader():
     link = LegLink(port="fake", transport=board, boot_timeout=2.0, on_line=boom)
     link.connect()
     try:
-        assert link.slap().line == "s"
+        assert link.slap().line == ACKS["slap"]
     finally:
         link.disconnect()
         board.close()
@@ -348,7 +359,7 @@ def test_context_manager_connects_and_disconnects():
     board = FakeArduino()
     with LegLink(port="fake", transport=board, boot_timeout=2.0) as link:
         assert link.connected
-        assert link.slap().line == "s"
+        assert link.slap().line == ACKS["slap"]
     assert not link.connected
     board.close()
 
@@ -571,19 +582,24 @@ class TestTheDoorIsNeverClosedOntoTheLeg:
 
     def test_retract_homes_the_leg_before_shutting_the_door(self):
         link = _Recorder()
-        link.retract()
+        link.retract(settle=0.0)
         assert link.seen == ["home", "close"], (
             f"retract sent {link.seen}; closing before homing stalls the door servo")
 
-    def test_deploy_lifts_the_leg_so_a_slap_has_somewhere_to_go(self):
-        """`open` ends with the leg at 40 and `slap` also writes 40.
+    def test_deploy_clears_the_leg_before_the_door_swings(self):
+        """The door swings through the space a lowered leg occupies.
 
-        So a slap straight after an open moves nothing at all. Homing is
-        what makes the leg ready rather than merely out.
+        And where the leg was left is a matter of history: the sketch has
+        no auto-home and `slap` leaves it at 40. So `deploy` homes first,
+        which makes the starting state known rather than inherited, then
+        opens, then homes again -- because `open` itself ends with the leg
+        back at 40 and `slap` also writes 40, so a slap straight after an
+        open moves nothing at all.
         """
         link = _Recorder()
-        link.deploy()
-        assert link.seen == ["open", "home"]
+        link.deploy(settle=0.0)
+        assert link.seen == ["home", "open", "home"], link.seen
+        assert link.seen[0] == "home", "the door swings before the leg is clear"
 
     def test_strike_leaves_the_leg_up_so_the_door_can_still_shut(self):
         """Every gesture has to end somewhere `retract` is safe from."""
