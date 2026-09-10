@@ -199,6 +199,27 @@ def test_page_names_every_result_word():
     assert "score.json" in page
 
 
+def test_page_makes_a_sound_for_every_result():
+    """Each verdict needs its own noise, and none of them a file.
+
+    The page is served from a board that may have no route off the LAN, so
+    the sounds are synthesised: a filtered noise burst for the slap and
+    oscillators for the rest. An `<audio src=...>` creeping in here would
+    work on the laptop it was written on and 404 on the robot.
+    """
+    from tlod.viz import scoreboard
+
+    page = scoreboard.PAGE.decode()
+    assert "AudioContext" in page
+    assert "createBufferSource" in page, "the slap needs noise, not a tone"
+    for word in ("HIT", "DODGED", "FLINCH", "HELD"):
+        assert f'=== "{word}"' in page, f"{word} has a colour but no sound"
+    assert "<audio" not in page and ".mp3" not in page and ".wav" not in page
+    # Silent until asked. Browsers refuse to play before a gesture anyway,
+    # so a page that assumed otherwise would just be quietly broken.
+    assert 'setSound(stored === "1")' in page
+
+
 def test_scoreboard_serves_over_http():
     import json
     import socket
