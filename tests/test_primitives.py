@@ -145,6 +145,75 @@ def test_strike_does_not_finish_while_the_arm_is_still_moving(controller):
         f"{moving_for * 1e3:.0f} ms")
 
 
+def test_a_decelerating_arm_is_not_a_stopped_arm(controller):
+    """The regression. A min-jerk plan ends at zero velocity by design, so
+    near the bottom the arm is always crawling -- arrived or not. A short
+    dwell reads that as stopped and ends the descent in mid-air.
+
+    Measured consequence, on hardware, with a 60 ms dwell: dodges quit at
+    17-21 mm instead of reaching the 11 mm floor, and hits quit at
+    24-27 mm against a 28 mm hand instead of pressing into it. Everything
+    ended early, so everything read as blocked.
+
+    The creep rate here is the one from the bench trace: ~1 mm per 26 ms.
+    """
+    limits = StrikeLimits()
+    target = np.array([0.22, 0.0, 0.05])
+    drive(Hover(target, limits, duration=0.4), controller)
+
+    strike = Strike(target, limits, duration=0.2)
+    strike.start(controller)
+    floor = target[2] - limits.press_depth
+    # The real arm only crawls over the last centimetre or so; the swing
+    # itself is fast. Starting the creep 15 mm up is what the bench trace
+    # shows, and creeping the whole drop at this rate would just run out
+    # settle_timeout and test the backstop instead.
+    start_z = floor + 0.015
+    creep = 0.001 / 0.026          # metres per second, from the trace
+
+    t0 = time.perf_counter()
+    ended_z = None
+    while time.perf_counter() - t0 < 3.0:
+        z = max(floor, start_z - creep * (time.perf_counter() - t0))
+        strike.observe(z)
+        if strike.step(controller, 0.005):
+            ended_z = z
+            break
+        time.sleep(0.005)
+
+    assert ended_z is not None, "strike never finished"
+    assert ended_z <= floor + strike.ARRIVE_EPSILON, (
+        f"descent ended at {ended_z * 1e3:.0f} mm with the floor at "
+        f"{floor * 1e3:.0f} mm -- a crawling arm was called a stopped one")
+    assert strike.ended_because == "arrived", strike.ended_because
+
+
+def test_an_unobstructed_strike_ends_on_arrival_not_on_the_dwell(controller):
+    """A clean dodge must not pay the stillness wait.
+
+    Arrival is unambiguous where stillness is not, so it short-circuits.
+    Without that every dodge would sit at the bottom for STILL_DWELL with
+    the servos stalled, which is the current the supply has least of.
+    """
+    limits = StrikeLimits()
+    target = np.array([0.22, 0.0, 0.05])
+    drive(Hover(target, limits, duration=0.4), controller)
+
+    strike = Strike(target, limits, duration=0.2)
+    strike.start(controller)
+    floor = target[2] - limits.press_depth
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < 3.0:
+        strike.observe(floor)          # already there
+        if strike.step(controller, 0.005):
+            break
+        time.sleep(0.005)
+    elapsed = time.perf_counter() - t0
+    assert strike.ended_because == "arrived", strike.ended_because
+    assert elapsed < 0.2 + Strike.STILL_DWELL + limits.press_hold, (
+        f"took {elapsed * 1e3:.0f} ms; arrival should have skipped the dwell")
+
+
 def test_strike_presses_as_soon_as_the_arm_stops(controller):
     """Stopped, not arrived. On a hit the paddle never arrives -- it stalls
     on the hand -- so waiting for arrival would hang every hit."""
