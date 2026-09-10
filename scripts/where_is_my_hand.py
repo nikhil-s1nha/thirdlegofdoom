@@ -6,37 +6,44 @@ lands and where your palm actually is can be pinned on one side or the
 other instead of being argued about.
 
     python3 scripts/where_is_my_hand.py
+    python3 scripts/where_is_my_hand.py --truth 0.19 0.17
 
 Put a hand flat on the table, hold still, and read the number. Then
 measure the same point with a ruler: x is forward from the centre of the
-arm's base, y is to the left, both to the middle of your palm. The
-difference between those two numbers is the whole bug, and its direction
-says which knob fixes it.
+arm's base, y is to the left, both to the middle of your palm.
 
-WHAT THE DIRECTION MEANS
+Give those two numbers back with --truth and this does the rest. The
+difference on its own only tells you there is a bug; the arithmetic below
+tells you which one, and guessing between them cost several sessions.
 
-  Mostly along the camera's line of sight
-      `vision.hand_height` is wrong. With depth_mode: plane the pixel ray
-      is intersected against an assumed height, and the camera looks down
-      at an angle, so being wrong about the height slides the answer
-      sideways -- on this rig about 0.87 mm for every mm of height error,
-      always the same direction. The height is measurable: `--contact
-      height` reports where the paddle stops when a hand blocks it.
+HOW IT TELLS THEM APART
 
-  Some other fixed direction
-      The extrinsics are off. `scripts/check_extrinsics.py` measures that
-      directly by driving the arm to known poses and asking the camera
-      where it thinks the tool is.
+A pixel is a *ray*, not a point. Every height along that ray is a
+different answer, and `depth_mode: plane` picks one by assuming the hand
+sits at `vision.hand_height`. So there are two ways to be wrong, and they
+look identical from a single reading:
 
-  It moves when you rotate your hand without moving it
-      Then it is not a fixed offset at all and the landmarks are at
-      fault -- PALM_BIAS in vision/hands.py, which slides the aim along
-      the wrist-to-knuckles axis. Note that this is the *only* thing that
-      knob can do: sideways, the aim is the mean of all four knuckles at
-      every setting of it.
+  The ray is right, the height is wrong
+      Then the true palm lies somewhere on the ray, just not where the
+      assumed height put it. Solving for the height that lands the ray on
+      your ruler measurement gives a sensible number, and that number is
+      what `vision.hand_height` should be.
 
-That last case is worth testing first because it is free: put the hand
-down, read the number, rotate it 180 degrees in place, read it again.
+  The ray itself is wrong
+      Then no height on it passes near the true palm, because the camera
+      is not where the extrinsics say it is. The residual below stays
+      large whatever height is tried, and no config value fixes it --
+      `scripts/check_extrinsics.py` measures the extrinsics directly by
+      driving the arm to known poses.
+
+The third possibility is that the offset is not fixed in the table frame
+at all but attached to the hand, which would make it a landmark problem
+(PALM_BIAS in vision/hands.py, which slides the aim along the
+wrist-to-knuckles axis -- and note that is the *only* thing it can do:
+sideways, the aim is the mean of all four knuckles at every setting).
+Testing that is free: read the number, rotate the hand 180 degrees
+without sliding it, read it again. If the number holds still, it is one
+of the two above.
 """
 
 import sys
@@ -49,7 +56,13 @@ from tlod.cli import build_camera, build_detector, build_projector  # noqa: E402
 from tlod.config import Config  # noqa: E402
 from tlod.vision.hands import PALM_BIAS, HandLocator  # noqa: E402
 
-cfg = Config.load(sys.argv[1] if len(sys.argv) > 1 else "configs/opi.yaml")
+argv = sys.argv[1:]
+truth = None
+if "--truth" in argv:
+    i = argv.index("--truth")
+    truth = np.array([float(argv[i + 1]), float(argv[i + 2])])
+    del argv[i:i + 3]
+cfg = Config.load(argv[0] if argv else "configs/opi.yaml")
 projector = build_projector(cfg)
 # A scripted detector or a mock camera needs a scene to read hands from,
 # the same wiring build_app() does. Without it this only ran against real
@@ -64,6 +77,54 @@ detector = build_detector(cfg, scene)
 locator = HandLocator(projector, depth_mode=cfg.vision.depth_mode,
                       hand_height=cfg.vision.hand_height,
                       palm_width_m=cfg.vision.palm_width_m)
+
+def diagnose(projector, u, v, seen, truth) -> None:
+    """Which of the two errors is this? Solved, not guessed.
+
+    A pixel is a ray. Its horizontal position is linear in height:
+
+        xy(z) = a + b * z,   b = ray_xy / ray_z
+
+    so the height that brings the ray closest to the ruler measurement
+    has a closed form, and the distance left over at that height says
+    whether the ray goes near the true palm at all. A small residual
+    means the ray is right and only the assumed height was wrong -- and
+    then the solved height is the answer. A large one means no height on
+    this ray reaches the true palm, so the ray is wrong, which is the
+    extrinsics and not something a config value can fix.
+    """
+    origin, direction = projector.ray(u, v)
+    if abs(direction[2]) < 1e-9:
+        return
+    b = direction[:2] / direction[2]
+    a = origin[:2] - origin[2] * b
+
+    off = seen[:2] - truth
+    print(f"    off by {np.linalg.norm(off) * 1e3:5.1f} mm  "
+          f"(x {off[0] * 1e3:+.1f}, y {off[1] * 1e3:+.1f})")
+
+    # Height that puts the ray closest to the truth, and what is left.
+    z = float(np.dot(b, truth - a) / np.dot(b, b))
+    residual = float(np.linalg.norm(a + b * z - truth))
+    slope = float(np.linalg.norm(b))
+    print(f"    this ray moves {slope:.2f} mm sideways per mm of height error")
+
+    if residual < 0.008:
+        print(f"    -> the ray passes {residual * 1e3:.1f} mm from your palm at "
+              f"z = {z * 1e3:.0f} mm.")
+        print(f"       The ray is right and the height is wrong: set "
+              f"vision.hand_height to {z:.3f}")
+        if not (0.0 <= z <= 0.06):
+            print(f"       -- except {z * 1e3:.0f} mm is not a height a flat hand "
+                  f"sits at, so treat this as extrinsics too.")
+    else:
+        print(f"    -> no height on this ray gets closer than "
+              f"{residual * 1e3:.0f} mm (best is z = {z * 1e3:.0f} mm).")
+        print("       The ray itself is wrong, so this is the extrinsics, and no")
+        print("       value of vision.hand_height fixes it. Re-run the extrinsics")
+        print("       calibration, or measure the current one with")
+        print("       scripts/check_extrinsics.py")
+
 
 print(f"\n  assuming hands sit at {cfg.vision.hand_height * 1e3:.0f} mm "
       f"(vision.hand_height, depth_mode {cfg.vision.depth_mode})")
@@ -98,6 +159,8 @@ try:
             print(f"  palm at x {p[0] * 1e3:+7.1f}  y {p[1] * 1e3:+7.1f}  "
                   f"z {p[2] * 1e3:+6.1f} mm     (pixel {u:.0f}, {v:.0f}, "
                   f"{hands[0].handedness.lower()})")
+            if truth is not None:
+                diagnose(projector, u, v, p, truth)
 except KeyboardInterrupt:
     print("\n  stopped")
 finally:
