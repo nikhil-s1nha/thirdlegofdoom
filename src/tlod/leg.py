@@ -492,8 +492,43 @@ def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0
     except Exception:
         # Some stacks refuse the pre-open setting rather than ignoring it.
         log.debug("leg: no-reset open failed on %s, falling back", port)
-        return serial.Serial(port, baudrate, timeout=timeout)
+        ser = serial.Serial(port, baudrate, timeout=timeout)
+    _keep_dtr_on_close(ser)
     return ser
+
+
+def _keep_dtr_on_close(ser) -> bool:
+    """Stop the board resetting when we *close* the port.
+
+    There are two resets and they have different causes. Opening the port
+    pulses DTR, which is the one a capacitor across RESET fixes. Closing
+    it drops DTR because of HUPCL -- "hang up on last close" -- which is a
+    terminal flag and costs nothing to clear.
+
+    That second one is why a gesture does not stay put. Measured on the
+    rig: `strike` slaps the leg to 40, homes it to 120, and then the CLI
+    exits, the port closes, the board reboots and `setup()` puts it back
+    to 90. From outside that looks like the leg going down, up, and then
+    drifting down again on its own -- and the door reopening with it,
+    since `setup()` writes 90 to servo 0 as well.
+
+    Linux only in practice; anything without HUPCL in termios keeps its
+    old behaviour rather than failing, since a board that resets on close
+    still works, it just moves when it should not.
+    """
+    try:
+        import termios
+    except ImportError:                          # pragma: no cover - not POSIX
+        return False
+    try:
+        fd = ser.fileno()
+        attrs = termios.tcgetattr(fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception as e:                       # pragma: no cover - backend dependent
+        log.debug("leg: could not clear HUPCL (%s); the board will reset on close", e)
+        return False
+    return True
 
 
 def heartbeat_answers(port: str, timeout: float = 6.0, baudrate: int = BAUDRATE) -> bool:

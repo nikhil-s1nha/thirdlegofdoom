@@ -2212,7 +2212,7 @@ def cmd_leg(args) -> int:
         baudrate=cfg.leg.baudrate,
         ack_timeout=cfg.leg.ack_timeout,
         boot_timeout=cfg.leg.boot_timeout,
-        on_line=(lambda line, t: lines.append((line, t))) if args.action == "monitor" else None,
+        on_line=(lambda line, t: lines.append((line, t))) if "monitor" in args.action else None,
     )
     try:
         link.connect()
@@ -2238,28 +2238,38 @@ def cmd_leg(args) -> int:
         print(f"  set it so a replug cannot move it:\n    leg:\n      port: {link.port}")
 
     try:
-        if args.action == "monitor":
+        if "monitor" in args.action:
+            if len(args.action) > 1:
+                print("  `monitor` only listens; run it on its own")
+                return 2
             return _leg_monitor(link, lines, args.duration)
 
+        # Several actions share one connection on purpose. Opening the
+        # port reboots this board, so a separate invocation per gesture
+        # means a reboot per gesture -- and each one runs setup(), which
+        # opens the door and parks the leg. One connection, one reset.
         for i in range(args.repeat):
             if i:
                 time.sleep(args.interval)
-            if args.action == "strike":
-                ack = link.strike(args.dwell if args.dwell is not None else cfg.leg.strike_dwell)
-            elif args.action == "deploy":
-                ack = link.deploy()
-            elif args.action == "retract":
-                ack = link.retract()
-            else:
-                # Raw sketch commands, including `close`, which does not
-                # retract the leg. `retract` is the one to reach for.
-                if args.action == "close":
-                    print("  note: `close` shuts the door and leaves the leg "
-                          "where it is. If it is down, that is the door being "
-                          "held against it -- `retract` homes first.")
-                ack = link.send(args.action)
-            flag = "" if ack.expected else "   <-- not what the sketch should say"
-            print(f"  {ack.command:6s} -> {ack.line!r:8s} {ack.latency * 1000:6.0f} ms{flag}")
+            for action in args.action:
+                if action == "strike":
+                    ack = link.strike(
+                        args.dwell if args.dwell is not None else cfg.leg.strike_dwell)
+                elif action == "deploy":
+                    ack = link.deploy()
+                elif action == "retract":
+                    ack = link.retract()
+                else:
+                    # Raw sketch commands, including `close`, which does
+                    # not retract the leg. `retract` is the safe one.
+                    if action == "close":
+                        print("  note: `close` shuts the door and leaves the leg "
+                              "where it is. If it is down, that is the door being "
+                              "held against it -- `retract` homes first.")
+                    ack = link.send(action)
+                flag = "" if ack.expected else "   <-- not what the sketch should say"
+                print(f"  {ack.command:6s} -> {ack.line!r:8s} "
+                      f"{ack.latency * 1000:6.0f} ms{flag}")
     except LegError as e:
         print(f"  {e}")
         return 1
@@ -2783,7 +2793,7 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_power)
 
     s = sub.add_parser("leg", help="drive the Arduino paddle, or watch its heartbeat")
-    s.add_argument("action",
+    s.add_argument("action", nargs="+",
                    choices=[*LEG_COMMANDS, "strike", "deploy", "retract", "monitor"],
                    help="the sketch's four raw commands, or one of the three "
                         "safe sequences: `deploy` is open then home (open "
