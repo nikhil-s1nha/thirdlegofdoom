@@ -137,13 +137,21 @@ class StrikeLimits:
     # Held still at the bottom the same three read 0.001 / 0.038 / 0.037.
     # With no acceleration left to confound it, what remains is the arm
     # pressing on what is underneath. The servo's own load filter needs
-    # ~250 ms to decay from the swing before that is true, and the arm is
-    # still arriving for the first ~60 ms of the hold besides -- on the
-    # measured traces `settled()` reported done with 10 mm left to travel.
-    # So this is 300 ms of settling plus margin, not a round number.
-    # Shorter and the transient is still in the reading: empty air looks
-    # like a hand.
-    press_hold: float = 0.45
+    # ~250 ms to decay from the swing before that is true, and 450 ms was
+    # sized for that.
+    #
+    # `--contact height` does not wait for any filter -- it reads the
+    # encoders, which are already right the moment the arm stops -- and
+    # needs 120 ms. This is that plus margin, because the hold is not
+    # free: it is the servos stalled against a hand at their torque limit,
+    # every strike, and sustained stall current is what a 5 A supply and
+    # six servos have least of. It went in at 450 ms this afternoon and
+    # the bus started dropping transactions the same afternoon.
+    #
+    # Raise it back to 0.45 for `--contact press`, which reads a filtered
+    # torque estimate and does need the 300 ms. cmd_play warns if the hold
+    # is shorter than the sensor's settle window.
+    press_hold: float = 0.20
     # Load above the hover baseline, held, that counts as something being
     # there. Nothing measured 0.001 and the two real obstacles 0.037-0.038,
     # so this sits in a gap almost two orders of magnitude wide.
