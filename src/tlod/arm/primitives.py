@@ -764,32 +764,43 @@ MEASURED_TRAVEL: dict[str, tuple[float, float]] = {
 # hit it. Anything large goes up: negative.
 FLOURISHES: dict[str, Move] = {
     #             pan    lift  elbow  wrist   roll   grip
-    # Everything at once and over in half a second: the wrist swinging up
-    # and rolling 74 degrees the long way round, the shoulder turning into
-    # it, and three quick bites on the way. The gripper is small here only
-    # because three of anything in 0.5 s is what the acceleration ceiling
-    # will pay for -- chomp is where the big jaw lives.
-    "spin": Move((0.45, -0.30, 0.00, -0.75, -1.30, 0.24),
+    # Everything at once: the wrist swinging up and rolling 74 degrees the
+    # long way round, the shoulder turning into it, three quick bites on
+    # the way through.
+    #
+    # 0.62 s rather than the 0.50 it was drawn at, and the gripper is what
+    # sets that. Three rectified humps in half a second move faster than
+    # the profile can follow, so it lags and then overshoots -- measured
+    # 0.48 rad of travel against 0.24 asked, twice the gesture and none of
+    # it predictable. The overshoot disappears at 0.60. Everything else in
+    # here would happily run at 0.50.
+    "spin": Move((0.45, -0.30, 0.00, -0.75, -1.30, 0.28),
                  (1.0, 0.5, 1.0, 0.5, 0.5, 3.0),
-                 0.50, (False, False, False, False, False, True)),
-    # The whole arm, not one joint. Two shoulder swings of 43 degrees, the
-    # elbow and lift lifting into each one, and three 66-degree rolls
-    # across the top of it.
-    "shimmy": Move((0.80, -0.35, -0.45, 0.00, 1.15, 0.00),
-                   (2.0, 2.0, 2.0, 1.0, 1.5, 1.0),
-                   1.25, (False, True, True, False, False, False)),
+                 0.62, (False, False, False, False, False, True)),
+    # Nothing in common with wag, which is what a shimmy needs: no pan at
+    # all. It is the wrist -- 74 degrees of roll, three times -- with the
+    # gripper snapping three times through it and the shoulder lifting
+    # twice underneath. Sharing a joint with another gesture is what made
+    # the last one read as a slower wag.
+    "shimmy": Move((0.00, -0.30, 0.00, 0.00, 1.30, 0.90),
+                   (1.0, 2.0, 1.0, 1.0, 1.5, 3.0),
+                   1.40, (False, True, False, False, False, True)),
     # 49 degrees of pan with the elbow rising on each end of the swing --
     # one-way, so the elbow lifts twice rather than dipping at the table
     # in between.
     "wag": Move((1.12, 0.00, -0.35, 0.00, 0.00, 0.00),
                 (1.0, 1.0, 2.0, 1.0, 1.0, 1.0),
                 0.82, (False, False, True, False, False, False)),
-    # Rise 38 degrees and dip twice through 35. The dips are one-way: a
-    # plain two-cycle wrist goes down, *up past where it started*, and
-    # down again, which reads as a shake rather than a nod.
-    "nod": Move((0.00, -0.66, 0.00, 0.82, 0.00, 0.00),
+    # Rise 32 degrees, then dip twice through 34. Both dips were always
+    # there -- `sin^2(2 pi s)` has exactly two humps -- but at 1.20 s
+    # against a 38-degree rise they arrived as one slow sag. Quicker, and
+    # with less rise competing, they read as two nods. The wrist cannot go
+    # much further than this in any case: HOME sits 0.5 rad up a joint
+    # that stops at 1.8, so 0.80 is most of what is left once overswing is
+    # allowed for.
+    "nod": Move((0.00, -0.55, 0.00, 0.80, 0.00, 0.00),
                 (1.0, 0.5, 1.0, 2.0, 1.0, 1.0),
-                1.20, (False, False, False, True, False, False)),
+                0.90, (False, False, False, True, False, False)),
     # Reaching much further up: 73 degrees of elbow against the 52 it had.
     "bob": Move((0.00, 0.70, -1.28, 0.00, 0.00, 0.00),
                 (1.0, 0.5, 0.5, 1.0, 1.0, 1.0), 0.47),
