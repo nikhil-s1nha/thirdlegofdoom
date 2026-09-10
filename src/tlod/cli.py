@@ -492,9 +492,13 @@ def cmd_play(args) -> int:
         contact = CollisionPlaneContactSensor(
             _floor,
             **({} if args.contact_threshold is None
-               else {"margin": args.contact_threshold}))
-        source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
-                  f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
+               else {"margin": args.contact_threshold}),
+            **({} if args.contact_band is None
+               else {"band_fraction": args.contact_band}))
+        source = (f"collision plane, {contact.band_fraction:.0%} of the way from the "
+                  f"commanded floor up to the hand (at least "
+                  f"{contact.margin * 1e3:.0f} mm), after "
+                  f"{contact.settle * 1000:.0f} ms pressing")
         _size_hold_to(limits, contact)
         game = HandSlapGame(args.difficulty, limits=limits,
                             personality=Personality(enabled=not args.deadpan),
@@ -1887,11 +1891,19 @@ def main(argv: list[str] | None = None) -> int:
     # landed. The encoders answer it directly, so they answer it.
     s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
-                   help="--real only: how far above the commanded floor the paddle "
-                        "must have stopped, in metres, to count as blocked by a "
-                        "hand. Left unset it uses the measured default of 0.004, "
-                        "which is the arm's own tracking error rather than a tuning "
-                        "knob. The run prints the peak shortfall it saw")
+                   help="--real only: the absolute floor, in metres, under "
+                        "--contact-band. Rarely the one to reach for; the band "
+                        "fraction is what decides unless the band is very thin")
+    s.add_argument("--contact-band", type=float, default=None,
+                   dest="contact_band", metavar="FRACTION",
+                   help="--real only: how far up from the commanded floor toward "
+                        "the hand a paddle must have stopped to count as blocked, "
+                        "as a fraction (default 0.5). Measured on this rig: an "
+                        "empty table stalls the paddle 24%% of the way up, a hand "
+                        "stops it at 85%%, so half-way separates them. Lower it if "
+                        "real hits are scoring as dodges, raise it if the empty "
+                        "table scores as hits. The end-of-run line prints the peak "
+                        "it saw")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--camera", type=int, default=None,
                    help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")

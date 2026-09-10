@@ -376,6 +376,7 @@ class CollisionPlaneContactSensor(ContactSensor):
         floor_source,
         margin: float = 0.004,
         settle: float = 0.12,
+        band_fraction: float = 0.5,
     ) -> None:
         # () -> commanded floor height, metres. Where the paddle actually
         # reached comes in on `tool_xyz`, which the caller has already read
@@ -387,11 +388,34 @@ class CollisionPlaneContactSensor(ContactSensor):
         # loop e-stopped, and the arm froze above the hand. The commanded
         # position is cached in the controller and costs nothing.
         self.floor_source = floor_source
-        # How far above the floor counts as "stopped short". An
-        # unobstructed press converges to within about 3 mm and can sit
-        # slightly under, so this is that plus a little -- not a tuning
-        # knob so much as the width of the arm's own tracking error.
+        # How far above the floor counts as "stopped short", as an
+        # absolute floor under `band_fraction`. On its own this was the
+        # bug: it assumed an unobstructed press converges to within about
+        # 3 mm of its floor, and on this arm it does not. Measured, with
+        # the floor at 11 mm and nothing on the table, the paddle stalls
+        # at 14-16 mm -- 3-5 mm short, because at Torque_Limit 350 it
+        # cannot close the last few millimetres against its own friction.
+        # A 4 mm margin therefore sat exactly on the empty-table stall
+        # point and every round was a coin flip.
         self.margin = margin
+        # The threshold that actually decides, as a fraction of the band
+        # between the floor and the hand.
+        #
+        # Scale-free, which is the point. Absolute millimetres have to be
+        # re-tuned whenever press_depth, the torque limit or the arm's
+        # load changes, and each of those moves the stall point. "Did the
+        # paddle end up nearer the hand or nearer the floor" does not
+        # move: measured on this rig the empty table stalls at 24% of the
+        # band and a hand stops it at 85%, so half-way separates them with
+        # room on both sides and would still do so if the band changed
+        # size.
+        #
+        # `hand_xyz` is a fixed plane from `vision.hand_height`, not a
+        # depth measurement -- one camera cannot get depth, so the pixel
+        # ray is intersected against an assumed palm height. That makes it
+        # a stable reference rather than a noisy one. Without it this
+        # falls back to `margin` alone.
+        self.band_fraction = band_fraction
         # Long enough for an unobstructed press to have arrived.
         self.settle = settle
         self._pressing_since: float | None = None
@@ -406,6 +430,16 @@ class CollisionPlaneContactSensor(ContactSensor):
         """Alias, so callers that tune a threshold reach the right knob."""
         return self.margin
 
+    def _threshold(self, floor: float, hand: float) -> float:
+        """How far above the floor counts as blocked, for this round.
+
+        A fraction of the floor-to-hand band where there is a hand plane
+        to measure against, and the bare margin where there is not.
+        """
+        if not np.isfinite(hand) or hand <= floor:
+            return self.margin
+        return max(self.margin, self.band_fraction * (hand - floor))
+
     def arm(self, blank_for: float | None = None) -> None:
         # `blank_for` is accepted and ignored -- `pressing` replaces it.
         self._fired = False
@@ -414,8 +448,9 @@ class CollisionPlaneContactSensor(ContactSensor):
 
     def peak_summary(self) -> str:
         """End-of-run line. In millimetres, because this is not a torque."""
+        need = self.margin if self.last is None else self._threshold(self.last[1], self.last[2])
         return (f"peak shortfall {self.peak_rise * 1e3:.0f} mm "
-                f"(margin {self.margin * 1e3:.0f} mm)")
+                f"(needed {need * 1e3:.0f} mm, {self.band_fraction:.0%} of the band)")
 
     def report(self) -> str:
         """What the last judged round actually looked like, in millimetres."""
@@ -423,9 +458,10 @@ class CollisionPlaneContactSensor(ContactSensor):
             return "no reading (the paddle never settled at the bottom)"
         reached, floor, hand = self.last
         short = reached - floor
+        need = self._threshold(floor, hand)
         return (f"paddle stopped {reached * 1e3:.0f} mm, floor {floor * 1e3:.0f} mm, "
                 f"hand {hand * 1e3:.0f} mm -> {short * 1e3:+.0f} mm short "
-                f"(needs {self.margin * 1e3:.0f})")
+                f"(needs {need * 1e3:.0f})")
 
     def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
              **kwargs) -> ContactEvent | None:
@@ -450,7 +486,7 @@ class CollisionPlaneContactSensor(ContactSensor):
         self.last = (float(reached), float(floor), hand)
         short = float(reached) - float(floor)
         self.peak_rise = max(self.peak_rise, short)
-        if short < self.margin:
+        if short < self._threshold(float(floor), hand):
             return None
         self._fired = True
         log.debug("collision: %s", self.report())
