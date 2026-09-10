@@ -455,7 +455,7 @@ class LegLink:
         """
         return self.close_hand()
 
-    def strike(self, dwell: float = 0.25) -> Ack:
+    def strike(self, dwell: float = 0.8) -> Ack:
         """The whole gesture: come out and hit something, then go back in.
 
         `open` *is* the strike. It swings the door, waits for it, and
@@ -472,9 +472,23 @@ class LegLink:
         note the board answers *after* its own 500 ms door wait, so the
         stamp trails the door starting to move by about that much.
 
-        `dwell` is how long the leg stays out before withdrawing. It is
-        showmanship rather than travel time: `open` has already finished
-        travelling by the time it acks.
+        `dwell` is how long the leg stays out before withdrawing, and it
+        has to cover the leg's **physical travel** -- it is not
+        showmanship, which is what this docstring used to claim.
+
+        The board acks `open` when it has *taken* the command. Underneath,
+        `servo.write()` sets a target and returns; there is no feedback on
+        this board, so neither the sketch nor this file knows when the leg
+        has actually arrived. Measured on the rig, `open` acks at ~720 ms
+        while the leg only starts moving at ~700 -- so at the old default
+        of 0.25 the `close` went out mid-swing and reversed the leg,
+        which from outside looks like the servo doing random things.
+
+        Typing the same two commands into a serial monitor never shows
+        it, because a human takes seconds between them. That is the whole
+        difference, and it is worth remembering the next time this driver
+        and a hand-typed command appear to disagree: the driver is faster
+        than the mechanism, and nothing on the wire says so.
         """
         ack = self.open_hand()
         time.sleep(dwell)
