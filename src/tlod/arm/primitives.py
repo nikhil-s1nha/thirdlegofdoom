@@ -364,6 +364,7 @@ class GoToPose(GoTo):
         super().__init__(np.zeros(5), duration, speed)
         self.pose = pose
         self.ok = False
+        self._reaims = 0
 
     def _on_start(self, controller) -> None:
         result, _, _ = controller.solve(self.pose, position_only=True)
@@ -371,11 +372,44 @@ class GoToPose(GoTo):
         self.q_target = result.q
         super()._on_start(controller)
 
+    # Re-aim once the min-jerk has run out, at what the encoders report
+    # rather than at what was commanded. See
+    # `ArmController.REAIM_PASSES` -- the servos settle low under
+    # gravitational load, by more the further out they reach, and measured
+    # here a commanded 69 mm arrived as 67 / 52 / 43 mm at three points
+    # across the workspace. For a hover that matters twice over: it is the
+    # height the strike drops *from*, so a low hover shortens the drop,
+    # and `Strike` clamps the floor against the travel it has left, so it
+    # also lifts the floor that contact is measured against.
+    #
+    # Solving again is safe here in a way it is not mid-motion: the arm is
+    # at a standstill, so a branch change cannot look like a lurch.
+    REAIM_PASSES: int = 2
+    REAIM_TOLERANCE: float = 0.003
+
     def step(self, controller, dt) -> bool:
         if not self.ok:
             self.finished = True
             return True
-        return super().step(controller, dt)
+        done = super().step(controller, dt)
+        if not done or self._reaims >= self.REAIM_PASSES:
+            return done
+        wanted = self.pose.xyz()
+        error = wanted - controller.pose().xyz()
+        if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
+            return True
+        # Aim past the target by however far it fell short, then let the
+        # base class run another min-jerk to it from here.
+        result, _, _ = controller.solve(Pose(*(wanted + error)), position_only=True)
+        if not result.ok:
+            return True
+        self._reaims += 1
+        self.q_target = result.q
+        self.duration = max(self.duration * 0.35, 0.2)
+        self.finished = False
+        super()._on_start(controller)
+        self.started_at = time.perf_counter()
+        return False
 
 
 class Hover(GoToPose):
