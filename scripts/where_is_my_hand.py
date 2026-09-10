@@ -78,6 +78,9 @@ locator = HandLocator(projector, depth_mode=cfg.vision.depth_mode,
                       hand_height=cfg.vision.hand_height,
                       palm_width_m=cfg.vision.palm_width_m)
 
+_explained: set[str] = set()
+
+
 def diagnose(projector, u, v, seen, truth) -> None:
     """Which of the two errors is this? Solved, not guessed.
 
@@ -100,30 +103,35 @@ def diagnose(projector, u, v, seen, truth) -> None:
     a = origin[:2] - origin[2] * b
 
     off = seen[:2] - truth
-    print(f"    off by {np.linalg.norm(off) * 1e3:5.1f} mm  "
-          f"(x {off[0] * 1e3:+.1f}, y {off[1] * 1e3:+.1f})")
-
     # Height that puts the ray closest to the truth, and what is left.
     z = float(np.dot(b, truth - a) / np.dot(b, b))
     residual = float(np.linalg.norm(a + b * z - truth))
-    slope = float(np.linalg.norm(b))
-    print(f"    this ray moves {slope:.2f} mm sideways per mm of height error")
+    plausible = residual < 0.008 and 0.0 <= z <= 0.06
+    verdict = "height" if plausible else "extrinsics"
 
-    if residual < 0.008:
-        print(f"    -> the ray passes {residual * 1e3:.1f} mm from your palm at "
-              f"z = {z * 1e3:.0f} mm.")
-        print(f"       The ray is right and the height is wrong: set "
-              f"vision.hand_height to {z:.3f}")
-        if not (0.0 <= z <= 0.06):
-            print(f"       -- except {z * 1e3:.0f} mm is not a height a flat hand "
-                  f"sits at, so treat this as extrinsics too.")
+    print(f"    off by {np.linalg.norm(off) * 1e3:5.1f} mm  "
+          f"(x {off[0] * 1e3:+.1f}, y {off[1] * 1e3:+.1f})   "
+          f"best-fit height {z * 1e3:+.0f} mm, residual {residual * 1e3:.0f} mm"
+          f"  -> {verdict}")
+
+    # The explanation once per verdict, not once per frame. Sixty identical
+    # paragraphs is how a clear answer gets lost in its own output.
+    if verdict in _explained:
+        return
+    _explained.add(verdict)
+    slope = float(np.linalg.norm(b))
+    print(f"\n    this ray moves {slope:.2f} mm sideways per mm of height error")
+    if plausible:
+        print(f"    the ray passes {residual * 1e3:.1f} mm from your palm at "
+              f"z = {z * 1e3:.0f} mm, so the ray is right and only the height")
+        print(f"    was wrong: set vision.hand_height to {z:.3f}\n")
     else:
-        print(f"    -> no height on this ray gets closer than "
-              f"{residual * 1e3:.0f} mm (best is z = {z * 1e3:.0f} mm).")
-        print("       The ray itself is wrong, so this is the extrinsics, and no")
-        print("       value of vision.hand_height fixes it. Re-run the extrinsics")
-        print("       calibration, or measure the current one with")
-        print("       scripts/check_extrinsics.py")
+        print(f"    no height on this ray gets closer than {residual * 1e3:.0f} mm "
+              f"(best would be z = {z * 1e3:.0f} mm, which is")
+        print("    not where a flat hand sits). The ray itself is wrong, so this is")
+        print("    the extrinsics and no value of vision.hand_height touches it:")
+        print("\n        tlod -c configs/opi.yaml calibrate extrinsics \\")
+        print("            --marker red --gripper 0 --preview 8080\n")
 
 
 print(f"\n  assuming hands sit at {cfg.vision.hand_height * 1e3:.0f} mm "
