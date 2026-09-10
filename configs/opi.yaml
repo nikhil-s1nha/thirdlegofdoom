@@ -72,12 +72,16 @@ arm:
   # harder through it -- and reaching the floor is what the sensor calls
   # a dodge, so pressing harder is how a real hit gets scored as a miss.
   #
-  # 8 mm keeps the lean under that yield. The paddle comes to rest on the
-  # palm at 24-26 mm against a 22 mm floor: +2 to +4 mm short, against
-  # empty-table strikes reaching -0 to -15. That is a 2 mm gap between
-  # the clusters, which is thin -- `strike_torque` above is the knob that
-  # widens it rather than sliding it around.
-  press_depth: 0.008
+  # 10 mm, so the floor lands on a round 20 mm. 8 mm kept the lean under
+  # the yield and produced hits at +2..+4 short; this leans 2 mm harder,
+  # which is a small step *towards* the cliff and wants watching. If hits
+  # start reading as dodges again, 8 is the known-good value to go back
+  # to -- and the sweep above says do not go past about 12.
+  #
+  # Either way the gap between the clusters is only 2 mm, which is the
+  # real problem and not one press_depth can fix: it slides both clusters
+  # together. `strike_torque` above is the knob that pulls them apart.
+  press_depth: 0.010
   # The droop no sensor here can see, fitted to ruler readings. With the
   # encoder-side sag already corrected -- forward kinematics reporting
   # 67-69 mm against a commanded 69 -- a ruler on the paddle read:

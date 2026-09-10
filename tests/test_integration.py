@@ -1046,12 +1046,14 @@ class TestCollisionPlaneContact:
         assert "MISSED" not in dodge
         assert sensor.misses == 0
 
-        # A miss: same heights, but the hand was 80 mm away.
+        # A miss: same heights, but the strike was aimed 80 mm from where
+        # the paddle came down, so it was never over the hand at all.
         sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0)
         sensor.arm()
         for _ in range(3):
             sensor.poll(pressing=True, tool_xyz=landed,
-                        hand_xyz=np.array([0.30, 0.0, 0.030]))
+                        hand_xyz=np.array([0.30, 0.0, 0.030]),
+                        aimed_at=np.array([0.30, 0.0, 0.030]))
         miss = sensor.report()
         assert "MISSED" in miss, miss
         assert "80 mm" in miss, miss
@@ -1059,6 +1061,31 @@ class TestCollisionPlaneContact:
 
         # The heights alone cannot tell them apart -- which is the point.
         assert dodge.split("[")[0] == miss.split("[")[0]
+
+    def test_a_hand_that_left_is_a_dodge_not_a_miss(self):
+        """Aimed correctly and the hand moved: the game working, not failing.
+
+        Both show up as a large paddle-to-hand distance at the moment of
+        judging, and charging them the same way would report every
+        successful dodge as an aiming fault -- which is the opposite of
+        the truth, since a hand that leaves is far away *by definition*.
+        `aimed_at` is what separates them: the paddle against where the
+        round was committed is the aim, the hand against it is the dodge.
+        """
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        aimed = np.array([0.22, 0.0, 0.030])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
+        sensor.arm()
+        for _ in range(3):
+            # Paddle landed on target; the hand is now 90 mm away.
+            sensor.poll(pressing=True, tool_xyz=np.array([0.22, 0.0, 0.004]),
+                        hand_xyz=np.array([0.31, 0.0, 0.030]), aimed_at=aimed)
+
+        line = sensor.report()
+        assert "real dodge" in line, line
+        assert "MISSED" not in line, line
+        assert sensor.misses == 0, "a dodge must not be charged as an aiming miss"
 
     def test_it_reports_its_numbers_whichever_way_the_round_went(self):
         """A verdict alone is unfalsifiable from outside the arm.
