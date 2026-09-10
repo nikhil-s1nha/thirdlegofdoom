@@ -2233,7 +2233,17 @@ def cmd_leg(args) -> int:
                 time.sleep(args.interval)
             if args.action == "strike":
                 ack = link.strike(args.dwell if args.dwell is not None else cfg.leg.strike_dwell)
+            elif args.action == "deploy":
+                ack = link.deploy()
+            elif args.action == "retract":
+                ack = link.retract()
             else:
+                # Raw sketch commands, including `close`, which does not
+                # retract the leg. `retract` is the one to reach for.
+                if args.action == "close":
+                    print("  note: `close` shuts the door and leaves the leg "
+                          "where it is. If it is down, that is the door being "
+                          "held against it -- `retract` homes first.")
                 ack = link.send(args.action)
             flag = "" if ack.expected else "   <-- not what the sketch should say"
             print(f"  {ack.command:6s} -> {ack.line!r:8s} {ack.latency * 1000:6.0f} ms{flag}")
@@ -2760,9 +2770,16 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_power)
 
     s = sub.add_parser("leg", help="drive the Arduino paddle, or watch its heartbeat")
-    s.add_argument("action", choices=[*LEG_COMMANDS, "strike", "monitor"],
-                   help="one of the sketch's four commands; `strike` is slap "
-                        "then home, `monitor` only listens")
+    s.add_argument("action",
+                   choices=[*LEG_COMMANDS, "strike", "deploy", "retract", "monitor"],
+                   help="the sketch's four raw commands, or one of the three "
+                        "safe sequences: `deploy` is open then home (open "
+                        "alone leaves the leg down, where slap also writes, so "
+                        "a slap after an open moves nothing), `strike` is slap "
+                        "then home, `retract` is home then close -- always in "
+                        "that order, because close shuts the door without "
+                        "retracting the leg and will hold it against one that "
+                        "is still down. `monitor` only listens")
     s.add_argument("--port", default=None,
                    help="serial port; overrides leg.port. Empty probes for the heartbeat")
     s.add_argument("--repeat", type=int, default=1, help="send it this many times")
