@@ -684,73 +684,71 @@ class Move:
     duration: float | None = None      # seconds; None = the caller's
 
 
-# Sized against both limits, which is what the earlier tables were not.
-# Amplitude at fixed acceleration is bought with time: a swing of
-# amplitude A at f Hz needs A(2*pi*f)^2, against 35 rad/s^2 here, and the
-# servo's Goal_Acceleration register is one byte, so ~39 rad/s^2 is the
-# ceiling no config can raise. The limit the old table missed is speed:
-# `_write(max_speed=...)` is obeyed verbatim, and at the 2.5 rad/s it used
-# to pass, eight of eleven moves were clipped -- a spin asked 2.20 rad and
-# delivered 1.29, so the "126 degree" entry arrived as 74. Every move here
-# is checked against 3.5 rad/s, which the rig already sustains through a
-# strike, and against the acceleration ceiling.
+# Measured on this rig, joint by joint, torque off. These are the real
+# limits and they are nothing like the URDF's: `model.JOINT_LIMITS` gives
+# wrist_roll +-2.7 rad where the motor has 0.513 rad in total, so a
+# command far outside its travel is clamped by nothing and simply does not
+# arrive. That is what a spin of 1.90 rad was -- commanded in full,
+# reported by the encoder as 4 degrees, at every amplitude and every speed.
 #
-# Direction matters more than it looks. HOME puts the tool 71 mm above the
-# table and positive shoulder_lift, elbow_flex and wrist_flex all drive it
-# *down*, so the old bow and droop -- lift +0.55 -- were aiming at the
-# table and hitting it. Gestures that want to be big go up: negative.
+# Two of the six barely straddle HOME, and that is the fact that shapes
+# this table. wrist_roll sits 0.054 rad off its lower stop, and the gripper
+# 0.179 off its closed one, so on those joints a whole-cycle swing spends
+# half its time driving into a hard stop. They get half cycles, which are
+# `sin^2` and travel one way only.
+MEASURED_TRAVEL: dict[str, tuple[float, float]] = {
+    "shoulder_pan":  (-2.051, 1.450),
+    "shoulder_lift": (-1.775, 1.827),
+    "elbow_flex":    (-1.793, 1.584),
+    "wrist_flex":    (-1.733, 1.800),
+    "wrist_roll":    (-0.054, 0.459),   # 0.513 rad, all of it
+    "gripper":       (-0.179, 2.100),   # opens wide, shuts at once
+}
+
+# Sized to use that travel rather than a fraction of it, and checked at
+# 1.5x amplitude, which is what loop jitter can add at 400 rad/s^2. The
+# gestures are 31-74 degrees where the last table managed 8-22.
 #
-# The roll and the gripper still carry what they can, because they are
-# where theatre is cheapest -- a radian of wrist roll moves the gripper
-# nowhere, where a radian of shoulder pan sweeps it across the table.
+# Bigger costs time and there is no way around it. Peak joint speed for a
+# swing of amplitude A at f Hz is proportional to A*f, so at the ~9 rad/s
+# the servos were measured tracking, doubling a gesture doubles its
+# duration. shimmy and jig are slower than they were for exactly that
+# reason; bob and spin are quicker because they got shorter, not smaller.
+#
+# Direction is not symmetric and matters more than size. HOME leaves the
+# tool 71 mm above the table, and positive shoulder_lift, elbow_flex and
+# wrist_flex all drive it down, which is how the old bow and droop came to
+# hit it. Anything large goes up: negative.
 FLOURISHES: dict[str, Move] = {
     #                pan    lift  elbow  wrist   roll   grip
-    # One big one-way roll, slow because that is what buys the size: 109
-    # degrees, against the 74 the old 2.20-rad entry actually delivered.
-    "spin": Move((0.00, 0.00, 0.00, 0.00, 1.90, 0.00), 0.5, 0.60),
-    # Three roll swings of 36 degrees rather than one of 27, which is the
-    # difference between a shimmy and a wobble.
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.62, 0.00), 1.5, 0.55),
-    # Further and faster: 31 degrees of pan in a second, from 18 in 1.2 s.
-    "wag": Move((0.58, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 0.38),
-    # Rise once, dip twice while up -- a nod from a standing start rather
-    # than a wrist twitch. Needs the per-joint cycle counts.
-    "nod": Move((0.00, -0.40, 0.00, 0.35, 0.00, 0.00),
-                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 0.46),
-    # Out further and back, but only so far: this is the one gesture that
-    # travels *toward* the table, and `safety.min_height` does not protect
-    # it -- `clamp_pose` guards Cartesian commands and a flourish writes
-    # joint space directly. Clearance here is this table's job and nothing
-    # else's. These amplitudes bottom out 29 mm up; 0.50/-0.66 reached
-    # 20 mm, which is not enough air for a gesture nobody is watching the
-    # height of.
-    # Smaller than the rest of this table wants to be, and deliberately.
-    # At 400 rad/s^2 the arm can chase a target that jumped because the
-    # loop missed a tick, so a gesture can overswing its amplitude by a
-    # third -- measured at 1.35x on nod. Every other move here rotates or
-    # goes up, where overswinging is ugly. This one travels at the table.
-    # At 0.42/-0.55 it bottomed out 29 mm up, which a 1.4x overswing turns
-    # into 11 mm. These amplitudes sit 42 mm up, and 29 mm even overswung.
-    "bob": Move((0.00, 0.28, -0.38, 0.00, 0.00, 0.00), 1.0, 0.36),
-    # Point up, then snap twice. The snap is acceleration-limited, not
-    # speed-limited: at 35 rad/s^2 a 20-degree bite cannot come round
-    # faster than about 0.75 s, and 39 is all the servo has.
-    "chomp": Move((0.00, 0.00, 0.00, -0.30, 0.00, 0.38),
-                  (1.0, 1.0, 1.0, 0.5, 1.0, 2.0), 0.50),
-    # Two hops side to side while it rises once. The lift is a half cycle
-    # on purpose: a whole one is a sine, which spends half its time going
-    # *down*, and down from HOME is 71 mm of air and then the table -- at
-    # a whole cycle this move passed 12 mm off it.
-    "jig": Move((0.42, -0.34, 0.00, 0.00, 0.00, 0.00),
-                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 0.54),
+    # The wrist rotator has 26 degrees of usable travel, so there is no
+    # such thing as a spin here. What sells it is the sweep underneath --
+    # 53 degrees of wrist_flex rising -- with the roll adding what it can.
+    "spin": Move((0.00, 0.00, 0.00, -0.92, 0.26, 0.00),
+                 (1.0, 1.0, 1.0, 0.5, 0.5, 1.0), 0.34),
+    # Moved off the roll entirely and onto the shoulder, which has 3.5 rad
+    # to give: three swings of 63 degrees, against 12 measured on the roll.
+    "shimmy": Move((1.10, 0.00, 0.00, 0.00, 0.00, 0.00), 1.5, 1.10),
+    "wag": Move((1.12, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 0.82),
+    # Rise 38 degrees, then dip twice through 44.
+    "nod": Move((0.00, -0.66, 0.00, 0.82, 0.00, 0.00),
+                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 1.20),
+    # Both joints on half cycles: this is the one gesture that travels
+    # toward the table, and a whole cycle would take it there twice.
+    "bob": Move((0.00, 0.55, -0.90, 0.00, 0.00, 0.00),
+                (1.0, 0.5, 0.5, 1.0, 1.0, 1.0), 0.33),
+    # One 74-degree bite with the jaw pointed up. A half cycle, not two
+    # snaps: the gripper has 0.179 rad below HOME, so the second half of
+    # any whole cycle is spent shut against the stop.
+    "chomp": Move((0.00, 0.00, 0.00, -0.54, 0.00, 1.29),
+                  (1.0, 1.0, 1.0, 0.5, 1.0, 0.5), 0.47),
+    # Two hops of 45 degrees while rising 39.
+    "jig": Move((0.84, -0.67, 0.00, 0.00, 0.00, 0.00),
+                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 1.23),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
 # result so the game reads as a performer rather than a scoreboard.
-#
-# bow, droop, strut and flail are gone. The first two aimed at the table;
-# the last two were smaller, muddier versions of spin and jig, spending
-# shoulder travel -- the expensive kind -- to look like less.
 MOODS: dict[str, tuple[str, ...]] = {
     "gloat": ("spin", "shimmy", "chomp"),   # it landed one
     "sulk": ("nod", "bob"),                 # it missed
