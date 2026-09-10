@@ -2191,6 +2191,12 @@ def cmd_config(args) -> int:
     return 0
 
 
+def _leg_say(ack) -> None:
+    """One line per command actually sent, not per gesture."""
+    flag = "" if ack.expected else "   <-- not what the sketch should say"
+    print(f"  {ack.command:6s} -> {ack.line!r:8s} {ack.latency * 1000:6.0f} ms{flag}")
+
+
 def cmd_leg(args) -> int:
     """Drive the Arduino paddle, or just watch it beat.
 
@@ -2222,15 +2228,14 @@ def cmd_leg(args) -> int:
 
     print(f"  leg on {link.port} at {link.baudrate} baud")
     if link.reset_on_connect:
-        print(f"  THE BOARD RESET when the port opened (first beat after "
+        print(f"  the board reset when the port opened (first beat after "
               f"{link.first_beat:.1f}s).")
-        print( "  setup() ran, so both servos went to 90 -- and 90 is the")
-        print( "  door's OPEN position. Opening the port swung the hatch.")
-        print( "  Stow the arm before connecting, not just before gesturing:")
-        print( "    tlod move --real --stow")
-        print( "  To stop it: 10 uF between RESET and GND on the Arduino, or")
-        print( "  cut the reset-enable trace. Holding DTR low did not take on")
-        print( "  this adapter.")
+        print( "  setup() attaches nothing, so the servos went limp rather than")
+        print( "  moving -- but a limp servo has no holding torque, so anything")
+        print( "  deployed sags until the next command attaches it again.")
+        print( "  To stop the reset: 10 uF between RESET and GND, or cut the")
+        print( "  reset-enable trace. Holding DTR low did not take on this")
+        print( "  adapter.")
     elif link.first_beat == link.first_beat:      # not NaN
         print(f"  board kept running (first beat after {link.first_beat:.2f}s, "
               f"no reset)")
@@ -2253,8 +2258,15 @@ def cmd_leg(args) -> int:
                 time.sleep(args.interval)
             for action in args.action:
                 if action == "strike":
-                    ack = link.strike(
-                        args.dwell if args.dwell is not None else cfg.leg.strike_dwell)
+                    # `strike` is open then close, and printing only the
+                    # Ack it returns hid the close entirely -- so a
+                    # gesture that never put itself away looked identical
+                    # to one that did.
+                    dwell = args.dwell if args.dwell is not None else cfg.leg.strike_dwell
+                    _leg_say(link.open_hand())
+                    print(f"  ...out for {dwell * 1000:.0f} ms")
+                    time.sleep(dwell)
+                    ack = link.close_hand()
                 elif action == "deploy":
                     ack = link.deploy(settle=args.settle)
                 elif action == "retract":
@@ -2267,9 +2279,7 @@ def cmd_leg(args) -> int:
                               f"door wherever it already was. It is a bench "
                               f"check on servo 1 -- `strike` is the gesture.")
                     ack = link.send(action)
-                flag = "" if ack.expected else "   <-- not what the sketch should say"
-                print(f"  {ack.command:6s} -> {ack.line!r:8s} "
-                      f"{ack.latency * 1000:6.0f} ms{flag}")
+                _leg_say(ack)
     except LegError as e:
         print(f"  {e}")
         return 1
