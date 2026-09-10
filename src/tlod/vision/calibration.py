@@ -35,6 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+
 import cv2
 import numpy as np
 
@@ -149,6 +151,8 @@ class Extrinsics:
         return cls(d["R"], d["t"], float(d["rms"]))
 
 
+log = logging.getLogger(__name__)
+
 CHESSBOARD_FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
 
 
@@ -240,15 +244,52 @@ def calibrate_intrinsics(
     # cv2.fisheye wants (1, N, C), not the (N, 1, C) its pinhole
     # counterpart takes, and rejects the latter with a size mismatch from
     # inside the arithmetic rather than anything nameable.
-    K = Intrinsics.approximate(shape, hfov_deg).K
-    D = np.zeros((4, 1))
-    rms, K, D, _, _ = cv2.fisheye.calibrate(
-        [np.ascontiguousarray(p.reshape(1, -1, 3), np.float64) for p in obj_points],
-        [np.ascontiguousarray(p.reshape(1, -1, 2), np.float64) for p in img_points],
-        shape, K, D,
-        flags=FISHEYE_CALIB_FLAGS,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-9),
-    )
+    views = [
+        (np.ascontiguousarray(o.reshape(1, -1, 3), np.float64),
+         np.ascontiguousarray(i.reshape(1, -1, 2), np.float64))
+        for o, i in zip(obj_points, img_points, strict=True)
+    ]
+
+    # cv2.fisheye initialises each view's pose from a plane-to-image
+    # homography and *asserts* when one is near-degenerate, rather than
+    # naming the view or dropping it. A board that is small or nearly
+    # edge-on in frame produces exactly that, and one such view among
+    # fifteen good ones fails the whole calibration -- after the person
+    # has spent three minutes holding a board up.
+    #
+    # So drop the least informative view and try again. Image area is the
+    # right thing to rank by: it is small precisely when the board is far
+    # away or steeply foreshortened, which are the two ways a homography
+    # goes bad here.
+    dropped = 0
+    while True:
+        try:
+            K = Intrinsics.approximate(shape, hfov_deg).K
+            D = np.zeros((4, 1))
+            rms, K, D, _, _ = cv2.fisheye.calibrate(
+                [o for o, _ in views], [i for _, i in views], shape, K, D,
+                flags=FISHEYE_CALIB_FLAGS,
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-9),
+            )
+            break
+        except cv2.error as exc:
+            if len(views) <= 5:
+                raise RuntimeError(
+                    f"fisheye calibration failed with {len(views)} views "
+                    f"({dropped} already dropped as degenerate): {exc}. "
+                    "The board is probably too small in frame -- hold it "
+                    "closer so it fills a third of the view, and get it "
+                    "into the frame corners."
+                ) from exc
+            areas = [
+                cv2.contourArea(cv2.convexHull(i.reshape(-1, 2).astype(np.float32)))
+                for _, i in views
+            ]
+            views.pop(int(np.argmin(areas)))
+            dropped += 1
+
+    if dropped:
+        log.warning("dropped %d degenerate view(s); calibrated on %d", dropped, len(views))
     return Intrinsics(K, D.ravel(), shape, float(rms), model="fisheye")
 
 
