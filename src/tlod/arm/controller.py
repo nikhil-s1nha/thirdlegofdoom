@@ -279,7 +279,8 @@ class ArmController:
             return self._command.copy()
 
     # -- low level ---------------------------------------------------------
-    def _write(self, q: np.ndarray, max_speed: float | None = None, dt: float | None = None) -> None:
+    def _write(self, q: np.ndarray, max_speed: float | None = None, dt: float | None = None,
+               limits: ProfileLimits | None = None) -> None:
         """Shape and dispatch a joint command.
 
         The requested configuration is a *target*, not the value written to
@@ -292,7 +293,14 @@ class ArmController:
         """
         dt = (1.0 / self.control_hz) if dt is None else dt
         dt = min(dt, self.limits.max_tick_dt)
-        requested = self.profile_limits(max_speed)
+        # `limits` is the escape hatch for a motion that is provably not
+        # approaching anything -- a flourish is joint space, has no target,
+        # and its envelope is zero at both ends, so it cannot walk toward a
+        # hand however it is interrupted. Everything else goes through
+        # `profile_limits`, which bounds by safety rather than substituting
+        # for it. The joint clamp, the e-stop check and the governor below
+        # still apply either way; this widens the rate limits only.
+        requested = self.profile_limits(max_speed) if limits is None else limits
         if self.governor is not None:
             self._derate = self.governor.update(self.profile.q, requested, dt)
         limits = requested.scaled(self._derate)

@@ -115,12 +115,23 @@ class Personality:
     sway_radius: float = 0.022        # metres, horizontal only
     sway_period: float = 1.8          # seconds per lap
     flourish_duration: float = 1.2    # fallback; every move carries its own
-    # 2.5 was not a limit, it was a guess, and it cost most of the gesture:
-    # `_write` obeys this verbatim rather than clamping it to
-    # `safety.max_speed`, and at 2.5 a spin asking 2.20 rad delivered 1.29.
-    # 3.5 is what the rig already sustains through a strike, and it is
-    # where the shipped moves were measured.
-    flourish_speed: float = 3.5       # rad/s; jaunty, not violent
+    # Raising this past 3.5 used to do nothing, and the reason is worth
+    # keeping: `profile_limits` bounds a caller's speed by
+    # `safety.max_speed` rather than substituting for it, so on a rig
+    # configured at 3.5 a flourish asking 4.5 got 3.5. Measured -- a spin
+    # swept at 2.5/3.0/3.5/4.0/4.5 delivered 1.78/1.87/1.90/1.90/1.90 and
+    # never commanded above 2.82 rad/s. The flourish now passes its own
+    # ProfileLimits instead, which is why these numbers bite at all.
+    flourish_speed: float = 12.0      # rad/s
+    flourish_accel: float = 400.0     # rad/s^2
+    flourish_jerk: float = 8000.0     # rad/s^3
+    # These sit far above safety.max_accel and are meant to. A flourish is
+    # the one motion that provably cannot approach anything -- joint space,
+    # no target, an envelope that is zero at both ends, and never during a
+    # commit -- so it does not have to be judged under limits that exist to
+    # bound a swing aimed at a hand. Keeping it there was costing the whole
+    # performance: measured on the rig, the profile rather than the servo
+    # was holding a spin to a third of the speed it was allowed.
 
 
 @dataclass(slots=True)
@@ -356,7 +367,9 @@ class HandSlapGame(StateMachine):
         self.run_motion(
             flourish(mood, rng=self.rng,
                      duration=self.personality.flourish_duration,
-                     speed=self.personality.flourish_speed),
+                     speed=self.personality.flourish_speed,
+                     accel=self.personality.flourish_accel,
+                     jerk=self.personality.flourish_jerk),
             controller,
         )
 

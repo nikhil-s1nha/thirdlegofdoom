@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+from dataclasses import replace
 import logging
 import sys
 import time
@@ -1011,16 +1012,16 @@ def cmd_flourish(args) -> int:
     cfg = Config.load(args.config)
     if args.real:
         cfg = cfg.with_overrides(arm={"backend": "feetech"})
-    limits = build_limits(cfg)
-    if args.accel:
-        limits.max_accel = args.accel
-        limits.max_jerk = max(limits.max_jerk, args.accel * 12.0)
-    controller = ArmController(build_arm(cfg), limits, cfg.runtime.control_hz,
+    if args.servo_accel is not None:
+        cfg = cfg.with_overrides(arm={"servo_accel": args.servo_accel})
+    controller = ArmController(build_arm(cfg), build_limits(cfg),
+                               cfg.runtime.control_hz,
                                governor=build_governor(cfg))
     controller.start()
     speeds = ([float(s) for s in args.sweep.split(",")] if args.sweep
               else [args.speed])
-    print(f"  backend {cfg.arm.backend}   accel {limits.max_accel:.1f} rad/s^2   "
+    print(f"  backend {cfg.arm.backend}   accel {args.accel:.0f} rad/s^2   "
+          f"jerk {args.jerk:.0f}   servo ramp {cfg.arm.servo_accel:.0f} rad/s^2   "
           f"speed {', '.join(f'{s:.2f}' for s in speeds)} rad/s")
     print("  THE ARM WILL MOVE. Every flourish is joint space with no target and")
     print("  an envelope that is zero at both ends, so each returns to the pose")
@@ -1049,6 +1050,9 @@ def cmd_flourish(args) -> int:
     try:
         for name in names:
             move = FLOURISHES[name]
+            if args.scale != 1.0:
+                move = replace(move, amplitudes=tuple(
+                    a * args.scale for a in move.amplitudes))
             amps = np.asarray(move.amplitudes, float)
             moved = [i for i, a in enumerate(amps) if a]
             rows = []
@@ -1057,7 +1061,8 @@ def cmd_flourish(args) -> int:
                 for take in range(1, args.repeat + 1):
                     controller.goto_joints(HOME, duration=args.settle)
                     start_q = controller.commanded.copy()
-                    motion = Flourish(move, duration=args.duration, speed=speed)
+                    motion = Flourish(move, duration=args.duration, speed=speed,
+                                      accel=args.accel, jerk=args.jerk)
                     print(f"\n  {name}  {describe(move)}  "
                           f"{motion.duration:.2f}s @ {speed:.2f} rad/s"
                           + (f"  take {take}" if args.repeat > 1 else ""))
@@ -2117,10 +2122,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the table -- joints, sizes, which mood fires each -- and exit")
     s.add_argument("--duration", type=float, default=1.2,
                    help="seconds, for moves that do not carry their own")
-    s.add_argument("--speed", type=float, default=3.5,
+    s.add_argument("--speed", type=float, default=12.0,
                    help="rad/s ceiling (Personality.flourish_speed)")
-    s.add_argument("--accel", type=float, default=None,
-                   help="rad/s^2 ceiling; the servo register caps near 39")
+    s.add_argument("--accel", type=float, default=400.0,
+                   help="rad/s^2 ceiling for the flourish itself")
+    s.add_argument("--jerk", type=float, default=8000.0, help="rad/s^3 ceiling")
+    s.add_argument("--scale", type=float, default=1.0,
+                   help="multiply every amplitude, to find where a joint stops "
+                        "following the command")
+    s.add_argument("--servo-accel", type=float, default=None, dest="servo_accel",
+                   help="the servo's own Goal_Acceleration ramp, rad/s^2. One "
+                        "byte, so ~39 is its maximum; 0 disables the ramp for "
+                        "whatever the motor will give. SHARED WITH THE STRIKE "
+                        "-- recheck hit/dodge after changing it")
     s.add_argument("--sweep", default=None, metavar="A,B,C",
                    help="run each move at these speed ceilings and show where "
                         "more speed stops buying more gesture")
