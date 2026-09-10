@@ -383,11 +383,24 @@ def list_cameras(max_index: int = 24) -> list[int]:
     nodes = capture_nodes()
     candidates = sorted(nodes) if nodes else list(range(max_index))
     found = []
-    for i in candidates:
-        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-        try:
+    caps = []
+    try:
+        for i in candidates:
+            cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+            caps.append(cap)
             if cap.isOpened():
                 found.append(i)
-        finally:
-            cap.release()
-    return found
+        return found
+    finally:
+        # Released even when the caller is interrupted, which is the case
+        # that cost an evening. A V4L2 device allows several opens but only
+        # one set of buffers, so a process *stopped* mid-probe -- Ctrl-Z,
+        # or Ctrl-C caught somewhere unhelpful -- keeps its descriptor and
+        # every later open fails at VIDIOC_REQBUFS with EBUSY. From the
+        # outside that is indistinguishable from a broken camera, and the
+        # process holding it does not look like it is doing anything.
+        for cap in caps:
+            try:
+                cap.release()
+            except Exception:
+                pass

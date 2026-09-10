@@ -1,6 +1,14 @@
 camera:
   source: opencv
-  index: 0
+  # By id, not by number. The index is the order the kernel enumerated
+  # things in, and this board shares that numbering with its Rockchip
+  # codec nodes -- so remounting the camera, which means unplugging it,
+  # renumbers it and every command naming an index is suddenly pointing at
+  # a video decoder. Measured here across one remount: 1, then 0. The
+  # by-id link comes from the device's own USB descriptor and does not
+  # move. `-video-index0` is the capture node; index1 is metadata and
+  # opens but never streams.
+  index: /dev/v4l/by-id/usb-Arducam_Arducam_B0589_4K_HDR-video-index0
   width: 640
   height: 480
   fps: 60

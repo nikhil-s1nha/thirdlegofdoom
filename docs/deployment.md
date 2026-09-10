@@ -230,7 +230,7 @@ Ubuntu or Debian arm64, Python 3.12 or 3.13. glibc 2.28 or newer, which
 any current Ubuntu or Debian arm64 image has.
 
 ```bash
-sudo apt install -y python3-venv python3-dev libgl1 libglib2.0-0
+sudo apt install -y python3-venv python3-dev libgl1 libglib2.0-0 v4l-utils
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[hands]"
 pip install pyserial feetech-servo-sdk        # the arm
