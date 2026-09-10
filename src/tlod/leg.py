@@ -368,6 +368,33 @@ class LegLink:
         """`slap`: paddle down to 40, and it stays there. See `strike`."""
         return self.send("slap")
 
+    def deploy(self) -> Ack:
+        """Door open, leg out, leg lifted ready to slap.
+
+        `open` alone leaves the leg at 40 -- down -- and `slap` writes 40
+        as well, so a slap straight after an open moves nothing at all.
+        Homing here is what makes the leg ready rather than merely out.
+        """
+        ack = self.open_hand()
+        self.home()
+        return ack
+
+    def retract(self) -> Ack:
+        """Leg up first, *then* the door shut. Never the other way round.
+
+        The sketch's `close` drives servo 0 to 145 and does not touch the
+        leg, so closing while the leg is still at 40 shuts the door onto
+        a deployed leg and holds it there. That is a hobby servo stalled
+        against a mechanical stop for as long as the board stays powered,
+        which is how one gets cooked -- and nothing in the sketch
+        prevents it, so it has to be a rule here.
+
+        Returns `close`'s Ack: the door being shut is the thing a caller
+        wants confirmed.
+        """
+        self.home()
+        return self.close_hand()
+
     def strike(self, dwell: float = 0.25) -> Ack:
         """Slap, hold, and come back up.
 
@@ -439,3 +466,163 @@ def find_leg_port(exclude: tuple[str, ...] = (), timeout: float = 6.0,
         if heartbeat_answers(port, timeout=timeout, baudrate=baudrate):
             return port
     return ""
+
+
+@dataclass(slots=True)
+class LegServiceStats:
+    fired: int = 0
+    dropped: int = 0
+    blocked: int = 0
+    failed: int = 0
+    last_error: str = ""
+
+
+class LegService:
+    """Drives the leg from its own thread, so the control loop never waits.
+
+    `LegLink.strike()` blocks: it slaps, sleeps for `dwell`, then homes.
+    That is 250 ms plus two serial round trips, against a control loop
+    that ticks every 10 ms. Calling it inline from a policy would stall
+    the arm mid-swing -- and worse, a policy tick that raises reaches
+    `RobotApp._control_loop`, which answers a failed tick by e-stopping.
+    The same reasoning that keeps a second sync read out of `Strike`
+    keeps a serial write out of `update()`: the control thread's job is
+    to be on time, and anything that can block is not its work.
+
+    So `fire()` hands the gesture to a worker and returns immediately.
+
+    **One slot, and a request that arrives while the leg is busy is
+    dropped rather than queued.** A queue would be worse than useless
+    here: the leg would still be working through round three's slap when
+    round five resolved, and a slap that lands after its round is not
+    late, it is wrong. Dropping is counted so a session can say how often
+    it happened -- if `dropped` is large the leg is being asked to gesture
+    faster than a 250 ms gesture allows, which is a pacing decision and
+    not something the driver should paper over.
+
+    Failures are counted, never raised. The leg is decoration; the arm is
+    the game. A board that has come unplugged mid-session should cost the
+    gestures it was asked for and nothing else.
+    """
+
+    def __init__(self, link: LegLink, dwell: float = 0.25,
+                 is_clear: Callable[[], bool] | None = None) -> None:
+        self.link = link
+        self.dwell = dwell
+        # The interlock. The leg deploys through a hatch the arm sits in
+        # front of, so the two effectors are physically exclusive and a
+        # gesture asked for while the arm is in the way is a collision,
+        # not a missed cue.
+        #
+        # It is a predicate rather than a reference to the controller so
+        # that this class stays testable without an arm, and so that
+        # whatever owns the sequencing -- the game, the CLI -- decides
+        # what "clear" means. `ArmController.is_stowed` is the one the
+        # game passes, and it reads the encoders rather than the
+        # commanded pose, because a stow that was commanded and never
+        # completed is exactly the case this has to catch.
+        #
+        # None means no interlock, for a rig where the leg has the space
+        # to itself. That is a deliberate opt-out, not a default: the
+        # caller has to say so.
+        self.is_clear = is_clear
+        self.stats = LegServiceStats()
+        self._want = threading.Event()
+        self._stop = threading.Event()
+        self._busy = threading.Event()
+        self._gesture = "strike"
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self._busy.is_set()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="leg", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self._stop.set()
+        self._want.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def fire(self, gesture: str = "strike") -> bool:
+        """Ask for a gesture. Returns False if the leg was already busy.
+
+        Safe to call from the control thread: it sets an event and
+        returns. Never raises -- a caller in a policy tick cannot be
+        given anything to handle.
+        """
+        if self._busy.is_set() or self._stop.is_set():
+            with self._lock:
+                self.stats.dropped += 1
+            return False
+        # Checked here, on the caller's thread, and not in the worker:
+        # the answer has to be about the arm's position *now*, and the
+        # worker may not get to the request for a tick or two. Counted
+        # separately from `dropped` because they mean opposite things --
+        # dropped is the leg being asked too fast, blocked is the arm
+        # being where the leg needs to go.
+        if self.is_clear is not None:
+            try:
+                clear = bool(self.is_clear())
+            except Exception:                            # noqa: BLE001
+                clear = False
+            if not clear:
+                with self._lock:
+                    self.stats.blocked += 1
+                return False
+        with self._lock:
+            self._gesture = gesture
+        self._busy.set()
+        self._want.set()
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._want.wait()
+            self._want.clear()
+            if self._stop.is_set():
+                break
+            if not self._busy.is_set():
+                continue
+            with self._lock:
+                gesture = self._gesture
+            try:
+                if gesture == "strike":
+                    self.link.strike(dwell=self.dwell)
+                else:
+                    self.link.send(gesture)
+            except Exception as e:                      # noqa: BLE001
+                # Counted, not raised. See the class docstring: this
+                # thread exists so that a serial failure costs a gesture
+                # rather than the game.
+                with self._lock:
+                    self.stats.failed += 1
+                    self.stats.last_error = f"{type(e).__name__}: {e}"
+                log.warning("leg: %s failed: %s", gesture, e)
+            else:
+                with self._lock:
+                    self.stats.fired += 1
+            finally:
+                self._busy.clear()
+
+    def report(self) -> str:
+        """End-of-run line, in the same shape as the other subsystems'."""
+        with self._lock:
+            s = self.stats
+            line = f"leg: {s.fired} gesture(s)"
+            if s.dropped:
+                line += f", {s.dropped} dropped (asked while still moving)"
+            if s.blocked:
+                line += (f", {s.blocked} blocked (the arm was not stowed, so the "
+                         f"hatch could not open)")
+            if s.failed:
+                line += f", {s.failed} failed -- last: {s.last_error}"
+            return line

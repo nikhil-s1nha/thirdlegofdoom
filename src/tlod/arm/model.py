@@ -285,6 +285,33 @@ HOME: np.ndarray = np.array([0.0, -0.6, 0.9, 0.5, 0.0])
 """A safe, well-conditioned configuration away from limits and the table.
 Used as the cold-start IK seed and as the arm's park pose."""
 
+STOW: np.ndarray = np.array([-0.009, -1.745, 1.634, -0.988, -0.014])
+"""Folded back so the third leg's hatch can open.
+
+The leg deploys through a hatch the arm sits in front of, so the two
+effectors are physically exclusive: this pose is what "the arm is out of
+the way" means, and `LegService` refuses to gesture until the arm is in
+it. That is an interlock, not a nicety -- firing the leg into an arm that
+is still in the way is a collision.
+
+Measured on the rig with `probe --real`, torque off, arm folded by hand
+to where the hatch cleared:
+
+    shoulder_pan -0.009  shoulder_lift -1.861  elbow_flex +1.634
+    wrist_flex   -0.988  wrist_roll    -0.014
+
+`shoulder_lift` is the exception: -1.861 is 6.6 degrees past the URDF
+limit of -1.74533, which the servo reaches when pushed by hand but which
+`clamp_to_limits` will not command. It is -1.745 here, 22 mm away at the
+tool, and that was confirmed on the hardware to still clear the hatch --
+so the limit stays where the URDF put it rather than being widened to
+fit one pose.
+
+The gripper is not part of this. It is a separate axis that no hatch
+cares about, and pinning it here would fight whatever the game left it
+holding.
+"""
+
 
 def _solve_from(
     q0: np.ndarray,
