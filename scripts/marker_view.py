@@ -9,14 +9,15 @@ that object instead. The arm has already driven twelve poses by then.
 So look first. This draws every blob of the chosen colour, marks the one
 that would win, and moves nothing.
 
-    python3 scripts/marker_view.py green
-    python3 scripts/marker_view.py blue 5
+    python3 scripts/marker_view.py red --camera 1
+    python3 scripts/marker_view.py --marker red --camera 1
 
 Then hold the marker where the gripper will be. If the crosshair jumps to
 something else in the room, choose a different colour or remove the
 distractor -- do not calibrate.
 """
 
+import argparse
 import sys
 
 import cv2
@@ -26,13 +27,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, "src")
 from tlod.vision.calibrate_flow import MARKER_BANDS, _bands, find_marker  # noqa: E402
 
-PORT = 8080
 MIN_AREA = 45                        # matches find_marker's own threshold
 
-colour = sys.argv[1] if len(sys.argv) > 1 else "green"
-index = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+# Positional args and flags both, because the flags are what everything
+# else in this project takes and the positionals are what this script has
+# always taken. `marker_view.py red --camera 1` reading the colour as a
+# camera index and dying on int("red") is a worse first experience than
+# either spelling deserves.
+parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+parser.add_argument("marker_pos", nargs="?", default=None,
+                    help=f"marker colour: {', '.join(MARKER_BANDS)}")
+parser.add_argument("camera_pos", nargs="?", type=int, default=None,
+                    help="v4l2 index (positional form)")
+parser.add_argument("--marker", default=None, choices=sorted(MARKER_BANDS))
+parser.add_argument("--camera", type=int, default=None, help="v4l2 index")
+parser.add_argument("--port", type=int, default=8080)
+args = parser.parse_args()
+
+colour = args.marker or args.marker_pos or "green"
+index = args.camera if args.camera is not None else (
+    args.camera_pos if args.camera_pos is not None else 5)
+PORT = args.port
 if colour not in MARKER_BANDS:
-    raise SystemExit(f"colour must be one of {', '.join(MARKER_BANDS)}")
+    raise SystemExit(f"marker must be one of {', '.join(MARKER_BANDS)}, not {colour!r}")
 band = MARKER_BANDS[colour]
 
 cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
@@ -43,7 +60,13 @@ if not cap.isOpened():
     raise SystemExit(f"camera {index} did not open. Is another process holding it?")
 
 print(f"  looking for {colour} blobs, {len(_bands(band))} HSV band(s)")
-print(f"  open http://<this board>:{PORT}")
+print(f"  camera {index}, open http://<this board>:{PORT}")
+if colour == "red":
+    # The one colour that regularly loses to the room. Two bands and a
+    # raised saturation floor keep skin out of it most of the time, but
+    # "most of the time" is not a thing to discover with the arm moving.
+    print("  red fights with skin, wood and most tabletops -- put a hand in")
+    print("  frame and watch whether the crosshair stays on the marker")
 
 PAGE = (b"<!doctype html><title>marker</title>"
         b"<body style='margin:0;background:#111'>"
