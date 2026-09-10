@@ -980,6 +980,12 @@ def cmd_calibrate(args) -> int:
 
         truth = synthetic_projector((cfg.camera.width, cfg.camera.height),
                                     cfg.camera.position, cfg.camera.look_at)
+        # Force the simulated backend. The claim below is that nothing
+        # moves, and a config with arm.backend already set to feetech --
+        # which is exactly the config someone runs this from -- would
+        # otherwise drive the real arm through all twelve poses while
+        # printing that it is not.
+        cfg = cfg.with_overrides(arm={"backend": "mock"})
         controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
         camera = _MarkerCamera(truth, controller, cfg.camera.width, cfg.camera.height)
         print("  SIMULATED rehearsal: no hardware is moving.")
