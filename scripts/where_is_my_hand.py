@@ -56,6 +56,10 @@ from tlod.cli import build_camera, build_detector, build_projector  # noqa: E402
 from tlod.config import Config  # noqa: E402
 from tlod.vision.hands import PALM_BIAS, HandLocator  # noqa: E402
 
+# The same band `HandSlapGame._hand` gates on, via SafetyLimits.
+MIN_RADIUS = 0.08
+MAX_RADIUS = 0.33
+
 argv = sys.argv[1:]
 truth = None
 if "--truth" in argv:
@@ -169,9 +173,21 @@ try:
                 continue
             u, v = hands[0].palm_center
             p = obs.position
+            # The radius and whether it is reachable, because "the game
+            # will not strike at this" is the question people actually
+            # have, and the answer is a gate on hypot(x, y) that nothing
+            # else here surfaced. A hand 40 cm out is tracked perfectly
+            # and refused by `HandSlapGame._hand` as "out of reach", which
+            # from the outside looks identical to broken tracking: the arm
+            # simply never moves and the score stays 0-0.
+            radius = float(np.hypot(p[0], p[1]))
+            reach = ("out of reach, too far" if radius > MAX_RADIUS else
+                     "too close to the base" if radius < MIN_RADIUS else "reachable")
             print(f"  palm at x {p[0] * 1e3:+7.1f}  y {p[1] * 1e3:+7.1f}  "
                   f"z {p[2] * 1e3:+6.1f} mm     (pixel {u:.0f}, {v:.0f}, "
                   f"{hands[0].handedness.lower()})")
+            print(f"    radius {radius * 1e3:6.1f} mm  -> {reach}"
+                  f"   (arm reaches {MIN_RADIUS * 1e3:.0f}-{MAX_RADIUS * 1e3:.0f} mm)")
             if truth is not None:
                 diagnose(projector, u, v, p, truth)
 except KeyboardInterrupt:
