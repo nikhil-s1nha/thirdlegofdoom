@@ -38,6 +38,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `bench` | measure IK, camera and loop latency |
 | `record` / `replay` | capture a session, replay it deterministically |
 | `vision-serve` / `control` | optional two-board split: vision on one, kinematics on the other |
+| `leg` | the Arduino paddle: `open`, `close`, `home`, `slap`, `strike`, `monitor` |
 | `power` | measure what a move actually costs the supply |
 | `vision-check` | verify vision numerically \+ MJPEG preview; for headless boards |
 | `probe` | read the arm with torque off; safest first hardware test |
@@ -61,6 +62,7 @@ src/tlod/
   vision/         camera, calibration, hands, tracking, objects, scene, recording
   runtime/        signal (mailbox), loop (fixed rate), app (threads + Policy)
   game/           handslap, opponent, contact, touch
+  leg.py          the Arduino paddle on its own USB port
   viz/            overlay and viewer
 ```
 
@@ -105,6 +107,13 @@ hardware are the same code path.
   calibrated against one version of the strike, the strike changed, and
   the threshold stayed. It is not noise and it is not calibration — the
   clusters move. See [docs/hit-detection.md](docs/hit-detection.md).
+- **The third leg reports nothing.** Two hobby servos on an Arduino, so
+  no encoder and no feedback: the board tells you it took the word, never
+  where the paddle went. Three sharp edges in the sketch — `slap` leaves
+  the paddle down until something sends `home`, `home` acknowledges with
+  an *empty line*, and `open` blocks the board for 200 ms — and opening
+  the port resets the board, so the first beat is what says it is ready.
+  See [docs/hardware.md](docs/hardware.md).
 - **`configs/default.yaml` is not a base layer.** `Config.load` reads the
   single file you pass; everything absent falls back to the dataclass
   defaults in `config.py`, not to `default.yaml`. Editing it does not

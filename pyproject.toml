@@ -65,6 +65,10 @@ robot = ["lerobot[feetech]>=0.6.0"]
 # The Orange Pi <-> Pi Zero UART link (docs/deployment.md's learning/testing
 # path, not the production UDP one). Only needed on those two boards.
 uart = ["pyserial>=3.5"]
+# The Arduino paddle on its own USB port (tlod.leg). Same dependency as
+# `uart`, named separately because it is a different piece of hardware on
+# a different board -- installing one should not imply the other is wired.
+leg = ["pyserial>=3.5"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

@@ -96,6 +96,72 @@ and does not resolve on Python 3.13; install it only on a machine where
 you are running lerobot's calibration commands, which need not be the
 board wired to the arm. Point `arm.calibration` at the JSON afterwards.
 
+## The third leg: an Arduino on its own USB port
+
+Separate from the arm entirely. An Arduino, USB to the Orange Pi, two
+hobby servos on pins 7 and 8, running a fixed sketch. `tlod.leg` drives
+it; `tlod leg` is the command.
+
+| pin | servo | what it does | positions |
+|---|---|---|---|
+| 7 | `servos[0]` | jaw | 90 open, 145 shut |
+| 8 | `servos[1]` | paddle | 120 up (home), 40 down |
+
+Four commands in, one line back, plus `<3` every 500 ms unasked:
+
+| command | does | replies |
+|---|---|---|
+| `open` | jaw 90, then **after 200 ms** paddle 40 | `OPEN` |
+| `close` | jaw 145 | `CLOSE` |
+| `home` | paddle 120 | *an empty line* |
+| `slap` | paddle 40 | `s` |
+
+9600 baud, newline-terminated, `Serial.readStringUntil('\n')` on the far
+side. Send commands one at a time and wait for the reply.
+
+**These are hobby servos, not bus servos.** No encoder, no feedback, no
+`read()`. The board cannot say where the paddle is, only that it took the
+word — so unlike `Present_Load` on the STS3215, there is nothing here to
+detect contact with, and nothing to verify a move happened. The reply's
+arrival time is the only timestamp available, and `Ack.stamp` is it.
+
+**`slap` does not come back.** It drives the paddle to 40 and leaves it
+there; a second `slap` moves nothing until something has sent `home`.
+`LegLink.strike()` is the whole gesture, and its `dwell` is paddle travel
+time — which, being part of the strike, wants recalibrating whenever the
+strike changes. See [hit-detection.md](hit-detection.md).
+
+**`home` acknowledges with an empty line.** `Serial.println("")`. Nothing
+tells it apart from a blank line arriving for any other reason, so
+replies can only be matched positionally. If you edit the sketch, make it
+print `HOME`.
+
+**`open` blocks the sketch for 200 ms.** The `delay(200)` is inside the
+command handler, so `loop()` neither beats nor reads during it. An `open`
+reply is never faster than 200 ms, a heartbeat can be that late, and 200
+ms of incoming bytes at 9600 baud is about 192 — three times the
+Arduino's 64-byte receive buffer. Waiting for each reply is what keeps
+that buffer from overflowing.
+
+**Opening the port resets the board.** DTR is asserted on open and most
+Arduinos reset on it, so the first second or two after connecting belongs
+to the bootloader and anything sent then is lost. `LegLink.connect()`
+waits for the first heartbeat rather than guessing at a sleep — the beat
+is proof that `setup()` has run.
+
+**It is a second `/dev/ttyACM*`, and the numbering is not stable.** Two
+USB devices now enumerate in whatever order they came up, so the arm and
+the leg can swap between boots. `tlod leg` probes for the heartbeat when
+no port is configured, the same way `tlod ports --probe` asks each port
+whether six servos answer; the probe writes nothing, so pointing it at
+the servo bus by mistake is harmless. Set `leg.port` once it is known.
+
+```bash
+tlod leg monitor          # listen only: is it there, is the sketch running
+tlod leg strike           # slap, dwell, home
+tlod leg open --repeat 3
+```
+
 ## Camera
 
 Fixed mount, angled down over the table. Steeper is better — error from a
