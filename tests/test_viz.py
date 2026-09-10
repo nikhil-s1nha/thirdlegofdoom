@@ -254,3 +254,65 @@ def test_scoreboard_shares_a_port_with_the_preview():
     same = scoreboard.serve(FakeGame(), 8097, server=preview)
     assert same is preview
     assert "/score.json" in preview.routes and "/" in preview.routes
+
+
+def test_scoreboard_reports_the_gesture_separately_from_the_verdict():
+    """They are two events about a second apart, not one.
+
+    The verdict lands when the round is judged; the arm starts performing
+    once the retract has finished. Keying the gesture off the round number
+    would sound it while the arm was still on its way back.
+    """
+    from tlod.viz.scoreboard import Scoreboard
+
+    class Game:
+        score = type("S", (), {"robot": 1, "human": 0, "rounds": 1})()
+        last_result = "HIT"
+        last_flourish = ""
+        flourishes = 0
+        state = "settle"
+        running = True
+
+    game = Game()
+    board = Scoreboard(game)
+    assert board.snapshot()["flourish_n"] == 0, "nothing performed yet"
+
+    game.last_flourish, game.flourishes = "spin", 1
+    assert board.snapshot()["flourish"] == "spin"
+
+    # Two gloats in a row are two gestures, even when the word repeats.
+    game.flourishes = 2
+    assert board.snapshot()["flourish_n"] == 2
+
+    # A policy with no personality at all degrades rather than raising.
+    assert Scoreboard(object()).snapshot()["flourish"] == ""
+
+
+def test_page_makes_a_sound_for_every_gesture():
+    """Every entry in FLOURISHES needs its own noise.
+
+    This is the check that catches a gesture being added to the table and
+    silently having nothing to say -- the page cannot import FLOURISHES,
+    so nothing else would notice.
+    """
+    from tlod.arm.primitives import FLOURISHES
+    from tlod.viz import scoreboard
+
+    page = scoreboard.PAGE.decode()
+    for name in FLOURISHES:
+        assert f'=== "{name}"' in page, f"{name} has no sound on the scoreboard"
+
+
+def test_flourish_says_which_move_it_picked():
+    """The game chooses a mood, `flourish()` chooses the gesture, so
+    without this the game cannot name what its own arm is about to do."""
+    import numpy as np
+
+    from tlod.arm.primitives import FLOURISHES, MOODS, flourish
+
+    rng = np.random.default_rng(0)
+    for mood in MOODS:
+        for _ in range(20):
+            m = flourish(mood, rng=rng)
+            assert m.move_name in MOODS[mood]
+            assert m.move == FLOURISHES[m.move_name]
