@@ -28,6 +28,21 @@ safety:
   max_speed: 3.5
   max_accel: 35.0
   max_jerk: 400.0
+  # Was the 0.33 default, which is a conservative keep-out rather than
+  # anything the arm cannot do: IK solves cleanly out to 465 mm at play
+  # height, and `model.MAX_REACH` of 0.36 is measured from the shoulder
+  # axis, not the base origin. At 0.33 a hand at a natural distance on
+  # this table sat outside the gate and the game refused to play, and the
+  # hover was being clamped constantly -- 191 safety-guard hits in an
+  # 11-round game, all of them the fence rather than a fault.
+  #
+  # 0.43 leaves ~35 mm before the IK gives up. Two things it costs, both
+  # worth watching: the arm is near-straight out there, which is where
+  # torque margin is worst and where `ik`'s weights start trading tool
+  # orientation for position; and the contact thresholds were measured at
+  # ~300 mm, so a strike at 430 mm decelerates differently. Recheck
+  # hit/dodge if you start playing at the edge.
+  max_radius: 0.43
   # This floor is only about not driving into the table -- and the table
   # is at z = 0, not 17 mm below it as this comment used to claim. Driven
   # to the joint angles at which the gripper rests on the table, FK
@@ -46,7 +61,13 @@ safety:
   #
   # What bounds the force is arm torque_limit during the swing (350/1000,
   # a 0.038 lean against a rigid book), not this number.
-  min_height: 0.005
+  #
+  # 0.007, not 0.005, because the arm and its base were lowered 2 mm. The
+  # model frame rides with the base, so everything measured in it shifted
+  # up by 2 mm relative to the world: the table is now at model z = +2 mm
+  # rather than 0. Five millimetres of actual air is therefore 7 mm here.
+  # Leaving it at 0.005 would have put the clamp 3 mm inside the table.
+  min_height: 0.007
 
 vision:
   num_hands: 1
@@ -63,7 +84,16 @@ vision:
   # -- 0.87 mm per mm on this rig's geometry. The 6 mm that was wrong here
   # was putting the aim ~5 mm off to one side of every hand, always the
   # same side, which is what "it keeps hitting my index finger" was.
-  hand_height: 0.028
+  # 0.030 for the same 2 mm as safety.min_height: a flat palm still sits
+  # 28 mm above the table, but the base dropped 2 mm and the model frame
+  # went with it, so that surface reads 30 mm in these coordinates.
+  #
+  # The physical geometry is unchanged, which is the point. press_depth
+  # stays 17 mm, so the commanded floor moves 11 -> 13 mm in model terms
+  # and stays at the same 11 mm of real air above the table, and the
+  # contact band between floor and hand keeps exactly the width it was
+  # calibrated with.
+  hand_height: 0.030
 
 runtime:
   prediction_horizon: 0.15
