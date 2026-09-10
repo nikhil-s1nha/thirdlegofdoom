@@ -942,6 +942,51 @@ class TestCalibrateFindsItsOwnIntrinsics:
         assert "flag.npz" in str(e.value)
         assert "from_config.npz" not in str(e.value)
 
+    def test_extrinsics_will_not_write_over_the_intrinsics(self, tmp_path, monkeypatch):
+        """The one that cost a lens calibration.
+
+        `-o` defaulted to calib/intrinsics.npz for the whole `calibrate`
+        command -- right for intrinsics, and for extrinsics it wrote its
+        own solve straight over a chessboard calibration. Nothing warns:
+        the run prints a camera position and an RMS and looks like it
+        worked, and the loss only surfaces later as vision that is wrong
+        in a way no amount of recalibrating extrinsics can fix.
+        """
+        from tlod import cli
+        from tlod.config import Config
+
+        cfg = Config()
+        cfg.camera.intrinsics = str(tmp_path / "intrinsics.npz")
+        cfg.camera.extrinsics = str(tmp_path / "extrinsics.npz")
+        (tmp_path / "intrinsics.npz").write_bytes(b"precious")
+        monkeypatch.setattr(cli.Config, "load", staticmethod(lambda *a, **k: cfg))
+
+        args = self._args(tmp_path)
+        args.output = str(tmp_path / "intrinsics.npz")
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_calibrate(args)
+        assert "refusing" in str(e.value)
+        assert (tmp_path / "intrinsics.npz").read_bytes() == b"precious"
+
+    def test_each_subcommand_defaults_to_its_own_file(self, tmp_path, monkeypatch):
+        from tlod import cli
+        from tlod.config import Config
+
+        cfg = Config()
+        cfg.camera.intrinsics = str(tmp_path / "i.npz")
+        cfg.camera.extrinsics = str(tmp_path / "e.npz")
+        monkeypatch.setattr(cli.Config, "load", staticmethod(lambda *a, **k: cfg))
+
+        # Extrinsics with no -o must not resolve to the intrinsics path.
+        # It fails later for want of an intrinsics file, which is fine --
+        # what matters is that it did not name i.npz as its destination.
+        args = self._args(tmp_path)
+        args.output = ""
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_calibrate(args)
+        assert "refusing" not in str(e.value)
+        assert "i.npz" in str(e.value), "should be complaining about reading it"
+
     def test_neither_set_says_how_to_get_them(self, tmp_path, monkeypatch):
         from tlod import cli
         from tlod.config import Config
