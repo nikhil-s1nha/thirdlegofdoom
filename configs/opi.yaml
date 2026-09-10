@@ -23,6 +23,20 @@ arm:
   calibration: calib/mine.json
   servo_accel: 35.0
   torque_limit: 800
+  # Measured: stepping `move --real` down at the play position, the paddle
+  # tip touches the table when FK reports the tool point at 69 mm. So the
+  # paddle hangs 69 mm below the frame every height in this file is
+  # written in, and until now nothing knew that. See
+  # StrikeLimits.tip_offset for what it was costing.
+  tip_offset: 0.069
+  # 10 mm, not the 17 mm default. That default was set when every height
+  # was measured to the tool point, so it was really "17 mm plus a
+  # paddle" -- 86 mm below the hand, through the table. Now that
+  # `tip_offset` exists, 17 mm would press 17 mm into a palm that is only
+  # about 25 mm thick, and squashing it flat is what closed the gap
+  # between the hit and dodge clusters. 10 mm is enough press to be
+  # unambiguous and leaves the palm a palm.
+  press_depth: 0.025
 
 safety:
   max_speed: 3.5
@@ -67,7 +81,12 @@ safety:
   # up by 2 mm relative to the world: the table is now at model z = +2 mm
   # rather than 0. Five millimetres of actual air is therefore 7 mm here.
   # Leaving it at 0.005 would have put the clamp 3 mm inside the table.
-  min_height: 0.007
+  # 0.074 = the 69 mm paddle plus 5 mm of air. This is a *tool point*
+  # limit, so at 0.007 it was permitting the tip to go 62 mm below the
+  # table -- which is exactly what `move --real ... 0.020` did when it
+  # drove the gripper into the wood. The guard was never wrong about its
+  # own number; it was guarding the wrong end of the tool.
+  min_height: 0.074
 
 vision:
   num_hands: 1

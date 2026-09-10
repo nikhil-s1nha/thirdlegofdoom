@@ -35,6 +35,15 @@ class ArmConfig:
     # express. See tlod.arm.feetech.acc_counts.
     servo_accel: float = 9.2
     torque_limit: int = 800
+    # Paddle tip below the FK tool point, metres. See
+    # StrikeLimits.tip_offset -- 0 for a bare gripper.
+    tip_offset: float = 0.0
+    # How far below the hand surface the paddle tip is commanded, metres.
+    # Configurable because `tip_offset` changed what it means: it used to
+    # be measured to the tool point and so was really 17 mm *plus a
+    # paddle*, which is why the default is generous. See
+    # StrikeLimits.press_depth.
+    press_depth: float = 0.017
     # Simulator dynamics. Estimates from the STS3215 datasheet until M6
     # measures them; see docs/ROADMAP.md.
     sim_max_speed: float = 3.5

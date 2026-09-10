@@ -925,24 +925,34 @@ class TestCollisionPlaneContact:
         on the table.
         """
         from tlod.arm import model
-        from tlod.arm.primitives import StrikeLimits
         from tlod.config import Config
 
         touching = np.array([-0.304, 0.210, 0.302, 1.068, -0.005])
         table_z = model.tool_pose(touching).z
         assert abs(table_z) < 0.003, f"table is at {table_z * 1e3:.1f} mm, not ~0"
 
+        # In *tip* coordinates, which is the correction this test needed.
+        # `table_z` above is FK for the gripper touching the table, and
+        # the paddle hangs `tip_offset` below the tool point -- so a floor
+        # compared against the table has to have the offset taken back
+        # off it. Comparing the tool-point floor to a real table height is
+        # the frame confusion that let a floor of 13 mm mean a paddle
+        # 56 mm underground.
+        from tlod.cli import build_strike_limits
+
         cfg = Config.load("configs/opi.yaml")
-        limits = StrikeLimits()
-        floor = max(cfg.vision.hand_height - limits.press_depth, cfg.safety.min_height)
-        assert floor > table_z, "the commanded floor is at or below the table"
-        assert floor - table_z >= 0.004, (
-            f"only {(floor - table_z) * 1e3:.1f} mm of air over the table")
+        limits = build_strike_limits(cfg)
+        floor = max(cfg.vision.hand_height + limits.tip_offset - limits.press_depth,
+                    cfg.safety.min_height)
+        tip_floor = floor - limits.tip_offset
+        assert tip_floor > table_z, "the paddle is commanded at or below the table"
+        assert tip_floor - table_z >= 0.004, (
+            f"only {(tip_floor - table_z) * 1e3:.1f} mm of air under the paddle")
         # And deep enough that a thin hand still stops the paddle well
         # clear of the threshold.
         from tlod.game.contact import CollisionPlaneContactSensor
         thin_hand = 0.020
-        assert thin_hand - floor > CollisionPlaneContactSensor(lambda: 0.0).margin * 1.5
+        assert thin_hand - tip_floor > CollisionPlaneContactSensor(lambda: 0.0).margin * 1.5
 
     def test_it_reports_its_numbers_whichever_way_the_round_went(self):
         """A verdict alone is unfalsifiable from outside the arm.
@@ -1074,13 +1084,17 @@ class TestStrikeGeometryIsSelfConsistent:
         assert limits.reachable_floor_offset == limits.press_depth
 
     def test_the_configured_arm_lands_below_the_hand(self):
-        from tlod.arm.primitives import StrikeLimits
         from tlod.config import Config
         from tlod.game.contact import CollisionPlaneContactSensor
 
+        from tlod.cli import build_strike_limits
+
         cfg = Config.load("configs/opi.yaml")
-        limits = StrikeLimits()
-        hand = cfg.vision.hand_height
+        limits = build_strike_limits(cfg)
+        # Tool-point heights throughout: the hand *surface* is a tip
+        # offset above where the camera reports it, because that is where
+        # the tool point sits when the paddle is touching a palm.
+        hand = cfg.vision.hand_height + limits.tip_offset
         hover = hand + limits.hover_height
         floor = max(hand - limits.press_depth,
                     hover - limits.clamp_drop(hover - (hand - limits.press_depth)),

@@ -215,6 +215,16 @@ def build_strike_limits(cfg: Config):
         normal_torque_limit=cfg.arm.torque_limit,
         strike_speed=min(defaults.strike_speed, cap),
         retract_speed=min(defaults.retract_speed, cap),
+        tip_offset=cfg.arm.tip_offset,
+        press_depth=cfg.arm.press_depth,
+        # Clamped here rather than left to warn. `hover_height +
+        # press_depth <= max_drop` is the invariant, and a deeper press
+        # eats the hover budget -- `HandSlapGame` already clamps against
+        # `max_hover`, but the bench and `touch` build their own limits
+        # and would otherwise start life inconsistent and say so on every
+        # run.
+        hover_height=min(defaults.hover_height,
+                         defaults.max_drop - cfg.arm.press_depth),
     )
 
 

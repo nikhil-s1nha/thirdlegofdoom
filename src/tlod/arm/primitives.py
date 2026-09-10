@@ -122,6 +122,29 @@ class StrikeLimits:
     # deliberate: the floor is the guard, not something the guard has to
     # rescue.
     press_depth: float = 0.017
+    # How far the paddle tip hangs below the point forward kinematics
+    # calls the tool. Zero for a bare gripper, and 69 mm measured on this
+    # rig with a paddle on it -- the config comment recording "the gripper
+    # rests on the table and FK reports +0.2 mm" was written before the
+    # paddle existed and has been quietly wrong since.
+    #
+    # Nothing knew this offset existed, so every height in the geometry
+    # was measured to the tool point and applied to the paddle. Measured
+    # consequence: a floor of 13 mm meant a paddle 56 mm *underground*, so
+    # every strike bottomed out on the table and the arm flexed to absorb
+    # it -- while the encoders, which read the servo shaft rather than the
+    # bent link, went on reporting that it had stopped at 13 mm. Hit and
+    # dodge were then being told apart by a couple of millimetres of arm
+    # flex, which is why their clusters sat 1 mm apart and no threshold
+    # could separate them. The hover was 24 mm at the tip, under a 28 mm
+    # palm, which is the grazing.
+    #
+    # Applied by `Hover` and `Strike` so `press_depth` and `hover_height`
+    # mean what they say -- distances from the *paddle* to the hand. It is
+    # deliberately not folded into `vision.hand_height`, which has to stay
+    # the real height of a palm because it is also the plane the camera
+    # intersects its rays with.
+    tip_offset: float = 0.0
     torque_limit: int = 350             # of 1000, while striking; yields on contact
     normal_torque_limit: int = 800
     # Stay down at the bottom, still at `torque_limit`, before retracting.
@@ -334,7 +357,10 @@ class Hover(GoToPose):
 
     def __init__(self, target_xyz, limits: StrikeLimits, duration: float = 0.5) -> None:
         t = np.asarray(target_xyz, float)
-        super().__init__(Pose(float(t[0]), float(t[1]), float(t[2]) + limits.hover_height),
+        # `hover_height` is clearance for the paddle, not for the tool
+        # point, so the tool has to sit a tip-length higher again.
+        tool_z = float(t[2]) + limits.tip_offset + limits.hover_height
+        super().__init__(Pose(float(t[0]), float(t[1]), tool_z),
                          duration, speed=limits.retract_speed)
 
 
@@ -418,7 +444,11 @@ class Strike(Motion):
         # no-op: clamp_drop(start - hand) lands end_z exactly on the hand,
         # and max() of that against a floor below it returns the hand
         # again. Every strike stopped precisely where it used to.
-        floor = self.target[2] - self.limits.press_depth
+        # In tool-point coordinates, which is what `solve` and the
+        # encoders speak: the paddle tip is `tip_offset` lower, so the
+        # tool has to stop that much higher for the tip to end up
+        # `press_depth` below the hand.
+        floor = self.target[2] + self.limits.tip_offset - self.limits.press_depth
         drop = self.limits.clamp_drop(
             start_z - floor if self.depth is None else self.depth
         )
@@ -776,7 +806,7 @@ FLOURISHES: dict[str, Move] = {
     # here would happily run at 0.50.
     "spin": Move((0.45, -0.30, 0.00, -0.75, -1.30, 0.28),
                  (1.0, 0.5, 1.0, 0.5, 0.5, 3.0),
-                 0.62, (False, False, False, False, False, True)),
+                 0.74, (False, False, False, False, False, True)),
     # Nothing in common with wag, which is what a shimmy needs: no pan at
     # all. It is the wrist -- 74 degrees of roll, three times -- with the
     # gripper snapping three times through it and the shoulder lifting
