@@ -905,11 +905,11 @@ def cmd_calibrate(args) -> int:
             time.sleep(1.0)
             intr = run_intrinsics(
                 camera, pattern=_pattern(args.pattern), square=args.square,
-                views=args.views, timeout=args.timeout,
+                views=args.views, timeout=args.timeout, fisheye=args.fisheye,
                 on_progress=lambda n, total, *_: print(f"    view {n}/{total}", flush=True),
             )
         intr.save(out)
-        print(f"\n  reprojection RMS {intr.rms:.3f} px  ->  {out}")
+        print(f"\n  {intr.model} model, reprojection RMS {intr.rms:.3f} px  ->  {out}")
         if intr.rms > 1.0:
             print("  WARNING: above 1 px is poor. Reshoot with more varied views,")
             print("  better light, and the board fully flat.")
@@ -1337,6 +1337,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
+    s.add_argument("--fisheye", action="store_true",
+                   help="equidistant fisheye model; needed above ~120 deg, where "
+                        "the default pinhole model cannot fit at all")
     s.add_argument("--timeout", type=float, default=180.0)
     s.add_argument("--intrinsics", default="", help="extrinsics: path to the intrinsics .npz")
     s.add_argument("--sim", action="store_true", help="rehearse without hardware")
