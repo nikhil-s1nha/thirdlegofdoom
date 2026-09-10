@@ -540,11 +540,18 @@ def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0
     if PLAIN_OPEN:
         log.info("leg: opening %s the way a serial monitor does "
                  "(DTR asserted, HUPCL untouched)", port)
-        return serial.Serial(port, baudrate, timeout=timeout)
+        ser = serial.Serial(port, baudrate, timeout=timeout)
+        _claim_exclusively(ser, port)
+        return ser
     ser = serial.Serial()
     ser.port = port
     ser.baudrate = baudrate
     ser.timeout = timeout
+    # Claim it before anything else can. See `_claim_exclusively`.
+    try:
+        ser.exclusive = True
+    except Exception:                            # pragma: no cover - older pyserial
+        pass
     try:
         ser.dtr = False
         ser.rts = False
@@ -558,6 +565,41 @@ def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0
         ser = serial.Serial(port, baudrate, timeout=timeout)
     _keep_dtr_on_close(ser)
     return ser
+
+
+def _claim_exclusively(ser, port: str) -> bool:
+    """Stop anything else on this machine from opening the same port.
+
+    pyserial does not set `TIOCEXCL` unless asked, so on Linux another
+    process can open `/dev/ttyUSB0` *while we hold it* and toggle DTR or
+    write bytes. Neither shows up in any trace here, because it is not
+    our traffic -- from this side it looks like the board misbehaving on
+    its own.
+
+    Two services do this as a matter of course and neither exists on
+    macOS, which is why a board can behave perfectly from a laptop and
+    badly from a Linux SBC with the same sketch and the same wiring:
+
+      ModemManager  probes new tty devices looking for a modem, on udev
+                    events and on a timer. Opens the port, asserts and
+                    drops the control lines, writes AT strings.
+      brltty        claims CH340 devices believing they are braille
+                    displays.
+
+    A reset from a stray DTR toggle detaches the servos, and an attached
+    servo that suddenly loses its signal is exactly the reported
+    twitching.
+
+    Best effort: an older pyserial without `exclusive`, or a platform
+    without TIOCEXCL, keeps the old behaviour rather than refusing to
+    run.
+    """
+    try:
+        ser.exclusive = True
+    except Exception as e:                       # pragma: no cover - platform dependent
+        log.debug("leg: cannot claim %s exclusively (%s)", port, e)
+        return False
+    return True
 
 
 def _keep_dtr_on_close(ser) -> bool:
