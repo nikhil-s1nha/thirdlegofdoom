@@ -349,7 +349,29 @@ def cmd_touch(args) -> int:
     return 0
 
 
-def play_config(cfg: Config, camera: int, real: bool) -> Config:
+def camera_overrides(camera: int | None) -> dict:
+    """The `camera` override block for a CLI flag, honouring the config.
+
+    `--camera` defaults to None rather than 0, so a config's own
+    `camera.index` survives when the flag is not given. It used to default
+    to 0 and be written in unconditionally, which made `camera.index` dead
+    text in every config file for every command that takes the flag: you
+    could edit it, and the run would still open index 0.
+
+    That is unfixable from the config on a board where the camera is not
+    index 0, and an Orange Pi 5 is exactly that board -- it enumerates its
+    Rockchip codecs first, so the low indices are hardware that opens far
+    enough to report "Not a video capture device" and the camera lands
+    above /dev/video10. The failure then names the index you did not
+    choose, which is the least useful thing it could say.
+    """
+    block: dict[str, object] = {"source": "opencv"}
+    if camera is not None:
+        block["index"] = camera
+    return block
+
+
+def play_config(cfg: Config, camera: int | None, real: bool) -> Config:
     """Config for a hand-slap run against a real hand.
 
     Split out from `cmd_play` for the same reason `hybrid_config` was:
@@ -357,10 +379,18 @@ def play_config(cfg: Config, camera: int, real: bool) -> Config:
     the arm backend, and that is checkable without hardware. An arm that
     was never asked to move is indistinguishable, from the outside, from
     one that was asked and failed.
+
+    `camera` is None when the flag was not given, and then the config's
+    own index stands. It used to default to 0 and be written in
+    unconditionally, which meant `camera.index` in a config file was dead
+    text for every command that took a `--camera` -- edit it, and the run
+    still opened index 0. On a board where the camera is not index 0 that
+    is unfixable from the config, and the failure names the index you did
+    not choose.
     """
     return cfg.with_overrides(
         arm={"backend": "feetech" if real else "mock"},
-        camera={"source": "opencv", "index": camera},
+        camera=camera_overrides(camera),
         vision={"detector": "mediapipe"},
     )
 
@@ -720,7 +750,7 @@ def cmd_sim(args) -> int:
     return 0
 
 
-def hybrid_config(cfg: Config, camera: int, policy: str, real: bool) -> Config:
+def hybrid_config(cfg: Config, camera: int | None, policy: str, real: bool) -> Config:
     """Config for a hybrid run: real camera and real hand either way.
 
     Split out from `cmd_hybrid` so the one thing worth getting wrong here
@@ -731,7 +761,7 @@ def hybrid_config(cfg: Config, camera: int, policy: str, real: bool) -> Config:
     """
     return cfg.with_overrides(
         arm={"backend": "feetech" if real else "mock"},
-        camera={"source": "opencv", "index": camera},
+        camera=camera_overrides(camera),
         vision={"detector": "mediapipe"},
         runtime={"policy": policy},
     )
@@ -749,7 +779,7 @@ def cmd_hybrid(args) -> int:
     """
     cfg = hybrid_config(Config.load(args.config), args.camera, args.policy, args.real)
     where = "real arm" if args.real else "simulated arm"
-    print(f"hybrid: real camera {args.camera}, real hand, {where} "
+    print(f"hybrid: real camera {cfg.camera.index}, real hand, {where} "
           f"[policy={args.policy}]")
     if args.real:
         # TrackHandPolicy hovers above the hand rather than reaching for
@@ -793,7 +823,8 @@ def cmd_bench(args) -> int:
         else:
             from tlod.vision.camera import OpenCVCamera
 
-            cam = OpenCVCamera(index=args.camera, width=cfg.camera.width,
+            index = cfg.camera.index if args.camera is None else args.camera
+            cam = OpenCVCamera(index=index, width=cfg.camera.width,
                                height=cfg.camera.height, fps=cfg.camera.fps)
             with cam:
                 time.sleep(1.5)
@@ -826,7 +857,7 @@ def cmd_record(args) -> int:
     from tlod.vision.recording import Recorder
 
     cfg = Config.load(args.config).with_overrides(
-        camera={"source": "opencv", "index": args.camera})
+        camera=camera_overrides(args.camera))
     camera = build_camera(cfg)
     print(f"  recording to {args.output} for {args.duration:.0f}s ...")
     with camera, Recorder(args.output) as rec:
@@ -967,7 +998,7 @@ def cmd_vision_serve(args) -> int:
         # unrendered frames it finds nothing at all.
         cfg = cfg.with_overrides(camera={"source": "mock"}, vision={"detector": "scripted"})
     else:
-        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+        cfg = cfg.with_overrides(camera=camera_overrides(args.camera),
                                  vision={"detector": "mediapipe"})
 
     projector = build_projector(cfg)
@@ -1168,7 +1199,7 @@ def cmd_vision_check(args) -> int:
         # pipeline rather than a misconfigured test.
         cfg = cfg.with_overrides(camera={"source": "mock"}, vision={"detector": "scripted"})
     else:
-        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+        cfg = cfg.with_overrides(camera=camera_overrides(args.camera),
                                  vision={"detector": "mediapipe"})
 
     projector = build_projector(cfg)
@@ -1374,7 +1405,7 @@ def cmd_calibrate(args) -> int:
             f"file in this config. Pass -o with a different path.")
 
     if args.what == "intrinsics":
-        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera})
+        cfg = cfg.with_overrides(camera=camera_overrides(args.camera))
         camera = build_camera(cfg)
         print(f"  hold a {args.pattern} chessboard (inner corners) with "
               f"{args.square*1000:.0f} mm squares in view.")
@@ -1468,7 +1499,7 @@ def cmd_calibrate(args) -> int:
         camera = _MarkerCamera(truth, controller, cfg.camera.width, cfg.camera.height)
         print("  SIMULATED rehearsal: no hardware is moving.")
     else:
-        cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera},
+        cfg = cfg.with_overrides(camera=camera_overrides(args.camera),
                                  arm={"backend": "feetech"})
         camera = build_camera(cfg)
         controller = ArmController(build_arm(cfg), SafetyLimits(), cfg.runtime.control_hz)
@@ -1560,10 +1591,27 @@ def model_fk_tip(controller):
 
 
 def cmd_cameras(args) -> int:
-    from tlod.vision.camera import list_cameras
+    """Which index is the camera, by name where the kernel will say.
 
+    Printing bare indices was not enough on this board. An Orange Pi 5
+    enumerates its Rockchip codecs first -- rkvdec, rkvenc, rga -- so the
+    low indices belong to hardware that is not a camera, and index 0
+    opens far enough to fail with "Not a video capture device". The name
+    is what tells them apart.
+    """
+    from tlod.vision.camera import capture_nodes, list_cameras
+
+    nodes = capture_nodes()
+    if nodes:
+        print("  v4l2 capture nodes:")
+        for i, name in sorted(nodes.items()):
+            print(f"    {i:>3}  {name}")
     found = list_cameras()
-    print(f"  camera indices that open: {found or 'none'}")
+    print(f"  indices that actually open: {found or 'none'}")
+    if not found:
+        print("  (check `lsusb` for the camera; a hub that dropped it looks"
+              " exactly like this)")
+    print("  Indices move across reboots and replugs -- never trust last week's.")
     return 0
 
 
@@ -1763,7 +1811,8 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("hybrid", help="tier B: real camera and hand, simulated arm")
     s.add_argument("--duration", type=float, default=30.0)
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--policy", default="track_hand")
     s.add_argument("--view", action="store_true", help="open a window")
     s.add_argument("--real", action="store_true",
@@ -1779,14 +1828,16 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("bench", help="measure what is currently estimated")
     s.add_argument("what", choices=["ik", "camera", "loop", "all"], default="all", nargs="?")
     s.add_argument("--duration", type=float, default=5.0)
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_bench)
 
     s = sub.add_parser("record", help="capture a camera session to disk")
     s.add_argument("-o", "--output", default="recordings/session")
     s.add_argument("--duration", type=float, default=20.0)
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.set_defaults(func=cmd_record)
 
     s = sub.add_parser("replay", help="re-run a recording through the pipeline")
@@ -1842,7 +1893,8 @@ def main(argv: list[str] | None = None) -> int:
                         "which is the arm's own tracking error rather than a tuning "
                         "knob. The run prints the peak shortfall it saw")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--seed", type=int, default=None)
     s.add_argument("--view", action="store_true")
     s.add_argument("--preview", type=int, default=0, metavar="PORT",
@@ -1886,7 +1938,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--to", default="255.255.255.255", help="control board host(s), comma separated")
     s.add_argument("--port", type=int, default=45800)
     s.add_argument("--clock-port", type=int, default=45801, dest="clock_port")
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--objects", action="store_true", help="also publish table objects")
     s.add_argument("--duration", type=float, default=0.0, help="0 = run until stopped")
     s.add_argument("--sim", action="store_true", help="synthetic camera, for testing the link")
@@ -1937,7 +1990,8 @@ def main(argv: list[str] | None = None) -> int:
                         "Pick one absent from the rest of the frame: the largest "
                         "blob of that colour wins, whatever it belongs to")
     s.add_argument("--duration", type=float, default=20.0)
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--with-arm", action="store_true", dest="with_arm",
                    help="also score accuracy against forward kinematics (moves the arm)")
     s.add_argument("--poses", type=int, default=8)
@@ -1965,7 +2019,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="where to write the result. Defaults to camera.intrinsics "
                         "or camera.extrinsics from the config, whichever this "
                         "subcommand produces")
-    s.add_argument("--camera", type=int, default=0)
+    s.add_argument("--camera", type=int, default=None,
+                   help="v4l2 index; overrides camera.index in the config. `tlod cameras` lists them by name")
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
