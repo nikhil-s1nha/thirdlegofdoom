@@ -407,11 +407,24 @@ class LegLink:
         return self.send("close")
 
     def home(self) -> Ack:
-        """`home`: paddle up to 120. Answers with an empty line."""
+        """`home`: leg to 120, alone. **Bench testing only.**
+
+        Moves servo 1 without touching the door, so it says nothing about
+        whether the hatch is open and can leave the leg somewhere the
+        door does not expect. `open` and `close` are the gesture; this is
+        for checking that servo 1 answers at all.
+        """
         return self.send("home")
 
     def slap(self) -> Ack:
-        """`slap`: paddle down to 40, and it stays there. See `strike`."""
+        """`slap`: leg to 30, alone, and it stays there. **Bench testing only.**
+
+        Not the strike, despite the name. The blow is the leg coming out
+        of the hatch, which is `open` -- this drives servo 1 down with
+        the door in whatever state it was already in, which at best does
+        nothing (`open` leaves the leg at 30 already) and at worst drives
+        it into a shut door.
+        """
         return self.send("slap")
 
     def deploy(self) -> Ack:
@@ -443,22 +456,29 @@ class LegLink:
         return self.close_hand()
 
     def strike(self, dwell: float = 0.25) -> Ack:
-        """Slap, hold, and come back up.
+        """The whole gesture: come out and hit something, then go back in.
 
-        `slap` on its own is half a gesture: the sketch drives servo 1 to
-        40 and leaves it there, so a second `slap` does nothing at all
-        until something has homed it. This is the gesture you want.
+        `open` *is* the strike. It swings the door, waits for it, and
+        drives the leg out and down in one word -- so the leg coming out
+        of the hatch is the blow, not a wind-up before one. `close` puts
+        it away again.
 
-        Returns the slap's `Ack`, not home's -- its `stamp` is the moment
-        the board took the command, which is what a hit test wants to
-        line up against. Which also means `dwell` is the paddle's *own*
-        travel time and nothing else: recalibrate it if the geometry
-        changes, the same way a contact threshold has to be recalibrated
-        whenever the strike does.
+        This used to be `slap` then `home`, which was wrong about what
+        the mechanism does. Those two exist for bench-testing servo 1 on
+        its own and have no place in a gesture: see `slap`.
+
+        Returns `open`'s `Ack`. Its `stamp` is the moment the board took
+        the command, which is what a hit test lines up against -- though
+        note the board answers *after* its own 500 ms door wait, so the
+        stamp trails the door starting to move by about that much.
+
+        `dwell` is how long the leg stays out before withdrawing. It is
+        showmanship rather than travel time: `open` has already finished
+        travelling by the time it acks.
         """
-        ack = self.slap()
+        ack = self.open_hand()
         time.sleep(dwell)
-        self.home()
+        self.close_hand()
         return ack
 
 
