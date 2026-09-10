@@ -66,6 +66,7 @@ def run_intrinsics(
     min_shift: float = 60.0,
     min_area_frac: float = 0.02,
     timeout: float = 180.0,
+    on_frame=None,
     fisheye: bool = False,
     hfov_deg: float = 145.0,
     on_progress=None,
@@ -91,6 +92,8 @@ def run_intrinsics(
 
         corners = find_chessboard(frame.image, pattern)
         if corners is None:
+            if on_frame:
+                on_frame(frame.image, None, "no board", len(kept_images), views)
             continue
         # A board detected but small is worse than one not detected at
         # all. cornerSubPix refines in an 11x11 window, so once corners
@@ -105,12 +108,20 @@ def run_intrinsics(
             too_small += 1
             if too_small % 30 == 1:
                 log.warning("board detected but too small; hold it closer")
+            if on_frame:
+                on_frame(frame.image, corners, "TOO SMALL - hold it closer",
+                         len(kept_images), views)
             continue
         if not _spread_enough(corners, kept_corners, min_shift):
+            if on_frame:
+                on_frame(frame.image, corners, "move it somewhere new",
+                         len(kept_images), views)
             continue
 
         kept_images.append(frame.image.copy())
         kept_corners.append(corners)
+        if on_frame:
+            on_frame(frame.image, corners, "CAPTURED", len(kept_images), views)
         if on_progress:
             on_progress(len(kept_images), views, frame.image, corners)
 

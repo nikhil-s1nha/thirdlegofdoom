@@ -889,6 +889,8 @@ def cmd_calibrate(args) -> int:
     forward kinematics supplying the 3D coordinates. That puts the result
     in exactly the frame the controller commands in.
     """
+    import cv2
+
     from tlod.vision.calibrate_flow import run_extrinsics, run_intrinsics
     from tlod.vision.calibration import Intrinsics
 
@@ -901,14 +903,41 @@ def cmd_calibrate(args) -> int:
         print(f"  hold a {args.pattern} chessboard (inner corners) with "
               f"{args.square*1000:.0f} mm squares in view.")
         print("  move it around: corners, edges, near, far, tilted. Auto-captures.")
+        preview = None
+        if args.preview:
+            from tlod.vision.preview import PreviewServer
+
+            preview = PreviewServer(port=args.preview)
+            preview.start()
+            print(f"  watch it at http://<this board>:{args.preview}/  "
+                  "-- the label says why a view is being skipped")
+
+        def show(image, corners, status, kept, total):
+            """Annotate and offer the frame. Cheap when nobody is watching."""
+            if preview is None:
+                return
+            shown = image.copy()
+            if corners is not None:
+                cv2.drawChessboardCorners(shown, _pattern(args.pattern), corners, True)
+            green = status == "CAPTURED"
+            cv2.putText(shown, f"{kept}/{total}  {status}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 220, 0) if green else (0, 0, 255), 2)
+            preview.offer(shown)
+
         with camera:
             time.sleep(1.0)
-            intr = run_intrinsics(
-                camera, pattern=_pattern(args.pattern), square=args.square,
-                views=args.views, timeout=args.timeout, fisheye=args.fisheye,
-                hfov_deg=cfg.camera.hfov_deg,
-                on_progress=lambda n, total, *_: print(f"    view {n}/{total}", flush=True),
-            )
+            try:
+                intr = run_intrinsics(
+                    camera, pattern=_pattern(args.pattern), square=args.square,
+                    views=args.views, timeout=args.timeout, fisheye=args.fisheye,
+                    hfov_deg=cfg.camera.hfov_deg, on_frame=show,
+                    on_progress=lambda n, total, *_: print(f"    view {n}/{total}",
+                                                           flush=True),
+                )
+            finally:
+                if preview is not None:
+                    preview.stop()
         intr.save(out)
         print(f"\n  {intr.model} model, reprojection RMS {intr.rms:.3f} px  ->  {out}")
         if intr.rms > 1.0:
@@ -1338,6 +1367,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="serve the annotated camera view on this port while "
+                        "capturing, e.g. 8080; for headless boards")
     s.add_argument("--fisheye", action="store_true",
                    help="equidistant fisheye model; needed above ~120 deg, where "
                         "the default pinhole model cannot fit at all")
