@@ -155,11 +155,13 @@ def sample(t0):
 
 try:
     while True:
-        # Two attempts: after a strike the arm starts from the bottom, and
-        # one 1.2 s move does not always finish the climb. An unmatched
-        # start height is the single easiest way to ruin this comparison.
-        for _ in range(2):
-            controller.goto_pose(hover, duration=1.2)
+        # Climb until it actually gets there. Two 1.2 s attempts was not
+        # enough from the bottom of a strike -- a whole session came up
+        # 11-17 mm short on every single run, and the bench dutifully
+        # warned and then measured them anyway. A short hover means a
+        # short drop, which is exactly the variable being controlled for.
+        for attempt in range(5):
+            controller.goto_pose(hover, duration=1.2 if attempt else 1.6)
             time.sleep(0.3)
             if abs(controller.pose().z - hover.z) <= HOVER_TOLERANCE:
                 break
@@ -175,10 +177,22 @@ try:
         bottom = Pose(x, y, commanded_floor(started.z))
         trace = []
         t0 = time.perf_counter()
-        while not motion.step(controller, period):
-            trace.append(sample(t0))
+        while True:
+            row = sample(t0)
+            # Feed the measured height in, exactly as HandSlapGame does.
+            # Without this `Strike` falls back to `controller.settled()`
+            # and the bench measures the *old* descent gate -- which is
+            # the one thing it must not do, because the whole point of
+            # this script is to model what the game will see. It ran that
+            # way for one session and produced a "the game would read"
+            # line describing behaviour that was no longer shipping.
+            motion.observe(row[1])
+            if motion.step(controller, period):
+                break
+            trace.append(row)
             time.sleep(period)
         drop_ms = (time.perf_counter() - t0) * 1000
+        descent_ended = getattr(motion, "ended_because", "")
 
         # The hold. Strike restores the normal torque limit when it
         # finishes, so put it back: the point is to press on whatever is
@@ -219,7 +233,8 @@ try:
         print(f"    travelled  {started.z * 1000:.0f} -> {ended.z * 1000:.0f} mm "
               f"({(started.z - ended.z) * 1000:.0f} mm) in {drop_ms:.0f} ms, "
               f"floor was {bottom.z * 1000:.0f} mm "
-              f"({(ended.z - bottom.z) * 1000:+.0f} mm short)")
+              f"({(ended.z - bottom.z) * 1000:+.0f} mm short)"
+              + (f", descent {descent_ended}" if descent_ended else ""))
         print(f"    peak during swing: load {load_peak:+.3f} at {load_at * 1000:4.0f} ms"
               f" (ceiling {limits.torque_limit / 1000:.3f}), "
               f"current {amp_peak:+.3f} A at {amp_at * 1000:4.0f} ms")
