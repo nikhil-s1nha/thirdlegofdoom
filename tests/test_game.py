@@ -220,8 +220,78 @@ def test_proximity_sensor_labels_itself_distinctly():
     """A proximity result must never be mistaken for a measurement."""
     s = ProximityContactSensor()
     s.arm()
-    e = s.poll(tool_xyz=[0.22, 0, 0.02], hand_xyz=[0.22, 0, 0.03])
+    e = s.poll(tool_xyz=[0.22, 0, 0.02], hand_xyz=[0.22, 0, 0.03], pressing=True)
     assert isinstance(e, ContactEvent) and e.source == "proximity"
+
+
+def test_proximity_does_not_judge_on_the_way_down():
+    """The bug this sensor shipped with, stated as a test.
+
+    Mid-descent the paddle is directly over the hand it was aimed at and
+    the hand estimate is a pipeline latency old, so judging here decides
+    the round ~200 ms before the paddle would land -- before a dodge has
+    even begun. Every committed strike scored as a hit.
+    """
+    s = ProximityContactSensor()
+    s.arm()
+    for _ in range(50):
+        assert s.poll(tool_xyz=[0.22, 0, 0.05], hand_xyz=[0.22, 0, 0.03]) is None
+
+
+def test_proximity_judges_once_the_paddle_is_down():
+    s = ProximityContactSensor()
+    s.arm()
+    assert s.poll(tool_xyz=[0.22, 0, 0.03], hand_xyz=[0.22, 0, 0.03]) is None
+    assert s.poll(tool_xyz=[0.22, 0, 0.03], hand_xyz=[0.22, 0, 0.03],
+                  pressing=True) is not None
+
+
+def test_proximity_keeps_judging_after_the_press_ends():
+    """Arrival latches, because the useful frames arrive after the press.
+
+    `HandSlapGame` freezes the tool at the bottom and keeps polling
+    through the retract so the frames covering the moment of contact get
+    to be part of the verdict. A sensor gated on `pressing` being live
+    would go deaf for exactly that window.
+    """
+    s = ProximityContactSensor()
+    s.arm()
+    assert s.poll(tool_xyz=[0.22, 0, 0.03], hand_xyz=[0.42, 0, 0.03],
+                  pressing=True) is None
+    # Press over, tool frozen at the bottom, and the hand is back in view
+    # where it actually was.
+    assert s.poll(tool_xyz=[0.22, 0, 0.03], hand_xyz=[0.22, 0, 0.03]) is not None
+
+
+def test_proximity_scores_a_dodge_as_a_dodge():
+    """The paddle reached the floor and the hand is elsewhere."""
+    s = ProximityContactSensor()
+    s.arm()
+    for _ in range(20):
+        assert s.poll(tool_xyz=[0.22, 0, 0.005], hand_xyz=[0.34, 0, 0.022],
+                      pressing=True) is None
+    assert "mm to the side" in s.report()
+
+
+def test_proximity_reports_its_numbers_either_way():
+    s = ProximityContactSensor()
+    s.arm()
+    assert "no reading" in s.report()
+    s.poll(tool_xyz=[0.22, 0, 0.005], hand_xyz=[0.34, 0, 0.022], pressing=True)
+    assert "120 mm to the side" in s.report()
+
+
+def test_the_default_strike_leaves_proximity_a_window_to_read_in():
+    """Proximity reads while the arm presses, so the press has to exist.
+
+    Tier B builds `StrikeLimits()` itself and never goes through
+    `cmd_play`'s `_size_hold_to`, so this is the only thing standing
+    between a press_hold of zero and a game that scores every round as a
+    dodge.
+    """
+    from tlod.arm.primitives import StrikeLimits
+
+    assert StrikeLimits().press_hold > 0.0
 
 
 # -- gating ----------------------------------------------------------------

@@ -139,30 +139,43 @@ millimetres?).
 | a second board + wired ethernet | optional; only for the split above |
 
 No sidecar microcontroller: the servos carry torque and overload limits
-themselves, a mechanical switch is a better e-stop than any chip, and
-contact is read from `Present_Load` over the bus already in use -- but
-only in the one regime where that register says anything. Measured
-across nothing / a book / a hand, the peak load *during* a swing read
-0.330 / 0.326 / 0.350: a rigid book landed between the other two,
-because the arm braking its own mass reaches the torque cap in every
-run, empty table included. Held still at the bottom, the same three read
-**0.001 / 0.038 / 0.037**.
+themselves, and a mechanical switch is a better e-stop than any chip.
 
-So `Strike` stays down for `press_hold` (450 ms) at the strike's torque
-limit, and `ServoPressContactSensor` reads only after the servo's load
-filter has decayed -- `--contact press`. `Present_Current` (addr 69) was
-tried alongside and is not usable: it separated the same three
-conditions by 0.006 A, exactly one 6.5 mA quantisation step, and smaller
-than the jitter within a single run.
+**A hit is decided by the encoders, and there is no flag to change
+that.** The strike commands a floor below the hand, so there is a band
+between that floor and the hand's own height: a paddle that ends up
+inside the band was stopped by something, and a paddle that reaches the
+floor was not. Both positions come off the encoders, so neither is late,
+neither is filtered, and neither costs a bus transaction the control loop
+was not already making. It is right the moment the arm stops, and reads
+120 ms after the press begins.
 
-**`--contact height` is the recommended one.** During that same hold the
-encoders answer the question directly. The strike commands a floor below
-the hand, so there is a band between that floor and the hand's own
-height: a paddle that ends up inside the band was stopped by something,
-and a paddle that reaches the floor was not. Both positions come from
-encoders, so neither is late and neither is filtered.
+Torque was tried first and lost, three times, and the numbers are worth
+keeping because they are what stops it being tried a fourth. Measured
+across nothing / a book / a hand:
 
-It reports its own numbers every round, whichever way the round went:
+| signal | nothing | a book | a hand | verdict |
+|---|---|---|---|---|
+| `Present_Load`, peak during the swing | 0.330 | 0.326 | 0.350 | a rigid book lands *between* the other two |
+| `Present_Load`, held still at the bottom | 0.001 | 0.038 | 0.037 | separates, but needs ~300 ms of stall |
+| `Present_Current` (addr 69), held | — | — | — | 0.006 A apart: one 6.5 mA quantisation step |
+
+The first fails because the arm braking its own mass reaches the torque
+cap in every run, empty table included -- the whole swing is one
+transient and nothing measured during it is about what was hit. The
+second works, and is the expensive one: ~300 ms of six servos stalled at
+their torque limit, every strike, and sustained stall current is what a
+5 A supply has least of. `press_hold` went to 450 ms one afternoon and
+the bus started dropping transactions the same afternoon. The third is
+smaller than the jitter within a single run.
+
+`ServoLoadContactSensor`, `ServoPressContactSensor` and
+`SerialContactSensor` are still in `game/contact.py`, each carrying the
+measurement above in its docstring. Nothing constructs them and the CLI
+cannot reach them.
+
+The encoder sensor reports its own numbers every round, whichever way
+the round went:
 
 ```
 dodged (robot 1 - 4 human)
@@ -175,12 +188,14 @@ too long or `press_depth` is too deep. A floor at or above the hand means
 `press_depth` is too shallow, or `safety.min_height` clamped it back up.
 A verdict on its own distinguishes none of these.
 
-Both need the floor to be *below* the hand, which is what
-`StrikeLimits.press_depth` is for, and both need to know where the table
+It needs the floor to be *below* the hand, which is what
+`StrikeLimits.press_depth` is for, and it needs to know where the table
 is. Driven to the joint angles at which the gripper rests on it, FK
 reports the tool at **+0.2 mm** -- the riser is absorbed into the
 calibration, so model z is height above the work surface directly, and
-`safety.min_height` is that height in the same units.
+`safety.min_height` is that height in the same units. Get either wrong
+and the band closes: that is the one failure mode this sensor has, and
+the line above is how you see it.
 
 The adapter's 5 V buck is specified for a Raspberry Pi, so it can power a
 control board in the two-board layout. An Orange Pi 5 can draw up to 4 A

@@ -390,15 +390,29 @@ def cmd_play(args) -> int:
     Three tiers, and the contact sensor is what separates them. Whether
     the slap landed is the question a camera cannot answer -- at the
     moment of contact the arm is between an overhead camera and the
-    contact point -- so each tier answers it with the best instrument it
-    has: ground truth in simulation, tracked hand position in tier B, and
-    on hardware the servos' own torque feedback. See game/contact.py.
+    contact point -- so each tier answers it with the instrument it
+    actually has:
+
+      tier A  `tlod play`              ground truth; the hand is simulated
+      tier B  `tlod play --real-hand`  geometry; the arm is simulated, so
+                                       the paddle passes through a hand
+                                       rather than being stopped by one
+                                       and there is nothing else to read
+      tier C  `tlod play --real`       the encoders, and only the encoders
+
+    Tier C takes no sensor argument. The strike commands a floor below
+    the hand, so a paddle that stopped short of it was blocked and one
+    that reached it was not, and both heights come off the encoders --
+    not late, not filtered, not through the bus that the swing is already
+    saturating. The torque-based alternatives are still in
+    game/contact.py with their measurements; nothing constructs them.
     """
+    # ServoLoadContactSensor, ServoPressContactSensor and
+    # SerialContactSensor are deliberately absent: see game/contact.py for
+    # what they measured and why the encoders won.
     from tlod.game.contact import (
         GeometricContactSensor,
         ProximityContactSensor,
-        ServoLoadContactSensor,
-        ServoPressContactSensor,
         CollisionPlaneContactSensor,
     )
     from tlod.game.handslap import HandSlapGame, Personality
@@ -417,84 +431,41 @@ def cmd_play(args) -> int:
                 "  Run `tlod calibrate extrinsics` first.")
 
         # The controller has to exist before the game does. The contact
-        # sensor reads the servos through it, and HandSlapGame takes its
-        # sensor at construction -- so this is app first, game second,
-        # the opposite order from the branches below.
+        # sensor reads the commanded floor through it, and HandSlapGame
+        # takes its sensor at construction -- so this is app first, game
+        # second, the opposite order from the branches below.
         app = build_app(cfg)
-        # Which sensor answers "did that land".
-        #
-        # Servo load is the one the design argued for, on the grounds
-        # that a camera cannot see the moment of contact: the arm is
-        # between the lens and the hand, and 33 ms frames are coarse
-        # against an event lasting milliseconds. Both points are true and
-        # neither is the problem. The problem is that the joints cannot
-        # tell the torque of meeting a hand from the torque of moving the
-        # arm. Measured on this rig: the launch clears any workable
-        # threshold in the first tick, and once that is blanked the brake
-        # clears it again at 160 ms -- 0.12 of rise, on all three pitch
-        # joints, at the same instant every strike, with nothing under
-        # the paddle. It is detecting itself.
-        #
-        # Proximity sidesteps the occlusion objection entirely, because
-        # it never looks at the contact: it compares where the tracker
-        # last saw the hand against where the arm's own encoders say the
-        # tool is. Vision measures 2.5 mm on this rig and the hand jitters
-        # 2.4-5 mm, against a 60 mm radius -- so its docstring's "several
-        # centimetres of uncertainty" is pessimism from before anything
-        # was measured.
-        #
-        # What it genuinely cannot do is see a dodge inside the last
-        # ~100 ms, because that is how stale the hand estimate is. A hand
-        # pulled at the last instant scores as a hit it did not take.
         # One object, built here and handed to the game below. It was
-        # built twice -- once in the sensor branches to check press_hold
-        # against the sensor, once for HandSlapGame -- so the check was
-        # reading a throwaway and could never have changed what ran.
+        # built twice -- once to check press_hold against the sensor,
+        # once for HandSlapGame -- so the check was reading a throwaway
+        # and could never have changed what ran.
         limits = build_strike_limits(cfg)
 
-        if args.contact == "height":
-            from tlod.arm import model
+        # There is one sensor and no way to ask for another. The
+        # alternatives all read torque, and what they measured is in
+        # game/contact.py; the short version is that the arm braking its
+        # own mass reaches the torque cap with an empty table under it,
+        # and reading it held still instead costs 300 ms of stall current
+        # per strike on a supply that cannot spare it. The encoders
+        # already know where the paddle was sent and where it got to.
+        from tlod.arm import model
 
+        def _floor():
+            """Where the paddle was sent, metres. No bus traffic.
 
-            def _floor():
-                """Where the paddle was sent, metres. No bus traffic.
+            `commanded` is cached in the controller, and where the paddle
+            actually got to arrives on the poll's `tool_xyz`, which the
+            game has already read this tick.
+            """
+            return float(model.tool_pose(app.controller.commanded[:5]).z)
 
-                `commanded` is cached in the controller, and where the
-                paddle actually got to arrives on the poll's `tool_xyz`,
-                which the game has already read this tick.
-                """
-                return float(model.tool_pose(app.controller.commanded[:5]).z)
-
-            contact = CollisionPlaneContactSensor(
-                _floor,
-                **({} if args.contact_threshold is None
-                   else {"margin": args.contact_threshold}))
-            source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
-                      f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
-            _size_hold_to(limits, contact)
-        elif args.contact == "press":
-            # Left unset, each sensor keeps its own measured default: 0.02
-            # for press, which reads a settled arm, and 0.12 for servo,
-            # which reads one mid-swing. One flag cannot carry a sensible
-            # default for both, so it carries neither.
-            contact = ServoPressContactSensor(
-                app.controller.state,
-                **({} if args.contact_threshold is None
-                   else {"threshold": args.contact_threshold}))
-            source = (f"servo press, threshold {contact.threshold:.3f} of rated "
-                      f"torque after {contact.settle * 1000:.0f} ms still")
-            _size_hold_to(limits, contact)
-        elif args.contact == "servo":
-            contact = ServoLoadContactSensor(
-                app.controller.state,
-                **({} if args.contact_threshold is None
-                   else {"threshold": args.contact_threshold}))
-            source = (f"servo load, threshold {contact.threshold:.2f} "
-                      "of rated torque")
-        else:
-            contact = ProximityContactSensor()
-            source = (f"proximity, {contact.radius*1000:.0f} mm across and "
-                      f"{contact.plane_tolerance*1000:.0f} mm deep")
+        contact = CollisionPlaneContactSensor(
+            _floor,
+            **({} if args.contact_threshold is None
+               else {"margin": args.contact_threshold}))
+        source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
+                  f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
+        _size_hold_to(limits, contact)
         game = HandSlapGame(args.difficulty, limits=limits,
                             personality=Personality(enabled=not args.deadpan),
                             contact=contact, seed=args.seed)
@@ -543,31 +514,22 @@ def cmd_play(args) -> int:
     if game.score.rounds:
         print(f"  robot win rate: {game.score.robot/game.score.rounds:.0%}  "
               f"({game.strikes} strikes, {game.feints} feints)")
-    if contact is not None and hasattr(contact, "peak_rise"):
-        # The number to read after a hardware session, and it means
-        # different things for the two sensors. For press it is the
-        # largest *settled* rise -- measured 0.001 over nothing and
-        # 0.037 over a hand, so a peak near 0.001 across a session with
-        # strikes means the paddle kept missing. For servo it is a peak
-        # taken mid-swing, where the arm's own braking reached the torque
-        # cap in every measured run including the empty one, so a high
-        # peak there says very little.
-        # Each sensor's peak means something different and carries
-        # different units -- a fraction of rated torque for the two load
-        # sensors, millimetres for the collision plane. Printing one as
-        # the other turned an 8 mm shortfall into "peak load rise 0.008",
-        # which reads as a sensor that saw nothing.
-        summary = getattr(contact, "peak_summary", None)
-        print(f"\n  contact: " + (
-            summary() if callable(summary)
-            else f"peak load rise {contact.peak_rise:.3f} "
-                 f"(threshold {contact.threshold:.3f})"))
+    if contact is not None:
+        # The number to read after a hardware session: the largest
+        # shortfall any round produced, in millimetres. Peak near zero
+        # across a session with strikes in it means the paddle reached
+        # its floor every time -- either nothing was ever under it, or
+        # the floor is not actually below the hand.
+        print("\n  contact: " + contact.peak_summary())
         if contact.read_failures:
-            print(f"  {contact.read_failures} servo reads failed during strikes "
+            print(f"  {contact.read_failures} floor reads failed during strikes "
                   f"(scored as dodges rather than e-stopping mid-swing)")
-        if game.strikes and contact.peak_rise < contact.threshold:
-            print("  nothing ever crossed the threshold. Either nothing was hit, or")
-            print(f"  --contact-threshold is too high; try just under {contact.peak_rise:.3f}.")
+        if game.strikes and contact.peak_rise < contact.margin:
+            print("  no round ever stopped short. Either nothing was hit, or the")
+            print("  floor is at or above the hand -- check the per-round line for")
+            print("  a floor and a hand at the same height, and see press_depth and")
+            print(f"  safety.min_height. If it is genuinely close, "
+                  f"--contact-threshold {contact.peak_rise:.4f} is just under it.")
     return 0
 
 
@@ -1860,25 +1822,25 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--real", action="store_true",
                    help="tier C: real camera, real hand AND the real arm, on this "
                         "machine. The arm will strike at your hand")
-    s.add_argument("--contact", default="proximity",
-                   choices=("proximity", "height", "servo", "press"),
-                   help="how a hit is decided. height asks whether the paddle "
-                        "reached the floor it was sent to -- if a hand stopped it "
-                        "short, that shortfall is the hand's thickness, and it is "
-                        "the recommended one on hardware; press instead reads what "
-                        "torque the arm is still spending while held down (0.001 "
-                        "over nothing against 0.037 over a hand), which works but "
-                        "needs twice the settling time; proximity compares the "
-                        "tracked hand against the arm's encoders and cannot see a "
-                        "dodge inside the last ~100 ms; servo watches load during "
-                        "the swing, which measured a rigid book *between* nothing "
-                        "and a hand and is kept only so that stays reproducible")
+    # There is no --contact any more. It offered four ways to judge a
+    # round and three of them were worse in ways that had already been
+    # measured: `servo` reads load during the swing, where a rigid book
+    # scored *between* nothing and a hand; `press` reads it held still,
+    # which separates 0.001 from 0.037 but only after twice the settling
+    # time, at the servos' torque limit, on a 5 A supply that already
+    # drops bus transactions under sustained stall; `proximity` asks a
+    # camera about the one moment the arm is between it and the hand. A
+    # flag whose other settings are all known-worse is not a choice, it
+    # is a way to run the wrong one by accident -- which is exactly what
+    # its `proximity` default did for several commits after `height`
+    # landed. The encoders answer it directly, so they answer it.
     s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
-                   help="--real only: rise in servo load, as a fraction of rated "
-                        "torque, that counts as a hit. Left unset, each sensor uses "
-                        "its own measured default -- 0.02 for press, 0.12 for "
-                        "servo. The run prints the peak it saw")
+                   help="--real only: how far above the commanded floor the paddle "
+                        "must have stopped, in metres, to count as blocked by a "
+                        "hand. Left unset it uses the measured default of 0.004, "
+                        "which is the arm's own tracking error rather than a tuning "
+                        "knob. The run prints the peak shortfall it saw")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--seed", type=int, default=None)

@@ -7,27 +7,56 @@ that needs to be seen. And at 30 fps a frame is 33 ms, on an event that
 decides the round and lasts a few milliseconds. Vision is the wrong
 instrument.
 
-So contact detection is an interface with three implementations:
+So contact detection is an interface. Three implementations are wired
+up, one per tier:
 
-  GeometricContactSensor   simulation. Uses ground truth, because in
-                           simulation ground truth exists and pretending
-                           otherwise would only be theatre.
-  ProximityContactSensor   tier B, real hand and simulated arm. Infers
-                           contact from tracked hand position versus the
-                           virtual tool. Honest about being an estimate.
-  ServoLoadContactSensor   hardware, no extra parts. Every STS3215
-                           reports Present_Load, and the driver already
-                           fetches those bytes in the same sync-read as
-                           position -- so contact detection costs nothing
-                           and needs no sidecar board.
+  GeometricContactSensor        tier A. Uses ground truth, because in
+                                simulation ground truth exists and
+                                pretending otherwise would only be
+                                theatre.
+  ProximityContactSensor        tier B, real hand and simulated arm.
+                                Infers contact from tracked hand position
+                                versus the virtual tool, because a
+                                simulated arm is never blocked by
+                                anything and there is nothing else to
+                                read. Honest about being an estimate.
+  CollisionPlaneContactSensor   tier C, the real arm. The strike commands
+                                a floor below the hand; a paddle that
+                                stopped short of it was blocked, one that
+                                reached it was not. Encoders at both
+                                ends.
 
 The first two exist so the game is fully playable before hardware does.
-The third is what runs on the real arm.
+The third is what runs on the real arm, and `tlod play --real` offers no
+way to select anything else.
 
-A piezo disc on a microcontroller would time an impact more precisely
-(microseconds, versus one control tick here). It is not worth a whole
-extra board: at 100 Hz the load spike lands within 10 ms, and a slap is
-scored per round, not per millisecond.
+    !! NOTHING BELOW THIS POINT IS CONSTRUCTED ANYWHERE !!
+
+`ServoLoadContactSensor`, `ServoPressContactSensor` and
+`SerialContactSensor` are kept for their measurements, not for their
+behaviour. Each one's docstring records what it read on this rig, and
+between them they are the argument for the sensor that replaced them --
+delete them and the next person re-runs the same three experiments. They
+are not reachable from the CLI. Do not wire one back in without a number
+that beats the encoders.
+
+The short version of why torque lost. Measured across nothing / a book /
+a hand, peak load *during* the swing read 0.330 / 0.326 / 0.350: a rigid
+book, the easiest thing there is to feel, landed *between* the other two,
+because the arm braking its own mass reaches the torque cap in every run,
+empty table included. Held still at the bottom the same three read 0.001
+/ 0.038 / 0.037 -- which does separate them, but only after ~300 ms of
+the servos stalled at their torque limit, and sustained stall current is
+what a 5 A supply and six servos have least of. `Present_Current` (addr
+69) separated the same three conditions by 0.006 A, one 6.5 mA
+quantisation step, smaller than the jitter within a single run. A piezo
+disc on a microcontroller would time an impact to microseconds, and is a
+whole extra board for a game scored per round rather than per
+millisecond.
+
+The encoders answer the same question in 120 ms, with no bus traffic the
+control loop was not already doing, and are right the moment the arm
+stops.
 """
 
 from __future__ import annotations
@@ -99,16 +128,85 @@ class ProximityContactSensor(GeometricContactSensor):
     """Tier B: same test, but the hand position is an estimate, not truth.
 
     Kept as a distinct class so that a result obtained this way is never
-    mistaken for a measurement. The tracked hand carries several
-    centimetres of uncertainty, so near-misses will be scored wrongly in
-    both directions.
+    mistaken for a measurement, and near-misses will be scored wrongly in
+    both directions. Not by as much as this used to claim, though: the
+    "several centimetres of uncertainty" here was pessimism from before
+    anything was measured, and vision resolves 2.5 mm on this rig against
+    a hand that jitters 2.4-5 mm. What the estimate is really short of is
+    not precision but *currency*, which is the whole of what follows.
+
+    The geometry is the same as `GeometricContactSensor`'s and it is the
+    right geometry here: in tier B the arm is simulated, so the paddle
+    passes *through* a hand rather than being stopped by it, and the only
+    question the encoders can answer is whether the hand was inside the
+    band the paddle swept. What is not the same is *when* it is allowed
+    to ask.
+
+    Asking on every tick of the descent is what made this sensor score
+    every committed strike as a hit, and it is worth spelling out because
+    the failure looks like a threshold problem and is not one. The strike
+    is aimed where the hand was at the moment of commit, so `horizontal`
+    starts at ~0 and the test turns entirely on `vertical`. That enters
+    the +/-`plane_tolerance` band a third of the way down -- ~105 ms into
+    a ~310 ms strike -- and the hand estimate being compared is itself a
+    pipeline latency old, so the round was decided on where the hand had
+    been ~200 ms before the paddle would actually land. A human's dodge
+    starts at ~65 ms and takes another ~150 ms to clear. None of it was
+    ever in the data.
+
+    So the reading is gated on the paddle having *arrived*, the same way
+    `ServoPressContactSensor` gates on `pressing`, and for the same
+    reason: the motion knows what phase it is in and nothing else does.
+    Arrival is a latch rather than a live flag, because the useful reads
+    keep coming after the press ends -- `HandSlapGame` freezes the tool
+    at the bottom and keeps polling through the retract, which is how the
+    frames covering the moment of contact get to be part of the verdict
+    instead of arriving after it.
+
+    Without a `pressing` kwarg this sensor never fires, so a caller that
+    forgets it scores every round as a dodge rather than inventing hits.
+    `StrikeLimits.press_hold` must be non-zero, or the strike never
+    presses and nothing ever arrives; `cmd_play` sizes it.
     """
 
     def __init__(self, radius: float = 0.06, plane_tolerance: float = 0.035) -> None:
         super().__init__(radius, plane_tolerance)
+        self._arrived = False
+        # What the last judged round looked like, for `report()`. Same
+        # reason CollisionPlaneContactSensor keeps one: a verdict on its
+        # own cannot distinguish "the hand moved" from "the hand estimate
+        # moved", and those have different fixes.
+        self.last: tuple[float, float] | None = None   # horizontal, vertical
 
-    def poll(self, **kwargs) -> ContactEvent | None:
-        event = super().poll(**kwargs)
+    def arm(self, blank_for: float | None = None) -> None:
+        # `blank_for` is accepted and ignored -- arrival replaces it. A
+        # blanking window is a guess at how long the launch takes; this
+        # is the motion saying it has stopped travelling.
+        super().arm()
+        self._arrived = False
+        self.last = None
+
+    def report(self) -> str:
+        """What the last judged round looked like, in millimetres."""
+        if self.last is None:
+            return "no reading (the paddle never reached the bottom)"
+        horizontal, vertical = self.last
+        return (f"tracked hand {horizontal * 1e3:.0f} mm to the side and "
+                f"{-vertical * 1e3:+.0f} mm above the paddle "
+                f"(needs {self.radius * 1e3:.0f} across, "
+                f"{self.plane_tolerance * 1e3:.0f} deep)")
+
+    def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
+             **kwargs) -> ContactEvent | None:
+        self._arrived = self._arrived or bool(pressing)
+        if not self._arrived:
+            return None
+        if not self._fired and tool_xyz is not None and hand_xyz is not None:
+            tool = np.asarray(tool_xyz, float)
+            hand = np.asarray(hand_xyz, float)
+            self.last = (float(np.linalg.norm(tool[:2] - hand[:2])),
+                         float(tool[2] - hand[2]))
+        event = super().poll(tool_xyz=tool_xyz, hand_xyz=hand_xyz, **kwargs)
         if event is not None:
             event = ContactEvent(event.stamp, "proximity", event.strength)
         return event
@@ -116,6 +214,11 @@ class ProximityContactSensor(GeometricContactSensor):
 
 class ServoLoadContactSensor(ContactSensor):
     """Detect contact from the servos' own torque feedback.
+
+    UNUSED. Kept for the measurement, not the behaviour: across nothing /
+    a book / a hand the peak load during a swing read 0.330 / 0.326 /
+    0.350, putting a rigid book *between* the other two. That number is
+    the reason nothing reads torque mid-swing any more.
 
     When the paddle meets a hand, the joints resisting the motion see
     their load rise sharply. The STS3215 reports this on Present_Load,
@@ -363,6 +466,14 @@ ToolHeightContactSensor = CollisionPlaneContactSensor
 class ServoPressContactSensor(ContactSensor):
     """Detect contact from what the arm is still pushing against once it stops.
 
+    UNUSED. It works -- 0.001 / 0.038 / 0.037 held still is a real
+    separation, and this docstring is the record of how that was found --
+    but it costs ~300 ms of six servos stalled at their torque limit
+    every single strike, and sustained stall current is what a 5 A supply
+    has least of; the bus started dropping transactions the afternoon
+    press_hold went to 450 ms. `CollisionPlaneContactSensor` answers the
+    same question from the encoders in 120 ms with no extra bus traffic.
+
     This is the sensor that works on this arm, and it exists because the
     obvious one does not. `ServoLoadContactSensor` reads the same register
     during the swing, and measured across nothing / a book / a hand it
@@ -487,15 +598,16 @@ class ServoPressContactSensor(ContactSensor):
 class SerialContactSensor(ContactSensor):
     """Piezo impact detector on a microcontroller.
 
+    UNUSED, and never verified against hardware.
+
     Expects newline-delimited `HIT <microseconds> <amplitude>` from the
     board. Read on a background thread because the game loop must never
     block on a serial read.
 
-    Kept for anyone who does add a sidecar, but it is no longer the
-    recommended path -- ServoLoadContactSensor gets the same answer with
-    no extra hardware.
-
-      !! UNVERIFIED AGAINST HARDWARE !!
+    Kept for anyone who does add a sidecar. It was never the recommended
+    path -- this used to say ServoLoadContactSensor got the same answer
+    with no extra hardware, which turned out to be wrong about
+    ServoLoadContactSensor rather than about the piezo.
     """
 
     def __init__(self, port: str, baudrate: int = 115200, threshold: float = 0.0) -> None:

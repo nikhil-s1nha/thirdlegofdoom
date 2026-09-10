@@ -167,7 +167,7 @@ src/tlod/
   game/
     handslap.py     commit timing, feints, scoring
     opponent.py     a simulated human, so you can test without one
-    contact.py      did it land? geometric / proximity / servo load
+    contact.py      did it land? encoders on hardware, geometry in sim
     touch.py        visit each detected object. Good calibration check.
     base.py         state machine that is also a Policy
 
