@@ -939,7 +939,13 @@ def cmd_calibrate(args) -> int:
                 if preview is not None:
                     preview.stop()
         intr.save(out)
+        import math
+
+        w, _ = intr.resolution
+        hfov = math.degrees(2 * math.atan(w / (2 * intr.K[0, 0])))
         print(f"\n  {intr.model} model, reprojection RMS {intr.rms:.3f} px  ->  {out}")
+        print(f"  measured horizontal field of view {hfov:.0f} deg "
+              f"(config says {cfg.camera.hfov_deg:.0f})")
         if intr.rms > 1.0:
             print("  WARNING: above 1 px is poor. Reshoot with more varied views,")
             print("  better light, and the board fully flat.")
