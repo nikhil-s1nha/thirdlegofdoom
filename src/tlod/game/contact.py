@@ -375,7 +375,7 @@ class CollisionPlaneContactSensor(ContactSensor):
         self,
         floor_source,
         margin: float = 0.004,
-        settle: float = 0.03,
+        settle: float = 0.12,
         band_fraction: float = 0.5,
     ) -> None:
         # () -> commanded floor height, metres. Where the paddle actually
@@ -416,26 +416,7 @@ class CollisionPlaneContactSensor(ContactSensor):
         # a stable reference rather than a noisy one. Without it this
         # falls back to `margin` alone.
         self.band_fraction = band_fraction
-        # How long into the press to wait before the first reading counts.
-        #
-        # This was 120 ms, and it was a guess at a question that is now
-        # measured. Back when `pressing` began while the paddle was still
-        # travelling -- `Strike` ended its descent on the *commanded*
-        # setpoint going quiet, which is true 16 mm and 0.18 m/s from the
-        # floor -- an immediate reading was a reading of a moving arm, so
-        # the sensor waited and hoped the arm would have arrived by then.
-        #
-        # `Strike` now waits for the arm itself, so by the time `pressing`
-        # is true the paddle has already stopped. Waiting again measures
-        # the same stationary arm 120 ms later. What is left is one tick
-        # of slack for bus jitter, and the encoders need nothing else:
-        # unlike the torque sensors this replaced, there is no filter to
-        # decay -- an encoder is right the moment the arm stops.
-        #
-        # `StrikeLimits.press_hold` is sized from this, so shortening it
-        # takes 90 ms of stalled servos out of every strike. That is the
-        # cost that matters here: stall current is what a 5 A supply and
-        # six servos have least of.
+        # Long enough for an unobstructed press to have arrived.
         self.settle = settle
         self._pressing_since: float | None = None
         self._fired = False
