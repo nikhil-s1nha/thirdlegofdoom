@@ -286,6 +286,14 @@ try:
                     stop_at = t
                     break
             hold_t0 = hold[0][0]
+            # The number `arm.strike_sag` wants, when this run is over an
+            # empty table: how far under its commanded floor an
+            # unobstructed strike actually stops. Printed because it is
+            # what the contact sensor measures against, and guessing it
+            # is what made every round read as a dodge.
+            if final < bottom.z:
+                print(f"    -> arm.strike_sag: {(bottom.z - final):.4f}  "
+                      f"(if nothing was under the paddle)")
             print(f"    settled at {final * 1000:.0f} mm, "
                   f"{(stop_at - hold_t0) * 1000:.0f} ms into the hold "
                   f"({(final - bottom.z) * 1000:+.0f} mm short of the floor)")

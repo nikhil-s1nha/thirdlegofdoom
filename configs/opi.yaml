@@ -51,6 +51,35 @@ arm:
   #
   #     python3 scripts/strike_bench.py 0.36 0.165 --torque 300
   #     python3 scripts/strike_bench.py 0.36 0.165 --torque 250
+  # How far below its commanded floor an unobstructed strike actually
+  # stops, metres. 10 mm, and it is the number that decides hit from
+  # dodge on this rig.
+  #
+  # A strike is ballistic on purpose -- `goto_pose` re-aims at what the
+  # encoders report and `Strike` deliberately does not, since a second
+  # pass is a second, slower descent -- so it carries the arm's full
+  # static sag with nothing correcting it. Measured on the bench at
+  # 0.36/0.165 against a commanded floor of 20 mm, nothing under the
+  # paddle: it settled at 11, 8, 9 and 9 mm and held there for 300 ms.
+  # A hand in the same geometry settles at 13-16.
+  #
+  # 9.5 mm rather than the measured ~10.8 because it is placed to centre
+  # the threshold between the two clusters, not at the mean of one: it
+  # puts the resting reference at 10.5 mm, so an empty strike reads
+  # -2.5..+0.5 and a blocked one +2.5..+5.5 against a 1.5 mm threshold --
+  # a millimetre of room on each side. Past about 10.5 the empty cluster
+  # starts scoring hits.
+  #
+  # So both clusters sit ~10 mm *under* the floor, 2-5 mm apart, and a
+  # threshold placed just above the floor is above both -- which is
+  # precisely a session of "it hit me and the log said dodged".
+  #
+  # Re-measure over an empty table after anything that changes the
+  # strike: reach, press_depth, strike_torque, the payload. This is the
+  # `band_fraction` rule from docs/hit-detection.md in another form, and
+  # the reason it kept biting is that the reference was never measured
+  # at all.
+  strike_sag: 0.0095
   strike_torque: 350
   # 8 mm, and shallower is the direction that works -- the opposite of
   # what "press deeper so the hand is definitely in the way" suggests,

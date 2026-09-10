@@ -283,28 +283,6 @@ class ServoLoadContactSensor(ContactSensor):
         # Diagnostics, for tuning the threshold on the first real session.
         self.peak_rise = 0.0
         self.read_failures = 0
-        # What the last judged round read, for `report()`. The geometric
-        # sensor has carried one since it landed and this did not, so
-        # selecting `--contact press` silently gave up the per-round line
-        # -- and then crashed at the end of the run reaching for a
-        # summary that was never written. Both are the same omission.
-        self.last: float | None = None
-
-    def hold_needed(self) -> float:
-        """How long the paddle must stay down for this to get a reading.
-
-        `settle` is only the minimum now, so a caller sizing `press_hold`
-        from it alone retracts the arm out from under a round that was
-        still waiting for the paddle to stop.
-        """
-        return self.settle + self.max_wait
-
-    def _still(self) -> bool:
-        """Has the paddle stopped moving, as far as the encoders can tell?"""
-        if len(self._recent) < self.still_ticks:
-            return False
-        window = self._recent[-self.still_ticks:]
-        return (max(window) - min(window)) <= self.still_epsilon
 
     def peak_summary(self) -> str:
         """End-of-run line. A fraction of rated torque, not a height."""
@@ -416,6 +394,7 @@ class CollisionPlaneContactSensor(ContactSensor):
         still_epsilon: float = 0.0006,
         still_ticks: int = 4,
         max_wait: float = 0.15,
+        floor_sag: float = 0.0,
     ) -> None:
         # () -> commanded floor height, metres. Where the paddle actually
         # reached comes in on `tool_xyz`, which the caller has already read
@@ -519,6 +498,38 @@ class CollisionPlaneContactSensor(ContactSensor):
         self.max_wait = max_wait
         self._recent: list[float] = []
         self._judged_moving = False
+        # How far *below* its commanded floor an unobstructed strike
+        # actually comes to rest, metres. Subtracted from the floor to
+        # get the height this sensor measures against.
+        #
+        # This is the difference between a working sensor and one that
+        # scores every round a dodge, and it is not a fudge factor -- the
+        # commanded floor is simply not a place the paddle ever goes. A
+        # strike is ballistic on purpose: `goto_pose` re-aims at what the
+        # encoders report and `Strike` deliberately does not, because a
+        # second pass is a second, slower descent. So the strike carries
+        # the arm's full static sag, uncorrected, and it is large.
+        # Measured on the bench at 0.36/0.165 with nothing under the
+        # paddle, commanded floor 20 mm:
+        #
+        #     settled at 11, 8, 9, 9 mm     -- 9-12 mm below the command,
+        #                                      held steady 300+ ms
+        #
+        # against a hand in the same geometry settling at 13-16 mm. The
+        # signal is a real 2-5 mm and both clusters sit ~10 mm under the
+        # floor, so a threshold placed just above the floor is above
+        # *both* of them and everything reads as a dodge. Which is
+        # exactly what a whole session of "it hit me and said dodged"
+        # looked like.
+        #
+        # It has to be measured, not modelled: it is the same
+        # unobservable droop `ArmController.compensate` handles for
+        # Cartesian targets, but that model was fitted at hover height
+        # and the arm is in a very different pose at the floor.
+        # `strike_bench` over an empty table prints the number to put in
+        # `arm.strike_sag`. Re-measure it after anything that changes the
+        # strike -- see the rule at the top of docs/hit-detection.md.
+        self.floor_sag = floor_sag
         self._pressing_since: float | None = None
         self._fired = False
         self.last: tuple[float, float, float] | None = None   # reached, floor, hand
@@ -587,6 +598,14 @@ class CollisionPlaneContactSensor(ContactSensor):
         self._recent = []
         self._judged_moving = False
 
+    def settled_floor(self, floor: float) -> float:
+        """Where an unobstructed strike from `floor` actually ends up.
+
+        The commanded floor less the measured sag. This, not the
+        commanded floor, is what "stopped short" is short *of*.
+        """
+        return floor - self.floor_sag
+
     def hold_needed(self) -> float:
         """How long the paddle must stay down for this to get a reading.
 
@@ -619,9 +638,13 @@ class CollisionPlaneContactSensor(ContactSensor):
         if self.last is None:
             return "no reading (the paddle never settled at the bottom)"
         reached, floor, hand = self.last
-        short = reached - floor
+        rest = self.settled_floor(floor)
+        short = reached - rest
         need = self._threshold(floor, hand)
-        line = (f"paddle stopped {reached * 1e3:.0f} mm, floor {floor * 1e3:.0f} mm, "
+        floors = (f"floor {floor * 1e3:.0f} mm"
+                  if not self.floor_sag
+                  else f"floor {floor * 1e3:.0f} mm (rests {rest * 1e3:.0f})")
+        line = (f"paddle stopped {reached * 1e3:.0f} mm, {floors}, "
                 f"hand {hand * 1e3:.0f} mm -> {short * 1e3:+.0f} mm short "
                 f"(needs {need * 1e3:.0f})")
         # The half of the round the heights cannot show. Without this a
@@ -713,7 +736,9 @@ class CollisionPlaneContactSensor(ContactSensor):
         self.last_lateral = lateral
         self.last_aim = aim
         self.last_hand_moved = moved
-        short = float(reached) - float(floor)
+        # Against where an unobstructed strike actually rests, not
+        # against the commanded floor it never reaches. See `floor_sag`.
+        short = float(reached) - self.settled_floor(float(floor))
         self.peak_rise = max(self.peak_rise, short)
         if was_miss:
             self.misses += 1
@@ -821,22 +846,6 @@ class ServoPressContactSensor(ContactSensor):
         # -- and then crashed at the end of the run reaching for a
         # summary that was never written. Both are the same omission.
         self.last: float | None = None
-
-    def hold_needed(self) -> float:
-        """How long the paddle must stay down for this to get a reading.
-
-        `settle` is only the minimum now, so a caller sizing `press_hold`
-        from it alone retracts the arm out from under a round that was
-        still waiting for the paddle to stop.
-        """
-        return self.settle + self.max_wait
-
-    def _still(self) -> bool:
-        """Has the paddle stopped moving, as far as the encoders can tell?"""
-        if len(self._recent) < self.still_ticks:
-            return False
-        window = self._recent[-self.still_ticks:]
-        return (max(window) - min(window)) <= self.still_epsilon
 
     def peak_summary(self) -> str:
         """End-of-run line. A fraction of rated torque, not a height."""
