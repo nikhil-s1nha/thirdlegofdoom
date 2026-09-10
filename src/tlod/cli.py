@@ -1423,9 +1423,25 @@ def cmd_calibrate(args) -> int:
         return 0
 
     # extrinsics
+    #
+    # Falls back to the config, which already names the intrinsics file
+    # the rest of the pipeline loads. Demanding the flag anyway meant the
+    # one command you reach for when the camera has moved refused to run
+    # until you went and looked up a path the config was holding.
+    intrinsics_path = args.intrinsics or cfg.camera.intrinsics
+    if not intrinsics_path:
+        raise SystemExit(
+            "extrinsics needs intrinsics: pass --intrinsics, or set "
+            "camera.intrinsics in the config. Measure them first with "
+            "`tlod calibrate intrinsics`.")
+    if not Path(intrinsics_path).exists():
+        raise SystemExit(
+            f"no intrinsics at {intrinsics_path}"
+            + ("" if args.intrinsics else " (from camera.intrinsics in the config)")
+            + ". Measure them first with `tlod calibrate intrinsics`.")
     if not args.intrinsics:
-        raise SystemExit("extrinsics needs --intrinsics pointing at the .npz from the first step")
-    intr = Intrinsics.load(args.intrinsics)
+        print(f"  intrinsics from the config: {intrinsics_path}")
+    intr = Intrinsics.load(intrinsics_path)
 
     from tlod.arm.controller import ArmController, SafetyLimits
 
@@ -1956,7 +1972,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="equidistant fisheye model; needed above ~120 deg, where "
                         "the default pinhole model cannot fit at all")
     s.add_argument("--timeout", type=float, default=180.0)
-    s.add_argument("--intrinsics", default="", help="extrinsics: path to the intrinsics .npz")
+    s.add_argument("--intrinsics", default="",
+                   help="extrinsics: path to the intrinsics .npz. Defaults to "
+                        "camera.intrinsics from the config")
     s.add_argument("--sim", action="store_true", help="rehearse without hardware")
     s.set_defaults(func=cmd_calibrate)
 
