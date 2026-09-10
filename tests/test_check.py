@@ -179,3 +179,38 @@ def test_preview_throttles():
     first = server.latest()
     server.offer(np.full((16, 16, 3), 255, np.uint8))
     assert server.latest() is first, "second frame should have been throttled"
+
+
+def test_preview_routes_take_precedence_over_the_index():
+    """Anything else on the board publishes through this one server.
+
+    `/` in particular has to be claimable: a caller with no frames to
+    offer -- the scoreboard -- would otherwise serve an index page
+    pointing at a stream that never produces a byte. A route that raises
+    must not take the server down with it either, because the thing most
+    likely to raise is a read of a policy that has just been torn down.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    from tlod.vision.preview import PreviewServer
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = PreviewServer(port=port)
+    server.add_route("/", lambda: ("text/plain", b"mine"))
+    server.add_route("/boom", lambda: 1 / 0)
+    server.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        with urllib.request.urlopen(base + "/", timeout=3) as r:
+            assert r.read() == b"mine"
+        for path, code in (("/boom", 500), ("/nope", 404)):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(base + path, timeout=3)
+            assert caught.value.code == code
+    finally:
+        server.stop()

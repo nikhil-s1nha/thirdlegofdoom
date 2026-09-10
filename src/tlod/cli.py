@@ -537,7 +537,8 @@ def cmd_play(args) -> int:
 
     try:
         _run_for(app, args.duration, view=args.view, projector=app.projector,
-             preview=getattr(args, 'preview', 0))
+             preview=getattr(args, 'preview', 0),
+             scoreboard=getattr(args, 'scoreboard', 0))
     finally:
         # Sensors may own a thread or a serial port (SerialContactSensor
         # does). ServoLoadContactSensor owns neither, but closing through
@@ -668,9 +669,14 @@ def build_app(cfg: Config, render: bool = False):
 
 
 def _run_for(app, duration: float, view: bool = False, projector=None,
-             preview: int = 0) -> None:
+             preview: int = 0, scoreboard: int = 0) -> None:
     with app:
         server = _serve_overlay(app, projector, preview)
+        board = _serve_scoreboard(app, scoreboard,
+                                  server if preview and preview == scoreboard else None)
+        # One object when both were asked for on the same port, two when
+        # they were not, and stopping it twice would join a dead thread.
+        servers = list({id(s): s for s in (server, board) if s is not None}.values())
         try:
             if view:
                 # The window must own the main thread; on macOS a cv2
@@ -687,8 +693,8 @@ def _run_for(app, duration: float, view: bool = False, projector=None,
         except KeyboardInterrupt:
             print("\ninterrupted")
         finally:
-            if server is not None:
-                server.stop()
+            for running in servers:
+                running.stop()
         print(app.latency_report())
         pose = app.controller.pose()
         print(f"\n  final tool position: "
@@ -736,6 +742,33 @@ def _serve_overlay(app, projector, port: int):
 
     server.stop = stop
     print(f"  watch it at http://<this board>:{port}/")
+    return server
+
+
+def _serve_scoreboard(app, port: int, shared=None):
+    """Publish the running policy's score as a page, for the player.
+
+    Separate from `--preview` because it answers a different question for
+    a different person. The preview is for whoever is debugging: it shows
+    frames, and it costs a JPEG encode and an arm read every time it does.
+    This shows a number and a word, costs an attribute read, and is for
+    whoever has their hand on the table and cannot also be reading a
+    14 px HUD line in the corner of a throttled video stream.
+
+    Both on the same port is allowed and shares the one socket, because
+    refusing would be an arbitrary rule about ports; the scoreboard takes
+    `/` in that case and the annotated stream stays at `/stream`.
+    """
+    if not port:
+        return None
+    from tlod.viz import scoreboard
+
+    server = scoreboard.serve(app.policy, port, server=shared)
+    if shared is not None:
+        print(f"  scoreboard at http://<this board>:{port}/ "
+              f"(the annotated view moved to /stream)")
+    else:
+        print(f"  scoreboard at http://<this board>:{port}/")
     return server
 
 
@@ -2097,6 +2130,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="stream the annotated view on this port, e.g. 8080; "
                         "shows what the robot sees and decides, for boards "
                         "with no screen")
+    s.add_argument("--scoreboard", type=int, default=0, metavar="PORT",
+                   help="serve the live score on this port, e.g. 8090; the "
+                        "whole page flashes HIT/DODGED/FLINCH/HELD as each "
+                        "round resolves, which is the part a player can read "
+                        "without taking their eyes off the arm. Costs no "
+                        "encoding, so it is fine to leave on. May share a "
+                        "port with --preview")
     s.add_argument("--deadpan", action="store_true",
                    help="no fidgeting and no taunts. The robot plays exactly the "
                         "same game; it just stops performing, which is what you "
