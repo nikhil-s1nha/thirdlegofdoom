@@ -64,8 +64,10 @@ import numpy as np
 sys.path.insert(0, "src")
 from tlod.arm import model  # noqa: E402
 from tlod.arm.controller import ArmController  # noqa: E402
-from tlod.arm.primitives import Strike, StrikeLimits  # noqa: E402
-from tlod.cli import build_arm, build_governor, build_limits  # noqa: E402
+from tlod.arm.primitives import Strike  # noqa: E402
+from tlod.cli import (  # noqa: E402
+    build_arm, build_governor, build_limits, build_strike_limits,
+)
 from tlod.config import Config  # noqa: E402
 from tlod.game.contact import CollisionPlaneContactSensor  # noqa: E402
 from tlod.types import Pose  # noqa: E402
@@ -87,7 +89,13 @@ y = float(argv[1]) if len(argv) > 1 else 0.0
 config = argv[2] if len(argv) > 2 else "configs/opi.yaml"
 
 cfg = Config.load(config)
-limits = StrikeLimits()
+# The game's limits, not the defaults. Bare `StrikeLimits()` has
+# `tip_offset` 0 and the default `press_depth`, so the bench was measuring
+# a different strike from the one being tuned -- and worse, it still felt
+# `safety.min_height` through the controller's clamp, so raising that for
+# the paddle left the bench commanding a floor the arm was already below
+# and reporting a 2 mm "strike".
+limits = build_strike_limits(cfg)
 if torque is not None:
     limits.torque_limit = torque
 # Strike now holds at the bottom by itself, which is what makes contact
@@ -101,7 +109,10 @@ limits.press_hold = 0.0
 # drift away from the sensor it is reporting on.
 SENSOR_SETTLE = CollisionPlaneContactSensor(lambda: 0.0).settle
 plane = cfg.vision.hand_height                 # where a flat palm sits
-hover = Pose(x, y, plane + limits.hover_height)
+# Tool-point heights, so the tip lands where `plane` says. `Hover` and
+# `Strike` add `tip_offset` themselves; this reproduces it because the
+# bench builds its own poses rather than driving those motions.
+hover = Pose(x, y, plane + limits.tip_offset + limits.hover_height)
 def commanded_floor(start_z: float) -> float:
     """Where `Strike` will actually send the paddle from `start_z`.
 
@@ -119,7 +130,7 @@ def commanded_floor(start_z: float) -> float:
     to make "floor was 28 mm (-5 mm short)" out of a strike that had in
     fact commanded 11 mm and stopped 16 mm above it.
     """
-    floor = plane - limits.press_depth
+    floor = plane + limits.tip_offset - limits.press_depth
     return max(floor, start_z - limits.clamp_drop(start_z - floor))
 
 
