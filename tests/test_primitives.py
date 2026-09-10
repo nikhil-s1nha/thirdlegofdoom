@@ -409,12 +409,9 @@ def test_no_flourish_commands_past_the_motors_travel():
     s = np.linspace(0.0, 1.0, 2000)
     home = np.concatenate([model.HOME, [0.0]])
     for name, move in FLOURISHES.items():
-        amps = np.asarray(move.amplitudes, float) * 1.5
-        cycles = np.broadcast_to(np.asarray(move.cycles, float), amps.shape)
-        offsets = amps * (np.sin(np.pi * s)[:, None]
-                          * np.sin(2.0 * np.pi * cycles * s[:, None]))
+        offsets = move.offsets(s) * 1.5
         for i, joint in enumerate(JOINT_NAMES):
-            if not amps[i]:
+            if not move.amplitudes[i]:
                 continue
             lo, hi = MEASURED_TRAVEL[joint]
             reach = home[i] + offsets[:, i]
@@ -442,7 +439,12 @@ def test_one_way_joints_get_one_way_swings():
                 continue
             lo, hi = MEASURED_TRAVEL[joint]
             behind = min(home[i] - lo, hi - home[i])
-            if behind < 0.25 and cycles[i] % 1.0 == 0.0:
+            # A rectified joint only ever goes one way, so having nothing
+            # behind HOME costs it nothing -- that is the whole point of
+            # `oneway`, and it is how the gripper chomps three times.
+            rectified = np.broadcast_to(np.asarray(move.oneway, bool),
+                                        np.shape(move.amplitudes))[i]
+            if behind < 0.25 and not rectified and cycles[i] % 1.0 == 0.0:
                 raise AssertionError(
                     f"{name} swings {joint} through whole cycles, but it has "
                     f"only {behind:.3f} rad on one side of HOME -- use a half "
@@ -465,10 +467,7 @@ def test_no_flourish_can_reach_the_table(rig):
     """
     s = np.linspace(0.0, 1.0, 2000)
     for name, move in FLOURISHES.items():
-        amps = np.asarray(move.amplitudes, float) * 1.5
-        cycles = np.broadcast_to(np.asarray(move.cycles, float), amps.shape)
-        offsets = amps * (np.sin(np.pi * s)[:, None]
-                          * np.sin(2.0 * np.pi * cycles * s[:, None]))
+        offsets = move.offsets(s) * 1.5
         lowest = min(model.tool_pose(model.HOME + o[:5]).xyz()[2]
                      for o in offsets[::10])
         assert lowest > 0.020, f"{name} reaches {lowest * 1e3:.0f} mm off the table"

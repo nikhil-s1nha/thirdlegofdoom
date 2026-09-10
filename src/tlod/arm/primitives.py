@@ -682,6 +682,34 @@ class Move:
     amplitudes: tuple[float, ...]      # radians, JOINT_NAMES order
     cycles: float | tuple[float, ...]  # one for all joints, or one each
     duration: float | None = None      # seconds; None = the caller's
+    # Rectify the swing, per joint: `sin^2` instead of `sin`, so every
+    # repetition goes the same way and `cycles` counts humps. This is what lets a joint repeat at
+    # all when it has nothing behind HOME -- the gripper has 0.179 rad
+    # before it is shut, so a plain two-cycle chomp spends every other
+    # beat driving into the closed stop, and reads as one bite and a
+    # stall. Rectified, three cycles are three bites. The envelope is
+    # still zero at both ends, so it returns to where it started.
+    oneway: bool | tuple[bool, ...] = False
+
+    def offsets(self, s):
+        """Joint offsets from the starting pose, at phase `s` in [0, 1].
+
+        The one definition of the shape. `Flourish` steps it a sample at a
+        time, the tests sweep it, and the review tool plots it -- all from
+        here, because a test that reimplements the waveform is a test of
+        the reimplementation.
+
+        `sin(pi s)` is the envelope and is zero at both ends whatever else
+        happens, which is what makes every flourish end where it began.
+        """
+        s = np.atleast_1d(np.asarray(s, float))[:, None]
+        amps = np.asarray(self.amplitudes, float)
+        cyc = np.broadcast_to(np.asarray(self.cycles, float), amps.shape)
+        one = np.broadcast_to(np.asarray(self.oneway, bool), amps.shape)
+        swing = np.where(one,
+                         np.sin(np.pi * cyc * s) ** 2,
+                         np.sin(2.0 * np.pi * cyc * s))
+        return amps * np.sin(np.pi * s) * swing
 
 
 # Measured on this rig, joint by joint, torque off. These are the real
@@ -735,34 +763,48 @@ MEASURED_TRAVEL: dict[str, tuple[float, float]] = {
 # wrist_flex all drive it down, which is how the old bow and droop came to
 # hit it. Anything large goes up: negative.
 FLOURISHES: dict[str, Move] = {
-    #                pan    lift  elbow  wrist   roll   grip
-    # 158 degrees of roll, one way, in a second. Negative because that is
-    # the long way round from centre -- 4.354 rad against 1.927 -- and the
-    # direction is the whole reason this works at all.
-    "spin": Move((0.00, 0.00, 0.00, 0.00, -2.75, 0.00),
-                 (1.0, 1.0, 1.0, 1.0, 0.5, 1.0), 1.01),
-    # Back on the roll, where a shimmy belongs. Three swings of 74 degrees.
-    # A positive amplitude at 1.5 cycles has its largest excursion on the
-    # *negative* side -- the peak of sin(pi s)sin(3 pi s) is -1 at s=0.5 --
-    # so the big half of every swing takes the roomy direction and the
-    # small half stays well clear of the wrap.
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.30, 0.00), 1.5, 1.30),
-    "wag": Move((1.12, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 0.82),
-    # Rise 38 degrees, then dip twice through 44.
+    #             pan    lift  elbow  wrist   roll   grip
+    # Everything at once and over in half a second: the wrist swinging up
+    # and rolling 74 degrees the long way round, the shoulder turning into
+    # it, and three quick bites on the way. The gripper is small here only
+    # because three of anything in 0.5 s is what the acceleration ceiling
+    # will pay for -- chomp is where the big jaw lives.
+    "spin": Move((0.45, -0.30, 0.00, -0.75, -1.30, 0.24),
+                 (1.0, 0.5, 1.0, 0.5, 0.5, 3.0),
+                 0.50, (False, False, False, False, False, True)),
+    # The whole arm, not one joint. Two shoulder swings of 43 degrees, the
+    # elbow and lift lifting into each one, and three 66-degree rolls
+    # across the top of it.
+    "shimmy": Move((0.80, -0.35, -0.45, 0.00, 1.15, 0.00),
+                   (2.0, 2.0, 2.0, 1.0, 1.5, 1.0),
+                   1.25, (False, True, True, False, False, False)),
+    # 49 degrees of pan with the elbow rising on each end of the swing --
+    # one-way, so the elbow lifts twice rather than dipping at the table
+    # in between.
+    "wag": Move((1.12, 0.00, -0.35, 0.00, 0.00, 0.00),
+                (1.0, 1.0, 2.0, 1.0, 1.0, 1.0),
+                0.82, (False, False, True, False, False, False)),
+    # Rise 38 degrees and dip twice through 35. The dips are one-way: a
+    # plain two-cycle wrist goes down, *up past where it started*, and
+    # down again, which reads as a shake rather than a nod.
     "nod": Move((0.00, -0.66, 0.00, 0.82, 0.00, 0.00),
-                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 1.20),
-    # Both joints on half cycles: this is the one gesture that travels
-    # toward the table, and a whole cycle would take it there twice.
-    "bob": Move((0.00, 0.55, -0.90, 0.00, 0.00, 0.00),
-                (1.0, 0.5, 0.5, 1.0, 1.0, 1.0), 0.33),
-    # One 74-degree bite with the jaw pointed up. A half cycle, not two
-    # snaps: the gripper has 0.179 rad below HOME, so the second half of
-    # any whole cycle is spent shut against the stop.
-    "chomp": Move((0.00, 0.00, 0.00, -0.54, 0.00, 1.29),
-                  (1.0, 1.0, 1.0, 0.5, 1.0, 0.5), 0.47),
-    # Two hops of 45 degrees while rising 39.
-    "jig": Move((0.84, -0.67, 0.00, 0.00, 0.00, 0.00),
-                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 1.23),
+                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0),
+                1.20, (False, False, False, True, False, False)),
+    # Reaching much further up: 73 degrees of elbow against the 52 it had.
+    "bob": Move((0.00, 0.70, -1.28, 0.00, 0.00, 0.00),
+                (1.0, 0.5, 0.5, 1.0, 1.0, 1.0), 0.47),
+    # Three 83-degree bites with the wrist held at the top of its travel.
+    # Three big ones cannot also be quick: peak speed goes as amplitude
+    # times cycles over duration, so a full jaw three times needs 1.55 s
+    # against the 9 rad/s the servos track. Size won over speed here
+    # because a chomp that does not open is not a chomp.
+    "chomp": Move((0.00, 0.00, 0.00, -1.45, 0.00, 1.38),
+                  (1.0, 1.0, 1.0, 0.5, 1.0, 3.0),
+                  1.55, (False, False, False, False, False, True)),
+    # Twitchy on purpose at 0.4 s. Two hops of 15 degrees is all that
+    # duration buys -- the same trade as chomp, run the other way.
+    "jig": Move((0.28, -0.25, 0.00, 0.00, 0.00, 0.00),
+                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 0.40),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
@@ -801,8 +843,6 @@ class Flourish(Motion):
         self.duration = max(move.duration or duration, 1e-3)
         self.speed = speed
         self.limits = ProfileLimits(max_speed=speed, max_accel=accel, max_jerk=jerk)
-        self._cycles = np.broadcast_to(
-            np.asarray(move.cycles, float), np.shape(move.amplitudes)).copy()
         self._q0: np.ndarray | None = None
         # Worst case the command is stranded a whole amplitude from home
         # when the plan runs out, and walking it back is rate-limited to
@@ -820,13 +860,7 @@ class Flourish(Motion):
         if self.finished:
             return True
         s = min(self.elapsed / self.duration, 1.0)
-        # A half-sine envelope over a whole number of swings: the offset
-        # is zero at s=0 and s=1 whatever the amplitude, so the arm ends
-        # where it started without needing to be driven back.
-        envelope = np.sin(np.pi * s)
-        swing = np.sin(2.0 * np.pi * self._cycles * s)
-        amplitudes = np.asarray(self.move.amplitudes, float)
-        controller._write(self._q0 + amplitudes * swing * envelope,
+        controller._write(self._q0 + self.move.offsets(s)[0],
                           dt=dt, limits=self.limits)
         if self.elapsed < self.duration:
             return False
