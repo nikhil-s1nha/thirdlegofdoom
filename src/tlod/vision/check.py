@@ -106,8 +106,17 @@ def check_precision(
     save_dir: str | Path | None = None,
     on_progress=None,
     fixed_distance: bool = False,
+    on_frame=None,
 ) -> Report:
-    """Camera-only checks. Measures consistency, not correctness."""
+    """Camera-only checks. Measures consistency, not correctness.
+
+    `on_frame(image, hands)` is called for every frame read, detections
+    or not. It exists so this can drive a live preview: the numbers here
+    say whether tracking is *consistent*, and a camera that needs aiming
+    is a problem you have to see rather than read. Frames with no hand in
+    them are the interesting ones when the complaint is "it sees too
+    many", so it fires before the `continue`.
+    """
     import cv2
 
     thresholds = thresholds or Thresholds()
@@ -132,6 +141,8 @@ def check_precision(
         report.frames += 1
 
         hands = detector.detect(frame)
+        if on_frame is not None:
+            on_frame(frame.image, hands)
         if not hands:
             continue
         observation = locator.locate(hands[0])

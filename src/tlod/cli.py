@@ -1557,6 +1557,34 @@ def cmd_vision_check(args) -> int:
         print("  WARNING: no extrinsics configured. Precision checks are still")
         print("  meaningful; accuracy is not, because positions are in a guessed frame.\n")
 
+    preview = None
+    if args.preview:
+        from tlod.vision.preview import PreviewServer
+
+        preview = PreviewServer(port=args.preview)
+        preview.start()
+        print(f"  watch it at http://<this board>:{args.preview}/ -- every hand "
+              f"the detector reports is drawn, so extras show up as extras")
+
+    def _show(image, hands):
+        if preview is None:
+            return
+        import cv2
+
+        shown = image.copy()
+        for i, hand in enumerate(hands):
+            u, v = hand.palm_center
+            # Numbered, because "too many hands" is a question about how
+            # many boxes appear and which one the game would take -- and
+            # the game always takes the first.
+            colour = (120, 220, 130) if i == 0 else (80, 80, 240)
+            cv2.circle(shown, (int(u), int(v)), 16, colour, 2)
+            cv2.putText(shown, f"{i}" + (" <- used" if i == 0 else ""),
+                        (int(u) + 20, int(v)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
+        cv2.putText(shown, f"{len(hands)} hand(s)", (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (240, 240, 240), 2)
+        preview.offer(shown)
+
     print(f"  precision check: {args.duration:.0f}s. Put a hand in view and move it")
     print("  slowly across the frame, keeping it about the same distance away.\n")
     with camera:
@@ -1564,7 +1592,7 @@ def cmd_vision_check(args) -> int:
         report = check_precision(
             camera, build_detector(cfg, scene), locator,
             duration=args.duration, thresholds=thresholds, save_dir=args.save_frames,
-            fixed_distance=args.fixed_distance,
+            fixed_distance=args.fixed_distance, on_frame=_show,
             on_progress=lambda r: print(
                 f"\r  {r.frames} frames, {r.detections} detections", end="", flush=True),
         )
@@ -2732,6 +2760,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--camera", type=camera_arg, default=None,
                    help="v4l2 index or /dev/v4l/by-id/... path; overrides "
                         "camera.index. `tlod cameras` lists both")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="serve the camera with every detection drawn on it, e.g. "
+                        "8081. The numbers here say whether tracking is "
+                        "consistent; a camera that needs aiming, or one seeing "
+                        "hands that are not there, is something you have to look "
+                        "at")
     s.add_argument("--with-arm", action="store_true", dest="with_arm",
                    help="also score accuracy against forward kinematics (moves the arm)")
     s.add_argument("--poses", type=int, default=8)
