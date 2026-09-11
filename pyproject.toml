@@ -15,19 +15,45 @@ dependencies = [
 
 [project.optional-dependencies]
 # Hand/pose tracking. CPU-only, portable across macOS arm64 and Jetson.
-# mediapipe 1.0.x aborts the process on macOS arm64: the palm-detector
-# subgraph instantiates Metal calculators regardless of the CPU delegate
-# flag and dies with "Check failed: service_ Service is unavailable".
-# 0.10.3x uses the same Tasks API and works everywhere.
-# Version pins differ per platform, both for real reasons:
-#  * macOS arm64: 1.0.x aborts the process (Metal calculators in the palm
-#    detector ignore the CPU delegate). 0.10.3x is fine.
-#  * linux aarch64 (Orange Pi 5): upstream only publishes aarch64 wheels up
-#    to 0.10.18. Newer releases are x86_64/macOS only. 0.10.18 has the same
-#    Tasks API, so the code is identical.
+# Every pin below picks a *build*, never an API: 0.10.30 rewrote the Tasks
+# API's insides onto a ctypes call into a bundled libmediapipe (which is
+# why 0.10.30+ and 1.0 ship ABI-less py3-none wheels) and dropped
+# `mp.solutions` on the way. But the names tlod.vision.hands uses --
+# BaseOptions and its Delegate enum, HandLandmarker, HandLandmarkerOptions,
+# RunningMode, mp.Image, and the result's .hand_landmarks/.handedness --
+# are unchanged from 0.10.14 to 1.0.1, so the code is the same everywhere.
+# What 1.0 did drop is FaceAligner, FaceStylizer and the old
+# InteractiveSegmenter; none of them are used here.
+#  * macOS arm64: 1.0.x aborts the process. TensorsToDetectionsCalculator,
+#    in the palm detector, builds a DrishtiMetalHelper no matter what the
+#    CPU delegate says (the delegate only reaches the inference
+#    calculator); the Metal graph service is unavailable outside a
+#    windowed app, so it CHECK-fails with "Check failed: service_ Service
+#    is unavailable". That is abort(), not an exception, so no amount of
+#    care in the caller helps. Upstream has it as a 1.0.0 -> 1.0.1
+#    regression, open and unfixed: google-ai-edge/mediapipe#6356. Do not
+#    relax this to <=1.0.0 on the strength of that -- 0.10.3x works, and
+#    the next 1.0.x to land would silently be a candidate again.
+#  * linux aarch64 (Orange Pi 5): upstream published aarch64 wheels up to
+#    0.10.18, stopped, then resumed at 1.0. 0.10.18 is also the last
+#    aarch64 release with cp3xx ABI wheels, and it has none for cp313 --
+#    so on Python 3.13 the choice is 1.0.x or nothing. Split on the
+#    interpreter rather than moving every board: 3.12 keeps the 0.10.18
+#    that is known to work here, 3.13 gets 1.0. The macOS reason does not
+#    carry over -- DrishtiMetalHelper is Objective-C and cannot exist in
+#    the ELF, and the OpenGL path it is replaced by returns a status
+#    ("GPU service not available") instead of CHECK-failing. 1.0's wheel
+#    is manylinux_2_28, so glibc >= 2.28. Note also that the 0.10.3x this
+#    project already runs on macOS *is* the ctypes build; 1.0 is a version
+#    bump on an architecture that has been in use here for a while, not a
+#    new one.
+#  * linux x86_64: unbounded, i.e. 1.0 already runs here.
+# If the wheel is missing anyway, cli.build_detector degrades to a
+# NullHandDetector and says so; the rest of the pipeline is unaffected.
 hands = [
     "mediapipe>=0.10.30,<1.0 ; sys_platform == 'darwin'",
-    "mediapipe>=0.10.14,<0.10.19 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "mediapipe>=0.10.14,<0.10.19 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.13'",
+    "mediapipe>=1.0 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version >= '3.13'",
     "mediapipe>=0.10.30 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 

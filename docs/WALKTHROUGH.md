@@ -642,6 +642,7 @@ Only relevant on real hardware. See [power.md](power.md).
 | latency worse than expected | camera gave 30 fps, not 60 | `tlod bench camera --force` |
 | `no serial ports found` | power or permissions | check the supply; `usermod -aG dialout` |
 | mediapipe crashes on macOS | 1.0.x aborts on arm64 | already pinned to 0.10.3x; check your install |
+| `no hand detector available` in the log | mediapipe missing or unbuildable | everything but hands still runs; `pip install -e ".[hands]"` |
 | a change did nothing | your config overrides the preset | `tlod config -o /tmp/x.yaml` and read what is in effect |
 
 Reproduce anything odd:

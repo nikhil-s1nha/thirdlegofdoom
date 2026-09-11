@@ -125,7 +125,8 @@ loops between them.
 
 ## Orange Pi 5
 
-Ubuntu or Debian arm64, Python 3.12.
+Ubuntu or Debian arm64, Python 3.12 or 3.13. glibc 2.28 or newer, which
+any current Ubuntu or Debian arm64 image has.
 
 ```bash
 sudo apt install -y python3-venv python3-dev libgl1 libglib2.0-0
@@ -134,9 +135,28 @@ pip install -e ".[hands,robot]"
 sudo usermod -aG dialout $USER      # then log out and back in
 ```
 
-mediapipe pins differently here: upstream publishes aarch64 wheels only
-up to 0.10.18. `pyproject.toml` handles it; same Tasks API, no code
-change.
+mediapipe pins differently here, and differently again per interpreter:
+upstream's aarch64 wheels stop at 0.10.18, which is cp39-cp312, and
+resume at 1.0. So Python 3.12 gets 0.10.18 and Python 3.13 gets 1.0.
+`pyproject.toml` picks; the Tasks API is the same in both, so there is no
+code change either way. Check which one you ended up with:
+
+```bash
+python -c "import mediapipe; print(mediapipe.__version__)"
+tlod vision-check --sim --duration 3     # pipeline, no camera needed
+tlod vision-check --duration 10          # real camera, real hand
+```
+
+Either version drags in `opencv-contrib-python`, which unpacks into the
+same `cv2/` as the `opencv-python` this project asks for. Two
+distributions, one import name, last one wins. It has always been that
+way here and it works, but if `cv2` starts behaving oddly after a
+reinstall, that is where to look first.
+
+If mediapipe is missing or cannot build a landmarker, `tlod` logs
+`no hand detector available` and carries on with no hands rather than
+dying — object detection, the publisher and control all still run. That
+is a degraded board, not a working one; fix the install.
 
 ### NPU
 

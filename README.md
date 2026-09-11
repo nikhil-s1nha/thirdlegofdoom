@@ -73,8 +73,10 @@ hardware are the same code path.
 - **Sense-to-motion is ~200–370 ms**, slower than human reaction. The
   design answer is that the robot initiates rather than responds; see
   [docs/slap-analysis.md](docs/slap-analysis.md).
-- **`mediapipe` 1.0 removed `mp.solutions`** and crashes on macOS arm64.
-  Pinned per platform; arm64 Linux caps at 0.10.18.
+- **`mediapipe` dropped `mp.solutions` at 0.10.30**, and 1.0 crashes on
+  macOS arm64. Pinned per platform, and on arm64 Linux per interpreter
+  too: Python 3.12 caps at 0.10.18, 3.13 has no 0.10.x wheel and takes
+  1.0. Same Tasks API throughout, so this never reaches the code.
 - **`cv2.read()` returns the oldest queued frame** when your loop lags.
 - **Camera fps is a request, not a promise.** Check `tlod bench camera`.
 
