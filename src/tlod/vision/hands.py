@@ -196,6 +196,8 @@ class MediaPipeHandDetector(HandDetector):
             ms = self._last_ms + 1
         self._last_ms = ms
 
+        if self._landmarker is None:
+            raise RuntimeError("detector is closed")
         result = self._landmarker.detect_for_video(image, ms)
         h, w = frame.image.shape[:2]
 
@@ -210,7 +212,21 @@ class MediaPipeHandDetector(HandDetector):
         return hands
 
     def close(self) -> None:
-        self._landmarker.close()
+        """Close the landmarker, and make sure it is closed only once.
+
+        MediaPipe's HandLandmarker also closes itself from __del__, which
+        on 1.0.x runs during interpreter shutdown -- by which point the
+        module globals its dispatcher needs are already None, and it
+        raises `TypeError: 'NoneType' object is not callable` from inside
+        a destructor. Python prints that and continues, so nothing is
+        wrong, but a clean run ends in a traceback and looks like one.
+
+        Dropping our reference after closing lets it be collected while
+        the interpreter is still whole.
+        """
+        landmarker, self._landmarker = self._landmarker, None
+        if landmarker is not None:
+            landmarker.close()
 
 
 class ScriptedHandDetector(HandDetector):
