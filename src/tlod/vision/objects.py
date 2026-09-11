@@ -130,8 +130,52 @@ class ColorBlobDetector(ObjectDetector):
                     )
                 )
 
+        out = self._merge_overlapping(out)
         out.sort(key=lambda d: -d.confidence)
         return out[: self.max_objects]
+
+    def _merge_overlapping(self, detections: list[Detection]) -> list[Detection]:
+        """One object, one detection.
+
+        A specular highlight can cut a glossy piece into two contours
+        despite the morphological close above, and each half is then a
+        detection in its own right, a few millimetres from its twin.
+        Nothing downstream can tell those from two real objects: observed
+        on hardware as a single blue block touched twice, 2.5 mm and
+        5.2 mm off centre.
+
+        Overlap is the criterion rather than a fixed distance, because
+        the projection's scale varies across the table -- two blobs whose
+        estimated extents intersect cannot be two separate things sitting
+        on it.
+        """
+        merged: list[Detection] = []
+        for det in sorted(detections, key=lambda d: -d.confidence):
+            for i, other in enumerate(merged):
+                if other.label != det.label:
+                    continue
+                gap = float(np.linalg.norm(other.position[:2] - det.position[:2]))
+                if gap > max(other.radius + det.radius, 1e-4):
+                    continue
+                # Weight by area, which radius squares, so the centre
+                # lands where the object's mass is rather than midway
+                # between a large fragment and a speck.
+                wa, wb = other.radius ** 2, det.radius ** 2
+                total = wa + wb
+                position = ((other.position * wa + det.position * wb) / total
+                            if total > 0 else (other.position + det.position) / 2.0)
+                merged[i] = Detection(
+                    label=other.label,
+                    position=position,
+                    stamp=other.stamp,
+                    confidence=max(other.confidence, det.confidence),
+                    pixel=other.pixel,
+                    radius=float(np.hypot(other.radius, det.radius)),
+                )
+                break
+            else:
+                merged.append(det)
+        return merged
 
 
 class NullObjectDetector(ObjectDetector):
