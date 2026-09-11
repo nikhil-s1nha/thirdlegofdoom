@@ -1007,6 +1007,7 @@ def cmd_calibrate(args) -> int:
             extr, residuals = run_extrinsics(
                 camera, controller, intr,
                 poses=calibration_poses(heights=heights),
+                gripper=args.gripper,
                 locate=functools.partial(find_marker,
                                          hsv_band=MARKER_BANDS[args.marker]),
                 on_progress=lambda i, n, *_: print(f"    pose {i}/{n}", flush=True),
@@ -1398,6 +1399,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
+    s.add_argument("--gripper", type=float, default=0.0,
+                   help="gripper opening to hold during extrinsics: 0 is one end "
+                        "of its travel, 1 the other. Which end is closed depends "
+                        "on the sign in your arm calibration, so check rather "
+                        "than assume -- an open jaw puts the marker off the tool "
+                        "point that forward kinematics reports")
     s.add_argument("--heights", default="0.06,0.14,0.22",
                    help="tool heights to calibrate at, metres (extrinsics). "
                         "Narrow it if the arm hides the marker when raised, but "
