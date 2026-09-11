@@ -899,6 +899,7 @@ def cmd_calibrate(args) -> int:
 
     from tlod.vision.calibrate_flow import (
         MARKER_BANDS,
+        calibration_poses,
         find_marker,
         run_extrinsics,
         run_intrinsics,
@@ -1002,8 +1003,10 @@ def cmd_calibrate(args) -> int:
     try:
         with camera:
             time.sleep(1.0)
+            heights = tuple(float(v) for v in args.heights.split(","))
             extr, residuals = run_extrinsics(
                 camera, controller, intr,
+                poses=calibration_poses(heights=heights),
                 locate=functools.partial(find_marker,
                                          hsv_band=MARKER_BANDS[args.marker]),
                 on_progress=lambda i, n, *_: print(f"    pose {i}/{n}", flush=True),
@@ -1395,6 +1398,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
     s.add_argument("--views", type=int, default=15)
+    s.add_argument("--heights", default="0.06,0.14,0.22",
+                   help="tool heights to calibrate at, metres (extrinsics). "
+                        "Narrow it if the arm hides the marker when raised, but "
+                        "as little as possible: the spread in z conditions the solve")
     s.add_argument("--marker", default="green", choices=sorted(MARKER_COLOURS),
                    help="colour of the marker on the gripper (extrinsics). Pick "
                         "one absent from the rest of the frame: the largest blob "
