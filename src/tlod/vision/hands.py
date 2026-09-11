@@ -16,6 +16,17 @@ Note on MediaPipe versions: 0.10 exposed `mp.solutions.hands`, which is
 what essentially every tutorial online still uses. It was removed in 1.0.
 This module uses the Tasks API and a downloaded `.task` bundle, which is
 the only supported path going forward.
+
+1.0 also rewrote the Tasks API's insides -- pybind11 and protobuf graph
+configs became ctypes calls into a bundled `libmediapipe.so`/`.dylib` --
+but not its surface. Every name used below is spelled and behaves the
+same on 0.10.14 through 1.0.1: `mp.Image`/`mp.ImageFormat` (still
+re-exported from the package root, now out of `tasks.python.vision.core`),
+`BaseOptions` and its `Delegate` enum, `HandLandmarker`,
+`HandLandmarkerOptions`, `RunningMode`, `detect_for_video(image, ms)` and
+the result's `.hand_landmarks` / `.handedness[i][0].category_name`.
+So this file needs no version check; which build gets installed is a
+packaging question, and `pyproject.toml`'s `hands` extra explains it.
 """
 
 from __future__ import annotations
@@ -90,6 +101,22 @@ class HandDetector(abc.ABC):
         pass
 
 
+class NullHandDetector(HandDetector):
+    """Finds no hands, ever.
+
+    Two uses, both deliberate rather than a placeholder: object-only runs,
+    where loading MediaPipe to return nothing would be a heavy way to do
+    it, and boards where MediaPipe will not import or will not build a
+    landmarker. In the second case the rest of the pipeline -- camera,
+    object detection, tracking, control, the publisher -- is unaffected
+    and worth keeping alive, so `cli.build_detector` substitutes this and
+    says so loudly instead of dying on an import traceback.
+    """
+
+    def detect(self, frame: Frame) -> list[Hand2D]:
+        return []
+
+
 def ensure_model(path: str | Path = DEFAULT_MODEL_PATH) -> Path:
     """Download the landmark bundle if it is not already present."""
     path = Path(path)
@@ -120,6 +147,10 @@ class MediaPipeHandDetector(HandDetector):
         min_tracking_confidence: float = 0.5,
         delegate: str = "cpu",
     ) -> None:
+        # Imported here, not at module scope, so `tlod --help` and every
+        # command that uses a different detector stay free of MediaPipe.
+        # These five names are identical on 0.10.14 and on 1.0.x; see the
+        # module docstring before reaching for a version check.
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions
         from mediapipe.tasks.python.vision import (
@@ -136,6 +167,9 @@ class MediaPipeHandDetector(HandDetector):
         # "Check failed: service_" -- a hard crash, not an exception, so it
         # cannot be caught and retried. CPU is also fast enough here
         # (~10 ms at 720p) that the GPU path is not worth the fragility.
+        # On macOS this flag stops mattering at MediaPipe 1.0, which takes
+        # the Metal path regardless; that is a pin, not a setting, and
+        # pyproject.toml's `hands` extra is where it lives.
         chosen = BaseOptions.Delegate.GPU if delegate.lower() == "gpu" else BaseOptions.Delegate.CPU
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path), delegate=chosen),

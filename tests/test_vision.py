@@ -1,5 +1,6 @@
 """Calibration, projection, scene and localisation tests."""
 
+import cv2
 import numpy as np
 import pytest
 
@@ -202,3 +203,32 @@ class TestFisheye:
             # The ray must pass through the point it came from.
             cross = np.linalg.norm(np.cross(direction, offset))
             assert cross < 1e-3, f"{point} came back {cross * 1000:.2f} mm off the ray"
+
+
+def test_a_detection_beyond_reach_is_dropped():
+    """A pixel is a ray, and the higher up the frame it sits the more
+    shallowly it meets the table -- so something on a wall or held up
+    resolves to a point far past the arm, with an ordinary confidence and
+    nothing downstream able to tell. Measured on hardware: a red object
+    reported 670 mm and then 1010 mm behind the base of an arm whose
+    reach is 330 mm, and the arm set off after it."""
+    from tlod.vision.objects import ColorBlobDetector
+
+    projector = synthetic_projector()
+    w, h = projector.intr.resolution
+
+    def blob_at(row):
+        image = np.zeros((h, w, 3), np.uint8)
+        cv2.rectangle(image, (w // 2 - 20, row), (w // 2 + 20, row + 40),
+                      (0, 255, 0), -1)
+        return Frame(image=image, stamp=0.0, index=0)
+
+    # Higher in frame is further away on the table: 0.57 m against 0.22 m.
+    far, near = blob_at(4), blob_at(400)
+    ungated = ColorBlobDetector(projector, min_area_px=50, max_range=0.0)
+    assert np.hypot(*ungated.detect(far)[0].position[:2]) > 0.5
+    assert np.hypot(*ungated.detect(near)[0].position[:2]) < 0.3
+
+    gated = ColorBlobDetector(projector, min_area_px=50, max_range=0.4)
+    assert gated.detect(far) == [], "kept a detection past the arm's reach"
+    assert gated.detect(near), "dropped one the arm can reach"

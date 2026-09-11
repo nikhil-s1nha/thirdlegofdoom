@@ -60,6 +60,7 @@ class ColorBlobDetector(ObjectDetector):
         min_area_px: int = 400,
         max_objects: int = 12,
         blur: int = 5,
+        max_range: float = 0.6,
     ) -> None:
         self.projector = projector
         self.colors = colors if colors is not None else DEFAULT_COLORS
@@ -67,6 +68,22 @@ class ColorBlobDetector(ObjectDetector):
         self.min_area_px = min_area_px
         self.max_objects = max_objects
         self.blur = blur
+        # How far from the base a detection may claim to be, metres.
+        #
+        # A pixel is a ray, and the further up the frame it sits the more
+        # shallowly that ray meets the table -- so near the horizon it
+        # strikes the plane a very long way off, and a one-pixel change
+        # swings the answer by hundreds of millimetres. Anything on a
+        # wall, held up, or on the far side of the room resolves this way
+        # and arrives looking like an ordinary detection with an ordinary
+        # confidence.
+        #
+        # Measured: a red object near the top of frame was reported at
+        # 670 mm and then 1010 mm behind the base, on an arm whose reach
+        # is 330 mm. The projection is not wrong -- the ray really does
+        # meet the plane there -- but the premise that the blob is lying
+        # on the table is, and nothing downstream can tell.
+        self.max_range = max_range
 
     def detect(self, frame: Frame) -> list[Detection]:
         img = cv2.GaussianBlur(frame.image, (self.blur, self.blur), 0) if self.blur else frame.image
@@ -95,6 +112,8 @@ class ColorBlobDetector(ObjectDetector):
                 v = m["m01"] / m["m00"]
                 p = self.projector.pixel_to_plane(u, v, self.table_z)
                 if p is None:
+                    continue
+                if self.max_range and float(np.hypot(p[0], p[1])) > self.max_range:
                     continue
                 # Radius from area, converted through the local scale of
                 # the projection rather than assumed.
