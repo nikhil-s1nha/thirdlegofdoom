@@ -13,7 +13,7 @@ import pytest
 from tlod.arm import model
 from tlod.arm.controller import ArmController, SafetyLimits
 from tlod.arm.mock import MockArm
-from tlod.arm.primitives import StrikeLimits
+from tlod.arm.primitives import Hover, Retract, Strike, StrikeLimits
 from tlod.game.contact import (
     ContactEvent, GeometricContactSensor, ProximityContactSensor,
 )
@@ -70,18 +70,112 @@ def fake_robot(hand_position=None, speed=0.0, uncertainty=0.01, estopped=False):
 
 def test_difficulty_presets_are_ordered():
     easy, normal, hard = (Difficulty.preset(n) for n in ("easy", "normal", "hard"))
-    assert easy.hover_height > normal.hover_height > hard.hover_height
-    assert easy.strike_duration > normal.strike_duration > hard.strike_duration
+    assert easy.hover_height >= normal.hover_height >= hard.hover_height
+    # Not a strict ordering any more, and deliberately so: the arm has one
+    # honest floor on strike duration and both of the harder presets sit on
+    # it. Easy is allowed to be slower; nothing is allowed to be faster.
+    assert easy.strike_duration >= normal.strike_duration >= hard.strike_duration
     # More feints means *easier*, not harder. A feint is the human's
     # scoring opportunity: hold through it and they take the point. This
     # assertion was the other way round while the game was still a pure
     # dodge contest, and inverted when flinch scoring was introduced.
     assert easy.feint_probability > normal.feint_probability > hard.feint_probability
+    # With strike speed off the table, these carry the difficulty.
+    assert easy.mean_wait > normal.mean_wait > hard.mean_wait
+    assert easy.settle_bonus < normal.settle_bonus < hard.settle_bonus
+
+
+def test_no_preset_asks_for_a_strike_the_arm_cannot_land():
+    """Measured floor: an 8 cm drop asked for in under 250 ms lands short.
+
+    The arm answers a 0.21 s ask with 0.27 s and 14 mm of error, and a
+    0.18 s ask with 0.23 s and 30 mm -- past the contact sensor's 20 mm
+    plane tolerance, so the fastest strike is the one that cannot score.
+    `hard` used to ask for 0.17 s.
+    """
+    for name in ("easy", "normal", "hard"):
+        assert Difficulty.preset(name).strike_duration >= 0.25, name
+
+
+def test_no_preset_hovers_beyond_the_reachable_drop():
+    """`Strike` clamps the drop, so a high hover stops short of the hand."""
+    max_drop = StrikeLimits().max_drop
+    for name in ("easy", "normal", "hard"):
+        assert Difficulty.preset(name).hover_height <= max_drop, name
+
+
+def test_a_hover_above_max_drop_is_clamped_not_obeyed():
+    """The guard behind the preset bound, for callers passing their own.
+
+    A 12 cm hover against an 8 cm clamped drop leaves the paddle 4 cm above
+    the hand at the end of the strike, which is twice the contact tolerance
+    -- an "easy" difficulty that is really a broken one.
+    """
+    game = HandSlapGame(Difficulty(hover_height=0.12), seed=0)
+    assert game.limits.hover_height == game.limits.max_drop
 
 
 def test_unknown_difficulty_raises():
     with pytest.raises(KeyError):
         Difficulty.preset("impossible")
+
+
+# -- limits against the measured arm ---------------------------------------
+
+def drive(motion, controller, dt=0.005, limit=4.0):
+    """Step a motion to completion in real time, as the control loop does."""
+    motion.start(controller)
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < limit:
+        if motion.step(controller, dt):
+            return True
+        time.sleep(dt)
+    return False
+
+
+def test_a_strike_from_too_high_a_hover_cannot_reach_the_hand():
+    """Why `hover_height` is capped at `max_drop` rather than trusted.
+
+    The drop is clamped for safety, so hovering higher does not buy the
+    human more warning -- it ends the strike that much above the hand.
+    From the old easy preset's 12 cm, 4 cm short: twice the contact
+    sensor's plane tolerance, so no strike on easy could ever score.
+    """
+    controller = fake_robot([0.22, 0.0, 0.03]).controller
+    target = np.array([0.22, 0.0, 0.03])
+    limits = StrikeLimits(hover_height=0.12)          # against a 0.08 max_drop
+    assert drive(Hover(target, limits), controller)
+    assert drive(Strike(target, limits, duration=0.3), controller)
+
+    short_by = controller.pose().z - target[2]
+    assert short_by == pytest.approx(limits.hover_height - limits.max_drop, abs=5e-3)
+
+    sensor = GeometricContactSensor()
+    sensor.arm()
+    assert sensor.poll(tool_xyz=controller.pose().xyz(), hand_xyz=target) is None
+
+
+def test_retract_stays_inside_the_configured_speed_ceiling():
+    """`StrikeLimits` speeds are not clamped by `SafetyLimits`, so test them.
+
+    `ArmController.profile_limits()` *substitutes* a per-call speed for
+    `SafetyLimits.max_speed` rather than min()-ing it against the ceiling.
+    A `retract_speed` of 4.0 therefore reached a measured 3.53 rad/s on an
+    arm configured to cap at 3.5, for 10 ms on a 320 ms retract. The number
+    in StrikeLimits is the only guard there is.
+    """
+    safety = SafetyLimits(max_speed=3.5, max_accel=35.0, max_jerk=400.0)  # the real arm
+    controller = ArmController(MockArm(q0=np.concatenate([model.HOME, [0.0]])),
+                               safety, control_hz=100.0)
+    controller.start()
+    limits, target = StrikeLimits(), np.array([0.22, 0.0, 0.03])
+    assert drive(Hover(target, limits), controller)
+    hover_q = controller.commanded.copy()
+    assert drive(Strike(target, limits, duration=0.25), controller)
+
+    controller.stats.peak_speed = 0.0
+    assert drive(Retract(hover_q, limits, duration=0.28), controller)
+    assert controller.stats.peak_speed <= safety.max_speed
 
 
 # -- contact ---------------------------------------------------------------
