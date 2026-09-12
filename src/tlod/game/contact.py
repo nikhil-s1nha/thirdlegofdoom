@@ -120,6 +120,29 @@ class ServoLoadContactSensor(ContactSensor):
     resting load depends on the arm's configuration -- an extended arm
     holds more of its own weight than a folded one, and a fixed threshold
     would fire on posture instead of on contact.
+
+    Two things here are traps rather than details.
+
+    The threshold has less room than it looks. `Strike` drops the servo
+    torque limit to `StrikeLimits.torque_limit` (350 of 1000) for the
+    duration of the swing so the arm yields on contact, and a servo
+    cannot report more load than it is allowed to produce. The entire
+    detectable range during a strike is therefore the gap between the
+    hover pose's resting load and that cap: if a stretched-out hover
+    already sits at 0.25, a 0.12 threshold has 0.10 of headroom and can
+    never fire. `peak_rise` records the largest rise ever seen so the
+    first hardware session can set the threshold from a measurement
+    instead of from this guess.
+
+      !! THRESHOLD UNVERIFIED AGAINST HARDWARE !!
+
+    Reads are wrapped because `poll` runs on the control thread inside a
+    committed strike. A transient sync-read failure on the half-duplex
+    bus is a known event on this rig, and an exception escaping here
+    reaches `RobotApp._control_loop`, which answers a failed policy tick
+    by e-stopping -- freezing the arm mid-swing, directly above the hand
+    it was aiming at. A dropped reading costs one round scored as a
+    dodge. That is the cheaper failure by a wide margin.
     """
 
     # shoulder_lift, elbow_flex, wrist_flex
@@ -133,26 +156,44 @@ class ServoLoadContactSensor(ContactSensor):
     ) -> None:
         self.state_source = state_source
         self.threshold = threshold
-        self.joints = joints or self.STRIKE_JOINTS
+        self.joints = list(self.STRIKE_JOINTS if joints is None else joints)
         self._baseline: np.ndarray | None = None
         self._fired = False
+        # Diagnostics, for tuning the threshold on the first real session.
+        self.peak_rise = 0.0
+        self.read_failures = 0
+
+    def _load(self) -> np.ndarray | None:
+        """Watched joints' load magnitudes, or None if there is no reading."""
+        try:
+            state = self.state_source()
+        except Exception:
+            self.read_failures += 1
+            return None
+        if state.load is None:
+            return None
+        return np.abs(np.asarray(state.load, float)[self.joints])
 
     def arm(self) -> None:
         self._fired = False
-        state = self.state_source()
-        self._baseline = (
-            np.abs(state.load[list(self.joints)]) if state.load is not None else None
-        )
+        self._baseline = self._load()
 
     def poll(self, **kwargs) -> ContactEvent | None:
         if self._fired:
             return None
-        state = self.state_source()
-        if state.load is None:
+        current = self._load()
+        if current is None:
             return None
-        current = np.abs(state.load[list(self.joints)])
-        baseline = self._baseline if self._baseline is not None else np.zeros_like(current)
-        rise = float(np.max(current - baseline))
+        if self._baseline is None:
+            # No baseline: the read at arm() failed, or the backend had
+            # no load to give then and does now. Take it here rather than
+            # falling back to zeros -- against a zero baseline the pose's
+            # own resting load reads as a hit on the first tick of the
+            # strike, and every round scores as an instant contact.
+            self._baseline = current
+            return None
+        rise = float(np.max(current - self._baseline))
+        self.peak_rise = max(self.peak_rise, rise)
         if rise < self.threshold:
             return None
         self._fired = True
