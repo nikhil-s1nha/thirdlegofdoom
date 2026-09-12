@@ -4,13 +4,18 @@ Everything on a single **Orange Pi 5**: camera on USB, servo adapter on
 USB-C, vision and the control loop in one process.
 
 ```
-Orange Pi 5
-┌────────────────────────────────────────────────┐
-│ camera ─▶ detect ─▶ 3D localise ──▶ ┌─────────┐│  USB  ┌────────────┐
-│                                     │ latest  ││──────▶│ servo board│──▶ servos
-│ control loop ─▶ game + IK ─▶ clamp ◀│ mailbox ││       └────────────┘
-│                                     └─────────┘│
-└────────────────────────────────────────────────┘
+Orange Pi 5, one process
+
+  camera ─▶ detect ─▶ 3D localise ─┐
+                                   ▼
+                            ┌─────────────┐
+                            │   latest    │   one slot: newest, or nothing
+                            └──────┬──────┘
+                                   ▼
+  100 Hz:  game ─▶ safety clamp ─▶ IK ─▶ rate limit ─▶ FeetechArm
+                                                           │ USB
+                                                           ▼
+                                                      servo board ──▶ servos
 ```
 
 This page used to describe a two-board split — vision here, control on a
