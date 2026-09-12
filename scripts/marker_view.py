@@ -27,7 +27,7 @@ sys.path.insert(0, "src")
 from tlod.vision.calibrate_flow import MARKER_BANDS, _bands, find_marker  # noqa: E402
 
 PORT = 8080
-MIN_AREA = 120                       # matches find_marker's own threshold
+MIN_AREA = 45                        # matches find_marker's own threshold
 
 colour = sys.argv[1] if len(sys.argv) > 1 else "green"
 index = int(sys.argv[2]) if len(sys.argv) > 2 else 5
