@@ -144,8 +144,19 @@ class ArmController:
         self._derate = 1.0
 
     def profile_limits(self, max_speed: float | None = None) -> ProfileLimits:
+        """Profile bounds for this command, never looser than the safety ones.
+
+        A caller asking for a speed is asking to go *slower* -- a servo
+        step, a careful approach. It substituted rather than bounded,
+        which meant any primitive carrying its own speed silently
+        outranked safety.max_speed: measured, a StrikeLimits retract of
+        4.0 rad/s ran a commanded 3.53 on an arm configured to cap at
+        3.5. The cap that gets tuned down for a marginal supply, or for a
+        person standing closer, is exactly the one that must win.
+        """
         return ProfileLimits(
-            max_speed=self.limits.max_speed if max_speed is None else max_speed,
+            max_speed=self.limits.max_speed if max_speed is None
+            else min(float(max_speed), self.limits.max_speed),
             max_accel=self.limits.max_accel,
             max_jerk=self.limits.max_jerk,
         )

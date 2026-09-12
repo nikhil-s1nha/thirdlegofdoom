@@ -229,3 +229,18 @@ def test_minimum_jerk_endpoints_and_monotonicity():
 def test_watchdog_detects_stale_commands(controller):
     controller.limits.command_timeout = 0.0
     assert controller.check_watchdog()
+
+
+def test_a_command_speed_cannot_exceed_the_safety_cap():
+    """A caller passing max_speed is asking to go slower -- a servo step,
+    a careful approach. It substituted for safety.max_speed rather than
+    being bounded by it, so any primitive carrying its own speed silently
+    outranked the cap: a StrikeLimits retract of 4.0 rad/s ran a
+    commanded 3.53 on an arm configured to stop at 3.5. The cap tuned
+    down for a marginal supply, or for a person standing closer, is the
+    one that has to win."""
+    controller = ArmController(MockArm(), SafetyLimits(max_speed=2.0), 100.0)
+
+    assert controller.profile_limits().max_speed == 2.0
+    assert controller.profile_limits(0.5).max_speed == 0.5, "refused a slower ask"
+    assert controller.profile_limits(9.0).max_speed == 2.0, "a caller outran the cap"
