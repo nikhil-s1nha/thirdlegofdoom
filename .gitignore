@@ -7,3 +7,6 @@ calib/*.npz
 recordings/
 .DS_Store
 models/
+
+# Agent worktrees, created and removed per task
+.claude/worktrees/
