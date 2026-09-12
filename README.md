@@ -17,6 +17,7 @@ pip install -e ".[hands,dev]"
 tlod move 0.22 0 0.12         # move the tool to a point
 tlod sim --view               # the whole loop, synthetic
 tlod hybrid --view            # real webcam and hand, simulated arm
+tlod hybrid --real            # ... and the real arm, hovering over your hand
 tlod touch --view             # detect table objects and touch each one
 pytest
 ```
@@ -30,7 +31,7 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 | `move X Y Z` | move the tool to a point (sim or real) |
 | `reach` | probe the reachable workspace |
 | `touch` | detect table objects and touch each one |
-| `sim` / `hybrid` | run the loop synthetic / with a real camera |
+| `sim` / `hybrid` | run the loop synthetic / with a real camera, `--real` for the arm too |
 | `calibrate intrinsics\|extrinsics` | lens, then camera-to-robot transform |
 | `first-light` | verify a new arm one joint at a time |
 | `bench` | measure IK, camera and loop latency |

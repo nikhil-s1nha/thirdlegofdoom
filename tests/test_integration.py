@@ -130,3 +130,56 @@ def test_latency_report_is_printable():
         report = app.latency_report()
     for expected in ("vision.detect", "shutter->servo command", "overruns", "IK:"):
         assert expected in report
+
+
+class TestHybridConfig:
+    """`hybrid --real` is the whole robot on one machine: camera, hand
+    tracking, IK and servos in one process, arm hovering over the hand.
+
+    The command forced arm.backend to "mock" for its whole life, so the
+    failure to guard against is that reverting -- an arm that does not
+    move looks the same as one that was never asked to.
+    """
+
+    def test_real_reaches_the_arm_backend(self):
+        from tlod.cli import hybrid_config
+        from tlod.config import Config
+
+        cfg = hybrid_config(Config(), camera=5, policy="track_hand", real=True)
+        assert cfg.arm.backend == "feetech"
+
+    def test_without_real_nothing_can_move(self):
+        from tlod.cli import hybrid_config
+        from tlod.config import Config
+
+        cfg = hybrid_config(Config(), camera=5, policy="track_hand", real=False)
+        assert cfg.arm.backend == "mock"
+
+    def test_the_camera_and_hand_are_real_either_way(self):
+        """Only the arm is simulated without --real; the point of the
+        command is a real camera and a real hand in both modes."""
+        from tlod.cli import hybrid_config
+        from tlod.config import Config
+
+        for real in (True, False):
+            cfg = hybrid_config(Config(), camera=5, policy="track_hand", real=real)
+            assert cfg.camera.source == "opencv"
+            assert cfg.camera.index == 5
+            assert cfg.vision.detector == "mediapipe"
+            assert cfg.runtime.policy == "track_hand"
+
+    def test_the_arm_config_is_otherwise_untouched(self):
+        """Calibration and limits have to survive the override, or the
+        arm follows a hand using factory-default joint zeros."""
+        from tlod.cli import hybrid_config
+        from tlod.config import Config
+
+        base = Config.from_dict({
+            "arm": {"calibration": "calib/mine.json", "port": "/dev/ttyACM0",
+                    "torque_limit": 800},
+            "safety": {"max_speed": 3.5},
+        })
+        cfg = hybrid_config(base, camera=0, policy="track_hand", real=True)
+        assert cfg.arm.calibration == "calib/mine.json"
+        assert cfg.arm.port == "/dev/ttyACM0"
+        assert cfg.safety.max_speed == 3.5
