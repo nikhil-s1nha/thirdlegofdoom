@@ -1,0 +1,31 @@
+camera:
+  source: opencv
+  index: 0
+  width: 640
+  height: 480
+  fps: 60
+  fourcc: MJPG
+  hfov_deg: 74.0
+  intrinsics: calib/intrinsics.npz
+  extrinsics: calib/extrinsics.npz
+
+arm:
+  backend: feetech
+  port: ''
+  calibration: calib/mine.json
+  servo_accel: 35.0
+  torque_limit: 800
+
+safety:
+  max_speed: 3.5
+  max_accel: 35.0
+  max_jerk: 400.0
+  min_height: 0.03
+
+vision:
+  num_hands: 1
+  depth_mode: plane
+  hand_height: 0.022
+
+runtime:
+  prediction_horizon: 0.15
