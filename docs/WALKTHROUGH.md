@@ -57,11 +57,11 @@ The game is about **feints**, not reflexes. Details in
 
 | branch | you get |
 |---|---|
-| `main`, `arm-core` | arm, vision, calibration. No game. |
-| `gamification` | the above plus hand slap (`play`, `eval`) |
+| `main` | arm, vision, calibration **and** the game (`play`, `eval`) |
+| `arm-core` | arm and vision only, no game |
+| `gamification` | merged into `main`; kept for history |
 
-Bringing up hardware or writing your own behaviour? Start on `arm-core`.
-Want to play? `git checkout gamification`.
+Stay on `main` unless you specifically want the arm without the game.
 
 ### Install
 
@@ -191,6 +191,12 @@ class Policy:
 
 ## 3. Hardware bring-up
 
+All of this has now been done once, on an Orange Pi 5 with the arm and
+camera on the same board, and the numbers below are from that run rather
+than from a datasheet. Where something is still an estimate it says so.
+The end of it is `tlod touch --real` putting the tool 2.5 mm from an
+object the camera found by itself.
+
 ### Just the arm — the short version
 
 If all you want is an arm that moves to coordinates, you need **3.0
@@ -215,7 +221,10 @@ and the game, and neither is needed for that.
 - 12 V 5 A supply for the follower arm. Not 5 V — that is the leader.
   Not 2 A either, even though some kits ship one and Seeed's own spec
   says 2 A: it browns out as soon as several joints move together, which
-  looks like a software bug and is not. [power.md](power.md).
+  looks like a software bug and is not. With the 5 A supply this arm
+  peaks at 1.81 A against a 3.75 A budget and the rail does not move, so
+  the problem simply does not arise — confirm yours with `tlod power`
+  rather than inheriting anyone's fear of it. [power.md](power.md).
 - Give it clear space. Nothing fragile, nobody's hands in range.
 - Know where the power switch is. If you have not fitted an inline switch
   on the 12 V line yet, know which plug you are pulling.
@@ -256,10 +265,26 @@ Follow the [official assembly guide](https://huggingface.co/docs/lerobot/so101).
 IDs are assigned **one motor at a time**, before daisy-chaining:
 
 ```bash
-pip install -e ".[robot]"
-tlod ports                       # find the adapter, e.g. /dev/ttyACM0
+pip install pyserial feetech-servo-sdk       # what the arm needs
+tlod ports                                   # find the adapter, e.g. /dev/ttyACM0
+
+pip install -e ".[robot]"                    # only for the two lerobot- commands
 lerobot-setup-motors --robot.type=so101_follower --robot.port=/dev/ttyACM0
 ```
+
+Those are two different installs on purpose. `feetech-servo-sdk` is the
+`scservo_sdk` this project actually drives the bus with, and `pyserial`
+finds the port; together they are a few megabytes. `.[robot]` is
+`lerobot[feetech]`, which pulls torch and **does not resolve on Python
+3.13** — so on a board running 3.13 you cannot install it at all. You do
+not need to: run the two `lerobot-` commands on any machine where it does
+install, and point `arm.calibration` at the JSON they write. The file
+format is all this project wants from lerobot.
+
+If `tlod ports` says `no serial ports found`, check `pyserial` is
+importable before you check the cable: `find_ports()` returns an empty
+list when the import fails, so a missing package and a missing adapter
+look identical.
 
 Linux: `sudo usermod -aG dialout $USER`, then log out and back in.
 
@@ -276,6 +301,11 @@ arm:
   port: /dev/ttyACM0
   lerobot_id: my_arm
 ```
+
+`lerobot_id` looks the file up in lerobot's cache, so it only works on
+the machine that ran the calibration. If that was a different machine,
+copy the JSON over and use `calibration: calib/mine.json` instead —
+`Calibration.load` reads either format.
 
 ### 3.3 First light
 
@@ -298,6 +328,13 @@ Measure where the tip actually landed. Within a few mm is good. A constant
 offset means calibration centres are off; a scaling error means a wrong
 `sign` or gear ratio.
 
+What this arm does, once calibrated: **~2 mm horizontally**, and **5–20 mm
+low** in z. The vertical error is not calibration and recalibrating will
+not remove it — the servos yield under gravity, and yield more the
+further out the arm reaches. Treat x and y as accurate and z as
+approximate, command a little high when height matters, and do not spend
+an evening trying to calibrate droop away. (We did.)
+
 ### 3.5 Replace estimates with measurements
 
 *(This is the last arm-only step. If you just wanted a working arm, you
@@ -312,20 +349,48 @@ tlod bench all
 Update `arm.sim_max_speed`, `sim_accel`, `sim_latency` so simulation stays
 trustworthy.
 
+The two motion numbers worth knowing, measured here with the limits in
+`configs/real_arm.yaml`: an **80 mm strike drop in 0.23 s** at best, 0.27 s
+at an accuracy worth having, and a **150 mm move that will not go below
+0.48 s**. The game's `strike_duration` defaults are close enough to the
+first of those that they are worth re-reading against your own arm rather
+than assuming.
+
 ### 3.6 Camera
 
 Fixed mount, angled down. Steeper is better — error from a wrong assumed
 hand height scales with the tangent of the viewing angle.
 
+**Find it first.** `/dev/video*` indices move between reboots and
+replugs — twice in one evening here, and `/dev/video5` was a hardware
+encoder on one boot and the camera on the next. `tlod cameras` lists what
+opens; `python3 scripts/board_view.py 9x6 <index>` shows you what each one
+is actually looking at, over HTTP, which is the only way to tell on a
+headless board.
+
 Intrinsics (once per camera and resolution):
 
 ```bash
-tlod calibrate intrinsics --camera 0 -o calib/intrinsics.npz
+tlod calibrate intrinsics --camera 0 -o calib/intrinsics.npz \
+    --fisheye --preview 8080
 ```
 
 Move a chessboard around: corners, edges, near, far, tilted. Auto-captures
 15 views. Aim for RMS below 1 px. `--pattern` counts **inner** corners, so
 a printed 10×7 board is `9x6`.
+
+- `--fisheye` switches to an equidistant model. Anything much past 120° of
+  field of view needs it: the default pinhole model does not merely fit
+  worse, it cannot fit at all. The wide module here came out at **0.165 px
+  RMS** with `--fisheye`.
+- `--preview PORT` serves the annotated view while capturing. Without it,
+  a run where the board is never detected prints nothing and looks exactly
+  like a dead camera.
+- The command prints the horizontal field of view it *recovered* next to
+  the one in your config. Believe the recovered one: the module here is
+  advertised at 145° diagonal / 120° horizontal and measures **74°** in the
+  640x480 mode USB bandwidth allows, because that mode is a crop. Put the
+  measured number in `camera.hfov_deg`; it seeds the solve.
 
 Extrinsics (every time the camera or arm moves):
 
@@ -336,31 +401,63 @@ tlod calibrate extrinsics --sim --intrinsics calib/intrinsics.npz \
 
 # for real
 tlod calibrate extrinsics --intrinsics calib/intrinsics.npz \
-    -o calib/extrinsics.npz
+    -o calib/extrinsics.npz --marker red --gripper 0 --heights 0.06,0.14,0.22
 ```
 
-Stick a green marker on the gripper. The arm drives to twelve poses and
-finds the marker in each; forward kinematics supplies the 3D coordinates,
-so the result is in exactly the frame the controller commands in. Expect a
-few px RMS. One point far worse than the rest is a mislocated marker —
-rerun.
+Stick a coloured marker on the gripper. The arm drives to a spread of
+poses and finds the marker in each; forward kinematics supplies the 3D
+coordinates, so the result is in exactly the frame the controller commands
+in. Expect a few px RMS. One point far worse than the rest is a mislocated
+marker — rerun.
+
+- `--marker` picks the colour. **The largest blob of that colour wins,
+  whatever it belongs to**, and a wrong pick does not fail: it produces a
+  confident calibration of the camera against a mug. Run
+  `python3 scripts/marker_view.py red` first and watch where the crosshair
+  settles.
+- `--gripper` is the jaw opening held during the run. It matters because
+  an open jaw puts the marker somewhere other than the tool point that
+  forward kinematics is reporting, and that offset goes straight into the
+  extrinsics. Which end of the travel is closed depends on the sign in
+  your calibration, so check rather than assume.
+- `--heights` is the set of tool heights to visit. The spread in z is what
+  conditions the solve, so narrow it only if the arm hides the marker when
+  raised, and narrow it as little as you can.
 
 ```yaml
 camera:
   source: opencv
   index: 0
+  hfov_deg: 74.0
   intrinsics: calib/intrinsics.npz
   extrinsics: calib/extrinsics.npz
 ```
 
-Verify:
+Verify — three ways, in increasing order of how much they mean:
 
 ```bash
-tlod touch --view
+python3 scripts/check_extrinsics.py red     # camera vs kinematics, in mm
+tlod vision-check --with-arm                # the same idea, scored and gated
+tlod touch --real                           # the whole chain, end to end
 ```
 
-The drawn skeleton must land on the real arm. If it is offset, extrinsics
-are wrong and nothing downstream will fix it.
+`touch` finds coloured objects on the table and drives the tool to each
+one. Watch the gap between the tool and the object: that gap is every
+error in the system added up, and it is the only one of the three with
+nothing standing in for anything. Here it is **2.5 mm**, against 4.5 mm
+from `check_extrinsics.py` and 12.1 mm from `vision-check --with-arm` —
+the last is worst because its marker sits on the gripper jaw rather than
+the tool point, so it is scoring a real offset that the others do not
+have.
+
+`touch` requires `--real` and there is no simulated version. Rendering
+objects through the same calibration that recovers them would agree with
+itself whatever the camera's true position, which is a check that cannot
+fail and therefore says nothing.
+
+For reference, the mounted camera here solved to 445 mm forward, 35 mm
+right and 451 mm above the base — a sanity check you can make with a tape
+measure before trusting anything downstream.
 
 ### 3.6b Verifying vision on a headless board
 
@@ -405,6 +502,19 @@ tlod vision-serve --preview 8081 --to <control board>
 Then open `http://<vision board>:8081/` in a browser. Plain MJPEG, no
 player needed. It is throttled and runs on its own thread, but it is a
 diagnostic — leave it off in normal operation.
+
+Four smaller views cover the parts of bring-up the main commands answer
+badly, each serving the same kind of MJPEG stream on port 8080:
+
+| | question it answers |
+|---|---|
+| `scripts/board_view.py` | is the chessboard being detected at all? |
+| `scripts/marker_view.py` | which blob would the calibrator pick? |
+| `scripts/calib_view.py` | is the lens model describing this lens? |
+| `scripts/check_extrinsics.py` | does the camera agree with the arm, in mm? |
+
+Each one's docstring explains the failure it was written for. More in
+[headless.md](headless.md).
 
 ### 3.7 Play
 
@@ -551,13 +661,29 @@ FK at home, so it fails loudly if the geometry moved.
 Unknown keys raise rather than being ignored — a silently dropped typo is
 how a safety limit fails to apply.
 
+**Config files do not layer.** `Config.load` reads the one file you pass
+and nothing else; every key you leave out falls back to the dataclass
+defaults in `src/tlod/config.py`, *not* to `configs/default.yaml`. That
+file is a dump of those defaults, not a base layer the others inherit
+from — so editing it changes nothing about a run started with
+`-c configs/opi.yaml`, and it can drift out of step with the code without
+anything complaining. (It already has: it carries
+`camera.latency_offset: 0.035` where the dataclass says `None`.) Each
+config in `configs/` is a complete, standalone answer for one machine.
+
+The files that exist: `default.yaml` (the defaults, written out),
+`opi.yaml` (the single-board rig — real camera, real arm, `depth_mode:
+plane`), `real_arm.yaml` (the arm on a slower control board),
+`perf.yaml` (one vision tweak).
+
 ### `arm`
 
 | field | default | |
 |---|---|---|
 | `backend` | `mock` | `mock` or `feetech` |
 | `port` | `""` | empty auto-detects if there is exactly one |
-| `lerobot_id` | `""` | read `lerobot-calibrate` output |
+| `lerobot_id` | `""` | look `lerobot-calibrate` output up in lerobot's cache |
+| `calibration` | `""` | path to a calibration JSON — ours or lerobot's |
 | `servo_accel` | 9.2 | rad/s², the servo's own ramp. **Bigger is harsher.** |
 | `torque_limit` | 800 | of 1000, normal operation |
 | `sim_max_speed` | 3.5 | rad/s — estimate, measure yours |
@@ -603,14 +729,25 @@ Only relevant on real hardware. See [power.md](power.md).
 | `latency_offset` | `None` | `None` estimates from the measured frame period. Never hardcode below one frame time. |
 | `autofocus`, `autoexposure` | `False` | both add latency and hunt during motion |
 | `intrinsics`, `extrinsics` | `""` | paths to your `.npz` files |
+| `hfov_deg` | 145.0 | horizontal field of view, **measured**, not the box's number. Seeds the intrinsics solve. |
 
 ### `vision`
 
 | field | default | |
 |---|---|---|
 | `depth_mode` | `auto` | `plane`, `size`, or `auto` (size, clamped) |
+| `hand_height` | 0.06 | m above the table, used by `plane` |
 | `palm_width_m` | 0.081 | knuckle span; depth error is proportional |
 | `process_noise` | 4.0 | Kalman responsiveness. Fitted on a synthetic path — refit on a recording. |
+
+One camera cannot measure depth, so `size` mode infers it from apparent
+palm width — a proportional error on a quantity that varies between
+people, and the largest single error source in the system. `depth_mode:
+plane` with the palm **flat on the table** removes it: the height is then
+known rather than guessed, and the pixel ray meets a known plane. If your
+game can ask for a flat hand, ask for it, and set `hand_height` to the
+thickness of a palm rather than leaving the 60 mm default that assumes a
+hovering hand.
 
 ### `runtime`
 
@@ -626,7 +763,8 @@ Only relevant on real hardware. See [power.md](power.md).
 
 | symptom | cause | fix |
 |---|---|---|
-| arm reaches past things | extrinsics wrong | `tlod touch --view`; skeleton must land on the real arm |
+| arm reaches past things | extrinsics wrong | `tlod touch --real`; watch the gap between tool and object |
+| the tool lands 1–2 cm low | servo droop under gravity | not calibration. Command higher; see 3.4 |
 | constant offset one way | extrinsics | recalibrate; the marker must be the only green thing in frame |
 | a joint moves backwards | inverted `sign` | `tlod probe --real`, move it by hand, check the sign; fix the calibration |
 | a joint reads nothing | motor not answering | check its 3-pin cable and that its id was set |
@@ -641,10 +779,13 @@ Only relevant on real hardware. See [power.md](power.md).
 | a joint goes briefly limp mid-move | undervoltage, servo dropped torque | same; `tlod power` reports latched faults |
 | jitter high, overruns >10% | CPU starved | lower `control_hz` or camera resolution |
 | latency worse than expected | camera gave 30 fps, not 60 | `tlod bench camera --force` |
-| `no serial ports found` | power or permissions | check the supply; `usermod -aG dialout` |
+| `no serial ports found` | `pyserial` missing, power, or permissions | `python -c "import serial"` **first** — a failed import returns the same empty list; then `usermod -aG dialout` |
+| camera opens, frames wrong or absent | `/dev/video*` renumbered | `tlod cameras`, `scripts/board_view.py`; indices move between boots |
+| it keeps touching the wrong thing | largest blob of the colour wins | `scripts/marker_view.py`; remove the distractor or change colour |
+| vision looks right but the arm acts on something else | a stale `vision-serve` still publishing | check for a leftover process; the mailbox takes whatever arrived last |
 | mediapipe crashes on macOS | 1.0.x aborts on arm64 | already pinned to 0.10.3x; check your install |
 | `no hand detector available` in the log | mediapipe missing or unbuildable | everything but hands still runs; `pip install -e ".[hands]"` |
-| a change did nothing | your config overrides the preset | `tlod config -o /tmp/x.yaml` and read what is in effect |
+| a change did nothing | your config overrides the preset, or you edited `default.yaml` expecting other configs to inherit it | configs do not layer; `tlod config -o /tmp/x.yaml` and read what is in effect |
 
 Reproduce anything odd:
 
