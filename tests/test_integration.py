@@ -12,6 +12,7 @@ of the kind found during bring-up (a mock camera running 30x too fast,
 which pushed loop jitter to 70 ms).
 """
 
+import threading
 import time
 
 import numpy as np
@@ -386,3 +387,30 @@ class TestServoLoadContactWiring:
         assert sensor.poll() is None, "resting load scored as contact"
         state["load"] = np.array([0.0, 0.45, 0.60, 0.35, 0.0, 0.0])
         assert sensor.poll() is not None
+
+
+def test_the_overlay_stream_starts_and_stops_cleanly():
+    """Watching matters more than it sounds on a headless board: without
+    it a feint and a strike look the same from across the table, and so
+    do a tracked hand and a lost one. The failure to guard against is a
+    render thread outliving the run and holding the serial bus."""
+    import socket
+
+    from tlod.cli import _serve_overlay
+
+    app, _ = build(TrackHandPolicy())
+    with socket.socket() as probe:      # a port nothing else is on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    assert _serve_overlay(app, app.locator.projector, 0) is None, "started when not asked"
+
+    with app:
+        server = _serve_overlay(app, app.locator.projector, port)
+        assert server is not None
+        time.sleep(0.4)
+        assert server.latest() is not None, "served no frame"
+        server.stop()
+    names = {t.name for t in threading.enumerate() if t.is_alive()}
+    time.sleep(0.3)
+    assert "overlay" not in {t.name for t in threading.enumerate() if t.is_alive()}, names

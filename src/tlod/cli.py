@@ -331,7 +331,8 @@ def cmd_touch(args) -> int:
         control_hz=cfg.runtime.control_hz,
     )
     app.projector = projector
-    _run_for(app, args.duration, view=args.view, projector=projector)
+    _run_for(app, args.duration, view=args.view, projector=projector,
+             preview=getattr(args, 'preview', 0))
 
     print(f"\n  touched {len(policy.visited)}: {', '.join(policy.visited) or 'none'}")
     for det in app.objects:
@@ -429,7 +430,8 @@ def cmd_play(args) -> int:
               f"difficulty={args.difficulty}")
 
     try:
-        _run_for(app, args.duration, view=args.view, projector=app.projector)
+        _run_for(app, args.duration, view=args.view, projector=app.projector,
+             preview=getattr(args, 'preview', 0))
     finally:
         # Sensors may own a thread or a serial port (SerialContactSensor
         # does). ServoLoadContactSensor owns neither, but closing through
@@ -554,8 +556,10 @@ def build_app(cfg: Config, render: bool = False):
 # --------------------------------------------------------------------------
 
 
-def _run_for(app, duration: float, view: bool = False, projector=None) -> None:
+def _run_for(app, duration: float, view: bool = False, projector=None,
+             preview: int = 0) -> None:
     with app:
+        server = _serve_overlay(app, projector, preview)
         try:
             if view:
                 # The window must own the main thread; on macOS a cv2
@@ -571,10 +575,57 @@ def _run_for(app, duration: float, view: bool = False, projector=None) -> None:
                     time.sleep(0.2)
         except KeyboardInterrupt:
             print("\ninterrupted")
+        finally:
+            if server is not None:
+                server.stop()
         print(app.latency_report())
         pose = app.controller.pose()
         print(f"\n  final tool position: "
               f"({pose.x:+.3f}, {pose.y:+.3f}, {pose.z:+.3f}) m")
+
+
+def _serve_overlay(app, projector, port: int):
+    """Stream the annotated view over HTTP, for boards with no screen.
+
+    The same frame `--view` draws -- arm skeleton, tracked hand, the
+    policy's own HUD, the HIT/DODGED banner -- which is the difference
+    between watching a robot move and watching it decide. Without it a
+    feint and a strike are indistinguishable from across the table, and
+    so are a tracked hand and a lost one.
+
+    Rate-limited hard, because rendering reads the arm over the same
+    serial bus the control loop uses, and during a strike that loop is
+    already doing three transactions a tick.
+    """
+    if not port:
+        return None
+    import threading
+
+    from tlod.vision.preview import PreviewServer
+    from tlod.viz.viewer import Viewer
+
+    server = PreviewServer(port=port, max_fps=8.0)
+    server.start()
+    viewer = Viewer(app, projector)
+    stopping = threading.Event()
+
+    def pump():
+        while not stopping.wait(1.0 / 8.0):
+            try:
+                server.offer(viewer.render_once())
+            except Exception:
+                log.debug("overlay render failed", exc_info=True)
+
+    threading.Thread(target=pump, name="overlay", daemon=True).start()
+    original = server.stop
+
+    def stop():
+        stopping.set()
+        original()
+
+    server.stop = stop
+    print(f"  watch it at http://<this board>:{port}/")
+    return server
 
 
 def cmd_sim(args) -> int:
@@ -588,7 +639,8 @@ def cmd_sim(args) -> int:
     print(f"tier A simulation: synthetic camera, scripted hand, simulated arm "
           f"[policy={args.policy}]")
     app = build_app(cfg, render=args.view)
-    _run_for(app, args.duration, view=args.view, projector=app.projector)
+    _run_for(app, args.duration, view=args.view, projector=app.projector,
+             preview=getattr(args, 'preview', 0))
     return 0
 
 
@@ -633,7 +685,8 @@ def cmd_hybrid(args) -> int:
             input("  press Enter when ready, Ctrl-C to abort... ")
     print("wave your hand in front of the camera.")
     app = build_app(cfg)
-    _run_for(app, args.duration, view=args.view, projector=app.projector)
+    _run_for(app, args.duration, view=args.view, projector=app.projector,
+             preview=getattr(args, 'preview', 0))
     return 0
 
 
@@ -727,7 +780,8 @@ def cmd_replay(args) -> int:
     app = build_app(cfg)
     app.camera = ReplayCamera(args.path, realtime=not args.fast, loop=args.loop)
     print(f"  replaying {len(app.camera)} frames from {args.path}")
-    _run_for(app, args.duration, view=args.view, projector=app.projector)
+    _run_for(app, args.duration, view=args.view, projector=app.projector,
+             preview=getattr(args, 'preview', 0))
     return 0
 
 
@@ -1579,6 +1633,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--duration", type=float, default=5.0)
     s.add_argument("--policy", default="track_hand")
     s.add_argument("--view", action="store_true", help="open a window")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="stream the annotated view on this port, e.g. 8080; "
+                        "shows what the robot sees and decides, for boards "
+                        "with no screen")
     s.set_defaults(func=cmd_sim)
 
     s = sub.add_parser("hybrid", help="tier B: real camera and hand, simulated arm")
@@ -1590,6 +1648,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="drive the real arm as well, so it follows your hand. "
                         "Camera and servo adapter must be on this machine")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="stream the annotated view on this port, e.g. 8080; "
+                        "shows what the robot sees and decides, for boards "
+                        "with no screen")
     s.set_defaults(func=cmd_hybrid)
 
     s = sub.add_parser("bench", help="measure what is currently estimated")
@@ -1612,6 +1674,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--fast", action="store_true", help="ignore original timing")
     s.add_argument("--loop", action="store_true")
     s.add_argument("--view", action="store_true")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="stream the annotated view on this port, e.g. 8080; "
+                        "shows what the robot sees and decides, for boards "
+                        "with no screen")
     s.set_defaults(func=cmd_replay)
 
     s = sub.add_parser("touch", help="detect table objects and touch each one")
@@ -1620,6 +1686,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--real", action="store_true",
                    help="required: this command drives the real arm against "
                         "what the real camera sees")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="stream the annotated view on this port, e.g. 8080; "
+                        "shows what the robot sees and decides, for boards "
+                        "with no screen")
     s.set_defaults(func=cmd_touch)
 
     s = sub.add_parser("play", help="play hand slap; the robot slaps, you dodge")
@@ -1639,6 +1709,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--seed", type=int, default=None)
     s.add_argument("--view", action="store_true")
+    s.add_argument("--preview", type=int, default=0, metavar="PORT",
+                   help="stream the annotated view on this port, e.g. 8080; "
+                        "shows what the robot sees and decides, for boards "
+                        "with no screen")
     s.set_defaults(func=cmd_play)
 
     s = sub.add_parser("eval", help="sweep opponent reaction time, measure win rate")
