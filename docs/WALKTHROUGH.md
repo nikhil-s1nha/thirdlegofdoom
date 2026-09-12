@@ -74,10 +74,8 @@ pip install -e ".[hands,dev]"
 ```bash
 tlod sim --duration 5        # the whole loop, synthetic
 tlod move 0.22 0 0.12        # move the tool to a point
-tlod touch --view            # detect table objects and touch each one
+tlod play --view             # hand slap vs a simulated human
 pytest
-
-# the game is on the `gamification` branch: tlod play --view
 ```
 
 A healthy `tlod sim`:
@@ -167,6 +165,9 @@ src/tlod/
     app.py          wires it together; defines Policy
 
   game/
+    handslap.py     commit timing, feints, scoring
+    opponent.py     a simulated human, so you can test without one
+    contact.py      did it land? geometric / proximity / servo load
     touch.py        visit each detected object. Good calibration check.
     base.py         state machine that is also a Policy
 

@@ -1,10 +1,7 @@
 # 6 DOF Hand Slap
 
-Arm control and vision for an SO-ARM101 (SO-101). A fixed camera watches
-the table; the arm reaches for what it sees.
-
-The hand-slap game lives on the `gamification` branch. This branch is the
-arm on its own.
+A tabletop game robot on an SO-ARM101 (SO-101) arm. A fixed camera watches
+your hand; the arm plays hand-slap against you.
 
 Runs fully in simulation — no hardware needed to try it.
 
@@ -14,11 +11,13 @@ Runs fully in simulation — no hardware needed to try it.
 python -m venv .venv && source .venv/bin/activate    # Python 3.12+
 pip install -e ".[hands,dev]"
 
+tlod play --view              # hand slap vs a simulated human
+tlod play --real-hand --view  # play it with your own hand, via webcam
 tlod move 0.22 0 0.12         # move the tool to a point
 tlod sim --view               # the whole loop, synthetic
 tlod hybrid --view            # real webcam and hand, simulated arm
 tlod hybrid --real            # ... and the real arm, hovering over your hand
-tlod touch --view             # detect table objects and touch each one
+tlod touch --real             # detect table objects and touch each one
 pytest
 ```
 
@@ -30,6 +29,8 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 |---|---|
 | `move X Y Z` | move the tool to a point (sim or real) |
 | `reach` | probe the reachable workspace |
+| `play` | hand slap; `--real-hand` uses your webcam |
+| `eval` | sweep opponent reaction time, measure win rate |
 | `touch` | detect table objects and touch each one |
 | `sim` / `hybrid` | run the loop synthetic / with a real camera, `--real` for the arm too |
 | `calibrate intrinsics\|extrinsics` | lens, then camera-to-robot transform |
@@ -45,9 +46,10 @@ New here, or have the hardware? Read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 
 | | |
 |---|---|
-| `main`, `arm-core` | **you are here** — arm, vision, calibration |
-| `gamification` | the above plus hand slap |
-| `UartComm` | main plus uart not ip based comms |
+| `main` | **you are here** — arm, vision, calibration, and the game |
+| `arm-core` | arm and vision only, no game |
+| `gamification` | merged into `main`; kept for history |
+| `UartComms` | an earlier UART transport, superseded by `--serial-port` on `main` |
 
 ## Layout
 
@@ -57,8 +59,7 @@ src/tlod/
   arm/            model (FK/IK), backend, mock, feetech, controller, primitives
   vision/         camera, calibration, hands, tracking, objects, scene, recording
   runtime/        signal (mailbox), loop (fixed rate), app (threads + Policy)
-  net/            UDP split: vision on one board, control on another
-  game/           touch (visit detected objects), base state machine
+  game/           handslap, opponent, contact, touch
   viz/            overlay and viewer
 ```
 
@@ -71,9 +72,9 @@ hardware are the same code path.
 
 - **The arm is 5-DOF, not 6.** Six motors, one drives the gripper. You get
   position + tool pitch + roll; yaw is fixed by the base pan.
-- **Sense-to-motion is ~200–370 ms**, slower than human reaction. The
-  design answer is that the robot initiates rather than responds; see
-  [docs/slap-analysis.md](docs/slap-analysis.md).
+- **Sense-to-motion is ~200–370 ms**, slower than human reaction. So the
+  robot slaps and you dodge — latency only taxes whoever is responding.
+  See [docs/slap-analysis.md](docs/slap-analysis.md).
 - **`mediapipe` dropped `mp.solutions` at 0.10.30**, and 1.0 crashes on
   macOS arm64. Pinned per platform, and on arm64 Linux per interpreter
   too: Python 3.12 caps at 0.10.18, 3.13 has no 0.10.x wheel and takes
