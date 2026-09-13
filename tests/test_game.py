@@ -495,6 +495,76 @@ def test_the_retract_target_follows_the_hand():
         robot.controller.stop(park=False)
 
 
+# -- performance -----------------------------------------------------------
+
+def test_nothing_performs_during_a_commit():
+    """The mechanic the whole game rests on: a feint only scores while it
+    is credible, so a robot mugging on the way down draws no flinch and
+    wins nothing. Performance belongs either side of a bluff, never
+    inside it."""
+    game = HandSlapGame("normal", seed=3)
+    robot = fake_robot(np.array([0.22, 0.0, 0.03]))
+    try:
+        game.transition("ready")
+        game.state_since = time.perf_counter() - 5.0
+        for _ in range(4000):
+            game._state_ready(robot, robot.controller, 0.005)
+            if game.state in ("strike", "feint"):
+                break
+        assert game.state in ("strike", "feint"), "never committed"
+        assert game.motion is not None
+        assert game.motion.name in ("strike", "feint"), (
+            f"committed with a {game.motion.name} running")
+    finally:
+        robot.controller.stop(park=False)
+
+
+def test_the_reaction_matches_the_outcome_and_happens_once():
+    game = HandSlapGame("normal", seed=3)
+    robot = fake_robot(np.array([0.22, 0.0, 0.03]))
+    try:
+        game.last_result = "HIT"
+        game._performed = False
+        game.transition("settle")
+        game._state_settle(robot, robot.controller, 0.005)
+        first = game.motion
+        assert first is not None and first.name == "flourish"
+
+        game.motion = None                    # as if it had run to the end
+        game._state_settle(robot, robot.controller, 0.005)
+        assert game.motion is None, "gloated twice for one round"
+    finally:
+        robot.controller.stop(park=False)
+
+
+def test_deadpan_neither_sways_nor_performs():
+    """Measuring the robot and watching it are different jobs."""
+    from tlod.game.handslap import Personality
+
+    game = HandSlapGame("normal", seed=3, personality=Personality(enabled=False))
+    robot = fake_robot(np.array([0.22, 0.0, 0.03]))
+    try:
+        assert game._sway() == (0.0, 0.0)
+        game.last_result = "HIT"
+        game._performed = False
+        game.transition("settle")
+        game._state_settle(robot, robot.controller, 0.005)
+        assert game.motion is None
+    finally:
+        robot.controller.stop(park=False)
+
+
+def test_the_sway_is_horizontal_and_small():
+    """A vertical bob would change the height a strike starts from, and
+    with it the depth it lands at -- which is the bug we just spent a
+    session chasing, reintroduced as a joke."""
+    game = HandSlapGame("normal", seed=3)
+    radius = game.personality.sway_radius
+    seen = [game._sway() for _ in range(200)]
+    assert all(np.hypot(x, y) <= radius + 1e-9 for x, y in seen)
+    assert len(seen[0]) == 2, "the sway must not have a z component"
+
+
 def test_the_strike_launch_does_not_read_as_contact():
     """Servo load cannot tell the torque of accelerating the arm from the
     torque of meeting a hand, and at 35 rad/s^2 the launch clears any

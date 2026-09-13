@@ -380,6 +380,117 @@ class Feint(Motion):
         return self.finished
 
 
+# -- performance -----------------------------------------------------------
+#
+# The point of this robot is to be entertaining, and a machine that only
+# ever moves with purpose is not. These give it a body language: a taunt
+# after a bluff lands, a sulk when it misses, a chomp because a gripper
+# that can open and close should sometimes open and close for no reason.
+#
+# *Where* the performance goes is a design constraint rather than a
+# matter of taste. A feint scores only if it is credible for its first
+# hundred milliseconds -- that is the entire mechanic -- and a robot
+# visibly clowning during a commit draws no flinch and wins nothing. So
+# none of this runs during a commit. It runs while waiting, and after the
+# round is already decided, which is where a person puts it too.
+
+
+@dataclass(frozen=True, slots=True)
+class Move:
+    """One flourish: how far each joint swings, and how many times."""
+
+    amplitudes: tuple[float, ...]      # radians, JOINT_NAMES order
+    cycles: float
+
+
+# Amplitudes are timid on the joints that translate the tool and generous
+# on the ones that do not: a 26-degree wrist roll is unmistakable across a
+# room and moves the gripper nowhere, where the same angle at the shoulder
+# would sweep it through 10 cm of table.
+#
+# One swing each, and a slow one, because the motion profile is not a
+# suggestion. Peak joint acceleration for a swing of amplitude A at f Hz
+# is A(2*pi*f)^2, so a 0.5 rad wiggle at 10 Hz asks for ~2000 rad/s^2
+# against a configured 35 and arrives as a 1.5-degree tremble -- correctly
+# smoothed into nothing. At one cycle over 0.8 s the same amplitude needs
+# ~28 rad/s^2 and survives. A single deliberate gesture also simply reads
+# better than a buzz.
+FLOURISHES: dict[str, Move] = {
+    #          pan   lift  elbow wrist roll  grip
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.45, 0.00), 1.0),
+    "wag":    Move((0.13, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
+    "nod":    Move((0.00, 0.00, 0.00, 0.25, 0.00, 0.00), 1.0),
+    "bob":    Move((0.00, 0.10, -0.13, 0.00, 0.00, 0.00), 1.0),
+    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.60), 1.0),
+    "droop":  Move((0.00, 0.13, 0.00, 0.10, 0.00, 0.00), 0.5),
+    "strut":  Move((0.09, 0.00, 0.00, 0.00, 0.35, 0.00), 1.0),
+}
+
+# Which flourishes suit which outcome. Named by mood rather than by
+# result so the game reads as a performer rather than a scoreboard.
+MOODS: dict[str, tuple[str, ...]] = {
+    "gloat": ("shimmy", "strut", "chomp"),      # it landed one
+    "sulk": ("droop", "nod"),                   # it missed
+    "smug": ("wag", "shimmy"),                  # its bluff worked
+    "caught": ("nod", "droop"),                 # the human held through it
+    "idle": ("bob", "chomp"),
+}
+
+
+class Flourish(Motion):
+    """A wiggle about the pose it starts from, going nowhere.
+
+    Joint space on purpose. There is no target and no IK, the amplitude
+    envelope is zero at both ends, so it returns to exactly the
+    configuration it began in and cannot drift toward the hand however it
+    is interrupted or replayed. That is what makes it safe to run for fun
+    on a machine that also swings at people.
+
+    It is still a Motion, so the state machine can abandon it mid-swing
+    the instant something real needs doing.
+    """
+
+    name = "flourish"
+
+    def __init__(self, move: Move, duration: float = 0.8, speed: float = 2.0) -> None:
+        super().__init__()
+        self.move = move
+        self.duration = max(duration, 1e-3)
+        self.speed = speed
+        self._q0: np.ndarray | None = None
+
+    def _on_start(self, controller) -> None:
+        self._q0 = controller.commanded.copy()
+
+    def step(self, controller, dt) -> bool:
+        if self.finished:
+            return True
+        s = min(self.elapsed / self.duration, 1.0)
+        # A half-sine envelope over a whole number of swings: the offset
+        # is zero at s=0 and s=1 whatever the amplitude, so the arm ends
+        # where it started without needing to be driven back.
+        envelope = np.sin(np.pi * s)
+        swing = np.sin(2.0 * np.pi * self.move.cycles * s)
+        amplitudes = np.asarray(self.move.amplitudes, float)
+        controller._write(self._q0 + amplitudes * swing * envelope,
+                          max_speed=self.speed, dt=dt)
+        if self._complete(controller, self.duration):
+            self.finished = True
+        return self.finished
+
+
+def flourish(mood: str, rng=None, duration: float = 0.8, speed: float = 2.0) -> Flourish:
+    """A flourish suiting `mood`, picked at random so it does not stale.
+
+    Repetition is what makes a performance stop being funny, and this one
+    runs several times a minute.
+    """
+    names = MOODS.get(mood) or MOODS["idle"]
+    pick = (rng.choice(len(names)) if rng is not None
+            else np.random.randint(len(names)))
+    return Flourish(FLOURISHES[names[int(pick)]], duration=duration, speed=speed)
+
+
 class Hold(Motion):
     """Do nothing for a while, without blocking the control thread."""
 

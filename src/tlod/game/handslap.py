@@ -47,7 +47,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from tlod.arm import model
-from tlod.arm.primitives import Feint, Hover, Retract, Strike, StrikeLimits
+from tlod.arm.primitives import Feint, Hover, Retract, Strike, StrikeLimits, flourish
 from tlod.game.base import StateMachine
 from tlod.game.contact import ContactSensor, GeometricContactSensor
 from tlod.types import Pose
@@ -78,6 +78,35 @@ class Rules:
 
     flinch_distance: float = 0.045    # hand movement during a feint that counts
     hold_reward: bool = True          # holding through a feint scores for the human
+
+
+@dataclass(slots=True)
+class Personality:
+    """How much the robot performs, as opposed to plays.
+
+    The premise is a silly robot, so it fidgets while it waits and reacts
+    when a round ends. Both are free: `ready` is time spent deciding when
+    to commit, and `settle` was already 0.6 s of doing nothing between
+    rounds, so a taunt costs no tempo at all -- it fills a pause that was
+    there anyway.
+
+    What is deliberately *not* here is any performance during a commit.
+    A feint scores only while it is credible, and a robot mugging on the
+    way down draws no flinch and wins nothing. The comedy has to live
+    either side of the bluff, never inside it.
+
+    `sway` is the one that touches play, and only helpfully: a hover that
+    drifts in a small circle is harder to read the moment of commitment
+    off than one that sits perfectly still. It is horizontal on purpose
+    -- a vertical bob would change the height a strike starts from, and
+    so the depth it lands at.
+    """
+
+    enabled: bool = True
+    sway_radius: float = 0.010        # metres, horizontal only
+    sway_period: float = 2.4          # seconds per lap
+    flourish_duration: float = 0.8    # one slow swing; see FLOURISHES
+    flourish_speed: float = 2.0       # rad/s; jaunty, not violent
 
 
 @dataclass(slots=True)
@@ -190,6 +219,7 @@ class HandSlapGame(StateMachine):
         auto_start: bool = True,
         truth_provider=None,
         rules: Rules | None = None,
+        personality: Personality | None = None,
     ) -> None:
         super().__init__()
         self.difficulty = (
@@ -211,6 +241,8 @@ class HandSlapGame(StateMachine):
         # already escaped still reads as being under the tool.
         self.truth_provider = truth_provider
         self.rules = rules or Rules()
+        self.personality = personality or Personality()
+        self._performed = False
         self.hand_at_commit: np.ndarray | None = None
         self.flinches = 0
         self.holds = 0
@@ -246,6 +278,42 @@ class HandSlapGame(StateMachine):
             return None
         self.reason = ""
         return track
+
+    def _sway(self) -> tuple[float, float]:
+        """A small horizontal circle to hover on, or nothing.
+
+        Restlessness, mostly -- a robot that holds perfectly still looks
+        switched off. It earns its place in play too: a hover that drifts
+        is harder to read the instant of commitment off than one that is
+        motionless, and reading that instant is the human's whole job.
+
+        Horizontal only. A vertical bob would change the height the
+        strike starts from, and with it the depth it lands at.
+        """
+        if not self.personality.enabled or self.personality.sway_radius <= 0:
+            return 0.0, 0.0
+        angle = 2.0 * np.pi * time.perf_counter() / max(self.personality.sway_period, 0.1)
+        r = self.personality.sway_radius
+        return r * float(np.cos(angle)), r * float(np.sin(angle))
+
+    def _perform(self, controller) -> None:
+        """React to the round that just ended, in the pause after it.
+
+        `settle` already sat still for 0.6 s between rounds; this fills
+        that with something to watch rather than adding time to it. Once
+        per round -- a robot that gloats twice is a robot with a bug.
+        """
+        if self._performed or not self.personality.enabled:
+            return
+        self._performed = True
+        mood = {"HIT": "gloat", "DODGED": "sulk",
+                "FLINCH": "smug", "HELD": "caught"}.get(self.last_result, "idle")
+        self.run_motion(
+            flourish(mood, rng=self.rng,
+                     duration=self.personality.flourish_duration,
+                     speed=self.personality.flourish_speed),
+            controller,
+        )
 
     def _may_strike(self, robot) -> bool:
         if robot.controller.estopped:
@@ -316,8 +384,10 @@ class HandSlapGame(StateMachine):
         # Keep hovering over the hand as it drifts. Slow, so the tracking
         # itself does not telegraph the strike.
         pos = track.filter.position
+        sway_x, sway_y = self._sway()
         controller.servo_pose(
-            Pose(float(pos[0]), float(pos[1]), float(pos[2]) + self.limits.hover_height),
+            Pose(float(pos[0] + sway_x), float(pos[1] + sway_y),
+                 float(pos[2]) + self.limits.hover_height),
             max_speed=1.0, dt=dt,
         )
 
@@ -372,6 +442,7 @@ class HandSlapGame(StateMachine):
             self.last_result = "HELD"
             self.announce(f"held through a feint ({self.score})")
         self.hand_at_commit = None
+        self._performed = False
         self.transition("resolve")
         target = self.hover_q if self.hover_q is not None else np.concatenate([model.HOME, [0.0]])
         self.run_motion(Retract(target, self.limits, duration=0.28), controller)
@@ -383,7 +454,12 @@ class HandSlapGame(StateMachine):
         pos = track.filter.predict(self.difficulty.strike_duration * 0.5)
         self.strike_target = np.array(pos, float)
         self.hand_at_commit = None
-        self.contact.arm()
+        # Blank the sensor for the launch. Servo load cannot tell the
+        # torque of accelerating the arm from the torque of meeting a
+        # hand, and the paddle has not reached the hand yet anyway --
+        # contact fires at ~70% of the travel, so nothing before 40% of
+        # it is real.
+        self.contact.arm(self.difficulty.strike_duration * 0.4)
         self.strikes += 1
         self.transition("strike")
         self.run_motion(
@@ -420,6 +496,7 @@ class HandSlapGame(StateMachine):
             self.score.human += 1
             self.last_result = "DODGED"
             self.announce(f"dodged ({self.score})")
+        self._performed = False
         self.transition("resolve")
         target = self.hover_q if self.hover_q is not None else np.concatenate([model.HOME, [0.0]])
         self.run_motion(Retract(target, self.limits, duration=0.28), controller)
@@ -429,8 +506,14 @@ class HandSlapGame(StateMachine):
             self.transition("settle")
 
     def _state_settle(self, robot, controller, dt) -> None:
-        self.step_motion(controller, dt)
-        if self.in_state < 0.6:
+        idle = self.step_motion(controller, dt)
+        if idle:
+            self._perform(controller)
+            idle = self.motion is None
+        # The dwell, and then however much of the reaction is still
+        # playing -- capped, so a motion that never reports done cannot
+        # wedge the game in a victory dance.
+        if self.in_state < 0.6 or (not idle and self.in_state < 1.6):
             return
         self.last_result = ""
         self.transition("ready" if self._hand(robot) is not None else "idle")

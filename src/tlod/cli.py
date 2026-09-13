@@ -22,8 +22,6 @@ from pathlib import Path
 
 import numpy as np
 
-log = logging.getLogger(__name__)
-
 # Kept in step with MARKER_BANDS in tlod.vision.calibrate_flow, and named
 # here rather than imported from it so that `tlod --help` does not have to
 # load OpenCV. cmd_calibrate checks the two agree.
@@ -377,7 +375,7 @@ def cmd_play(args) -> int:
         ProximityContactSensor,
         ServoLoadContactSensor,
     )
-    from tlod.game.handslap import HandSlapGame
+    from tlod.game.handslap import HandSlapGame, Personality
     from tlod.game.opponent import DodgingHand
 
     cfg = Config.load(args.config)
@@ -432,6 +430,7 @@ def cmd_play(args) -> int:
             source = (f"proximity, {contact.radius*1000:.0f} mm across and "
                       f"{contact.plane_tolerance*1000:.0f} mm deep")
         game = HandSlapGame(args.difficulty, limits=build_strike_limits(cfg),
+                            personality=Personality(enabled=not args.deadpan),
                             contact=contact, seed=args.seed)
         app.policy = game
 
@@ -447,14 +446,16 @@ def cmd_play(args) -> int:
             input("  press Enter when ready, Ctrl-C to abort... ")
     elif args.real_hand:
         cfg = play_config(cfg, args.camera, real=False)
-        game = HandSlapGame(args.difficulty, contact=ProximityContactSensor(), seed=args.seed)
+        game = HandSlapGame(args.difficulty, contact=ProximityContactSensor(), seed=args.seed,
+                            personality=Personality(enabled=not args.deadpan))
         app = build_app(cfg)
         app.policy = game
         game.start(app)
         print(f"tier B: real hand, simulated arm. difficulty={args.difficulty}")
         print("put your hand in view and try not to get slapped. space pauses, e is e-stop.")
     else:
-        game = HandSlapGame(args.difficulty, contact=GeometricContactSensor(), seed=args.seed)
+        game = HandSlapGame(args.difficulty, contact=GeometricContactSensor(), seed=args.seed,
+                            personality=Personality(enabled=not args.deadpan))
         app = build_game_app(cfg, game,
                              opponent=DodgingHand(reaction_time=args.reaction, seed=args.seed),
                              render=args.view)
@@ -501,7 +502,7 @@ def cmd_eval(args) -> int:
     short strike actually beat a human, and where is the crossover?
     """
     from tlod.game.contact import GeometricContactSensor
-    from tlod.game.handslap import Difficulty, HandSlapGame
+    from tlod.game.handslap import Difficulty, HandSlapGame, Personality
     from tlod.game.opponent import DodgingHand
 
     cfg = Config.load(args.config)
@@ -517,7 +518,11 @@ def cmd_eval(args) -> int:
             # isolating strike physics; misleading as a difficulty figure,
             # since feints are how the human scores.
             difficulty.feint_probability = 0.0
-        game = HandSlapGame(difficulty, contact=GeometricContactSensor(), seed=args.seed)
+        # Deadpan on purpose: eval exists to measure win rates, and a
+        # reaction after every round changes the tempo it measures them at
+        # without changing the game it is measuring.
+        game = HandSlapGame(difficulty, contact=GeometricContactSensor(), seed=args.seed,
+                            personality=Personality(enabled=False))
         app = build_game_app(
             cfg, game, opponent=DodgingHand(reaction_time=reaction, seed=args.seed)
         )
@@ -1751,6 +1756,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="stream the annotated view on this port, e.g. 8080; "
                         "shows what the robot sees and decides, for boards "
                         "with no screen")
+    s.add_argument("--deadpan", action="store_true",
+                   help="no fidgeting and no taunts. The robot plays exactly the "
+                        "same game; it just stops performing, which is what you "
+                        "want when measuring it rather than watching it")
     s.set_defaults(func=cmd_play)
 
     s = sub.add_parser("eval", help="sweep opponent reaction time, measure win rate")

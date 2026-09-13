@@ -10,10 +10,11 @@ import numpy as np
 import pytest
 
 from tlod.arm import model
-from tlod.arm.controller import ArmController
+from tlod.arm.controller import ArmController, SafetyLimits
 from tlod.arm.mock import MockArm
 from tlod.arm.primitives import (
-    Feint, GoTo, GoToPose, Hold, Hover, Retract, Sequence, Strike, StrikeLimits,
+    FLOURISHES, Feint, Flourish, GoTo, GoToPose, Hold, Hover, Retract, Sequence,
+    Strike, StrikeLimits, flourish,
 )
 from tlod.types import Pose
 
@@ -159,3 +160,88 @@ def test_hold_does_not_move(controller):
     before = controller.commanded.copy()
     assert drive(Hold(0.05), controller)
     assert np.allclose(controller.commanded, before)
+
+
+# -- performance -----------------------------------------------------------
+
+@pytest.fixture
+def rig():
+    """A controller with the real rig's limits rather than the defaults.
+
+    Acceleration is what bounds a flourish, and the shipped configs allow
+    35 rad/s^2 where SafetyLimits defaults to 8. Tuning a performance
+    against the default would produce one nobody on the actual robot
+    could see.
+    """
+    c = ArmController(MockArm(q0=np.concatenate([model.HOME, [0.0]])),
+                      SafetyLimits(max_speed=3.5, max_accel=35.0, max_jerk=400.0),
+                      control_hz=200.0)
+    c.start()
+    yield c
+    c.backend.disconnect()
+
+
+def test_every_flourish_ends_where_it_started(rig):
+    """The property that makes it safe to do this for fun on a machine
+    that also swings at people: joint space, no target, and an envelope
+    that is zero at both ends, so however it is interrupted or replayed
+    it cannot walk the arm toward the hand."""
+    for name, move in FLOURISHES.items():
+        start = rig.commanded.copy()
+        assert drive(Flourish(move), rig), f"{name} never finished"
+        drift = float(np.abs(rig.commanded - start).max())
+        assert drift < 2e-3, f"{name} left the arm {drift:.4f} rad from where it began"
+
+
+def test_every_flourish_stays_within_its_amplitudes(rig):
+    """A wag is 9 degrees of shoulder, not 90. Joints that translate the
+    tool are held timid on purpose; the ones that do not are where the
+    performance lives."""
+    for name, move in FLOURISHES.items():
+        start = rig.commanded.copy()
+        motion = Flourish(move)
+        motion.start(rig)
+        worst = np.zeros(6)
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 3.0:
+            done = motion.step(rig, 0.005)
+            worst = np.maximum(worst, np.abs(rig.commanded - start))
+            if done:
+                break
+            time.sleep(0.005)
+        allowed = np.abs(np.asarray(move.amplitudes, float)) + 2e-3
+        assert np.all(worst <= allowed), f"{name} overswung: {worst} > {allowed}"
+
+
+def test_a_flourish_is_actually_visible(rig):
+    """A taunt nobody can see is not a taunt.
+
+    Asserted in absolute terms rather than as a fraction of the nominal
+    amplitude, because the motion profile is entitled to round the peaks
+    off and the question here is only whether an audience would notice.
+    Three degrees would not do; this asks for rather more.
+    """
+    for name, move in FLOURISHES.items():
+        moved = np.asarray(move.amplitudes) != 0
+        start = rig.commanded.copy()
+        motion = Flourish(move)
+        motion.start(rig)
+        peak = np.zeros(6)
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 3.0:
+            done = motion.step(rig, 0.005)
+            peak = np.maximum(peak, np.abs(rig.commanded - start))
+            if done:
+                break
+            time.sleep(0.005)
+        assert peak[moved].max() > 0.08, f"{name} barely moved: {peak[moved].max():.3f} rad"
+
+
+def test_moods_pick_from_their_own_repertoire():
+    rng = np.random.default_rng(0)
+    for mood in ("gloat", "sulk", "smug", "caught", "idle"):
+        seen = {tuple(flourish(mood, rng=rng).move.amplitudes) for _ in range(40)}
+        assert seen, mood
+    # An unknown mood falls back rather than raising: a missing reaction
+    # should cost a joke, not a round.
+    assert flourish("triumphant-despair", rng=rng) is not None
