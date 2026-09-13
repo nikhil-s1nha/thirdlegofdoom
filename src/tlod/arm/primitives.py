@@ -28,6 +28,7 @@ better right up to that floor and worse below it; the defaults sit on it.
 from __future__ import annotations
 
 import abc
+import logging
 import time
 from dataclasses import dataclass
 
@@ -36,6 +37,8 @@ import numpy as np
 from tlod.arm import model
 from tlod.arm.controller import ArmController, minimum_jerk
 from tlod.types import Pose
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -252,9 +255,28 @@ class Strike(Motion):
         # height estimate harmless rather than injurious.
         end_z = max(self.target[2] + self.limits.plane_margin, start_z - drop)
         goal = Pose(float(self.target[0]), float(self.target[1]), float(end_z))
-        result, _, _ = controller.solve(goal, position_only=True)
+        result, safe, violations = controller.solve(goal, position_only=True)
         self.ok = result.ok
         self._q1 = np.concatenate([result.q, [self._q0[5]]])
+
+        # What the strike will actually do, in millimetres, before it does
+        # it. Every term here can quietly collapse the drop to nothing --
+        # a hover that never got to height, a hand estimated at the wrong
+        # depth, the safety floor, the plane margin, or IK solving to
+        # somewhere other than it was asked -- and from across the table
+        # they all look the same: an arm that twitched.
+        reached = model.tool_pose(result.q).z if result.ok else float("nan")
+        log.debug("strike: from %.0f mm to %.0f mm (drop %.0f, asked %.0f, "
+                  "hand %.0f, ik reached %.0f)%s",
+                  start_z * 1e3, end_z * 1e3, (start_z - end_z) * 1e3,
+                  self.limits.clamp_drop(start_z - self.target[2]) * 1e3,
+                  self.target[2] * 1e3, reached * 1e3,
+                  f", clamped by {', '.join(violations)}" if violations else "")
+        if self.ok and start_z - end_z < 0.01:
+            log.warning("strike drop is only %.0f mm: hovering at %.0f mm over a "
+                        "hand estimated at %.0f mm%s",
+                        (start_z - end_z) * 1e3, start_z * 1e3, self.target[2] * 1e3,
+                        f", clamped by {', '.join(violations)}" if violations else "")
 
         self._controller = controller
         set_limit = getattr(controller.backend, "set_torque_limit", None)
