@@ -22,6 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 # Kept in step with MARKER_BANDS in tlod.vision.calibrate_flow, and named
 # here rather than imported from it so that `tlod --help` does not have to
 # load OpenCV. cmd_calibrate checks the two agree.
@@ -395,15 +397,46 @@ def cmd_play(args) -> int:
         # sensor at construction -- so this is app first, game second,
         # the opposite order from the branches below.
         app = build_app(cfg)
-        contact = ServoLoadContactSensor(app.controller.state,
-                                         threshold=args.contact_threshold)
+        # Which sensor answers "did that land".
+        #
+        # Servo load is the one the design argued for, on the grounds
+        # that a camera cannot see the moment of contact: the arm is
+        # between the lens and the hand, and 33 ms frames are coarse
+        # against an event lasting milliseconds. Both points are true and
+        # neither is the problem. The problem is that the joints cannot
+        # tell the torque of meeting a hand from the torque of moving the
+        # arm. Measured on this rig: the launch clears any workable
+        # threshold in the first tick, and once that is blanked the brake
+        # clears it again at 160 ms -- 0.12 of rise, on all three pitch
+        # joints, at the same instant every strike, with nothing under
+        # the paddle. It is detecting itself.
+        #
+        # Proximity sidesteps the occlusion objection entirely, because
+        # it never looks at the contact: it compares where the tracker
+        # last saw the hand against where the arm's own encoders say the
+        # tool is. Vision measures 2.5 mm on this rig and the hand jitters
+        # 2.4-5 mm, against a 60 mm radius -- so its docstring's "several
+        # centimetres of uncertainty" is pessimism from before anything
+        # was measured.
+        #
+        # What it genuinely cannot do is see a dodge inside the last
+        # ~100 ms, because that is how stale the hand estimate is. A hand
+        # pulled at the last instant scores as a hit it did not take.
+        if args.contact == "servo":
+            contact = ServoLoadContactSensor(app.controller.state,
+                                             threshold=args.contact_threshold)
+            source = (f"servo load, threshold {args.contact_threshold:.2f} "
+                      "of rated torque")
+        else:
+            contact = ProximityContactSensor()
+            source = (f"proximity, {contact.radius*1000:.0f} mm across and "
+                      f"{contact.plane_tolerance*1000:.0f} mm deep")
         game = HandSlapGame(args.difficulty, limits=build_strike_limits(cfg),
                             contact=contact, seed=args.seed)
         app.policy = game
 
         print(f"tier C: real hand, REAL ARM. difficulty={args.difficulty}")
-        print(f"  contact from servo load, threshold {args.contact_threshold:.2f} "
-              f"of rated torque")
+        print(f"  contact from {source}")
         print("\n  THE ARM WILL MOVE, and it will strike at your hand.")
         print(f"  It drops at most {game.limits.max_drop*100:.0f} cm at a torque limit of "
               f"{game.limits.torque_limit}/1000, so it yields on contact.")
@@ -1700,6 +1733,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--real", action="store_true",
                    help="tier C: real camera, real hand AND the real arm, on this "
                         "machine. The arm will strike at your hand")
+    s.add_argument("--contact", default="proximity",
+                   choices=("proximity", "servo"),
+                   help="how a hit is decided. proximity compares the tracked "
+                        "hand against the arm's encoders; servo watches joint "
+                        "load, which on this arm also sees its own braking")
     s.add_argument("--contact-threshold", type=float, default=0.12,
                    dest="contact_threshold",
                    help="--real only: rise in servo load, as a fraction of rated "
