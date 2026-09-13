@@ -301,6 +301,7 @@ class HandSlapGame(StateMachine):
             self.run_motion(Retract(model.HOME, self.limits, duration=0.6), controller)
             return
         if done:
+            # A starting value only; `ready` refreshes it on commitment.
             self.hover_q = controller.commanded.copy()
             self.transition("ready")
 
@@ -324,6 +325,15 @@ class HandSlapGame(StateMachine):
             return
         roll = self.rng.random()
         if roll < self._commit_probability(track, dt):
+            # Where to come back to. Captured now, at the moment of
+            # commitment, rather than kept from `acquire`: `ready` servos
+            # continuously to follow the hand, and `settle` returns here
+            # rather than re-acquiring, so a pose saved at acquisition is
+            # stale by however far the hand has drifted since -- which on
+            # a hand that has moved across the table means retracting to
+            # a point nowhere near it, and looks from the outside like
+            # the arm wandering off after a hit.
+            self.hover_q = controller.commanded.copy()
             if self.rng.random() < self.difficulty.feint_probability:
                 self.feints += 1
                 self.hand_at_commit = np.array(self._hand_for_scoring(robot)

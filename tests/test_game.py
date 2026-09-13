@@ -459,3 +459,37 @@ def test_servo_load_handles_backends_without_load():
     sensor = ServoLoadContactSensor(lambda: JointState(q=np.zeros(6), stamp=0.0))
     sensor.arm()
     assert sensor.poll() is None
+
+
+def test_the_retract_target_follows_the_hand():
+    """After a strike the arm returns to where it was hovering, which has
+    to be above the hand *now*, not where it was when first acquired.
+
+    `ready` servos continuously to follow a drifting hand, and `settle`
+    returns to `ready` rather than re-acquiring, so a pose captured once
+    at acquisition goes stale by however far the hand has moved since.
+    Observed on hardware as the arm wandering off to one side after a
+    hit instead of lifting straight back up.
+    """
+    game = HandSlapGame("normal", seed=1)
+    hand = np.array([0.24, 0.09, 0.03])
+    robot = fake_robot(hand)
+    try:
+        stale = np.concatenate([model.HOME, [0.0]])
+        game.hover_q = stale.copy()
+        game.transition("ready")
+        game.state_since = time.perf_counter() - 5.0    # past the settle-in gate
+
+        for _ in range(4000):
+            game._state_ready(robot, robot.controller, 0.005)
+            if game.state in ("strike", "feint"):
+                break
+        assert game.state in ("strike", "feint"), "never committed"
+
+        assert not np.allclose(game.hover_q, stale), (
+            "retract target is still the pose from acquisition")
+        hovering = model.tool_pose(game.hover_q[:5]).xyz()
+        gap = float(np.linalg.norm(hovering[:2] - hand[:2]))
+        assert gap < 0.06, f"would retract {gap * 1000:.0f} mm from the hand"
+    finally:
+        robot.controller.stop(park=False)
