@@ -32,9 +32,22 @@ Two signals are traced, and they are not the same measurement:
            unchanged duty collapses its back-EMF and the current climbs,
            so this still has headroom exactly where load has none.
 
-If current separates empty-table from book and load does not, current is
-the contact signal. If neither separates, this arm cannot feel a hand
-and vision is the only judge available.
+Measured on this arm, neither does. Over an empty table the wrist load
+peaks at the 0.350 ceiling; over a hand it peaks *lower*, at 0.326.
+Current peaked at 0.052 A empty and 0.058 A over a hand -- 0.006 A
+apart, which is exactly one 6.5 mA quantisation step, and smaller than
+the sample-to-sample jitter within either run. Neither channel can see a
+hand.
+
+Which is why the third column exists. `Strike` drops Torque_Limit to 350
+for the swing, and at 350 the arm cannot track its own command even with
+nothing under it: it is asked down to 27 mm and reaches 44 mm. That
+17 mm shortfall is the servos already saturated against gravity and
+friction alone, before a hand is involved -- the same "no headroom left"
+failure as load, in a different register. If raising the torque limit
+closes that gap over an empty table, the remaining lag becomes a real
+contact signal. If it does not, this arm cannot feel a hand at all and
+vision is the only judge available.
 """
 
 import sys
@@ -82,7 +95,7 @@ try:
 
         motion = Strike([x, y, plane], limits, duration=0.25)
         motion.start(controller)
-        trace: list[tuple[float, float, np.ndarray, np.ndarray]] = []
+        trace: list[tuple[float, float, float, np.ndarray, np.ndarray]] = []
         t0 = time.perf_counter()
         while not motion.step(controller, period):
             state = controller.state()
@@ -90,8 +103,12 @@ try:
                     if state.load is not None else np.zeros(3))
             amps = (np.abs(np.asarray(state.current, float))[list(WATCHED)]
                     if state.current is not None else np.zeros(3))
+            # Where the servos were *told* to be, alongside where they are.
+            # The gap is the third candidate signal: a servo blocked by a
+            # hand falls further behind its command than one moving freely.
             trace.append((time.perf_counter() - t0,
-                          model.fk(state.q[:5])[2, 3], load, amps))
+                          model.fk(state.q[:5])[2, 3],
+                          model.fk(controller.commanded[:5])[2, 3], load, amps))
             time.sleep(period)
 
         n += 1
@@ -102,12 +119,14 @@ try:
         # Baselines from the first sample: resting load and current both
         # depend on the arm's configuration, so an absolute threshold would
         # fire on posture instead of on contact.
-        load_base, amp_base = trace[0][2], trace[0][3]
-        load_rise = [float(np.max(load - load_base)) for _, _, load, _ in trace]
-        amp_rise = [float(np.max(amps - amp_base)) for _, _, _, amps in trace]
-        stamps = [t for t, _, _, _ in trace]
+        load_base, amp_base = trace[0][3], trace[0][4]
+        load_rise = [float(np.max(load - load_base)) for _, _, _, load, _ in trace]
+        amp_rise = [float(np.max(amps - amp_base)) for _, _, _, _, amps in trace]
+        lag = [z - cz for _, z, cz, _, _ in trace]
+        stamps = [t for t, _, _, _, _ in trace]
         load_at, load_peak = max(zip(stamps, load_rise), key=lambda p: p[1])
         amp_at, amp_peak = max(zip(stamps, amp_rise), key=lambda p: p[1])
+        lag_at, lag_peak = max(zip(stamps, lag), key=lambda p: p[1])
 
         print(f"\n  strike {n}")
         print(f"    travelled  {started.z * 1000:.0f} -> {ended.z * 1000:.0f} mm "
@@ -116,13 +135,17 @@ try:
         print(f"    peak load rise    {load_peak:+.3f}      at {load_at * 1000:4.0f} ms"
               f"   (ceiling {limits.torque_limit / 1000:.3f})")
         print(f"    peak current rise {amp_peak:+.3f} A    at {amp_at * 1000:4.0f} ms")
-        if float(np.max([np.max(a) for _, _, _, a in trace])) == 0.0:
+        print(f"    peak lag behind command {lag_peak * 1000:+.0f} mm at {lag_at * 1000:4.0f} ms")
+        print(f"    commanded floor {trace[-1][2] * 1000:.0f} mm, reached "
+              f"{trace[-1][1] * 1000:.0f} mm")
+        if float(np.max([np.max(a) for _, _, _, _, a in trace])) == 0.0:
             print("    current reads zero throughout -- this servo firmware does not"
                   "\n    populate Present_Current, so only load is available")
-        print("    ms     z mm    load rise            current rise A")
+        print("    ms     z mm   cmd mm  lag    load rise            current rise A")
         # Every other sample: enough to see the shape, short enough to read.
-        for (t, z, load, amps), lr, ar in list(zip(trace, load_rise, amp_rise))[::2]:
-            print(f"    {t * 1000:5.0f}  {z * 1000:6.0f}    "
+        for (t, z, cz, load, amps), lr, ar in list(zip(trace, load_rise, amp_rise))[::2]:
+            print(f"    {t * 1000:5.0f}  {z * 1000:6.0f}  {cz * 1000:6.0f} "
+                  f"{(z - cz) * 1000:+5.0f}   "
                   f"{np.round(load - load_base, 3)} {lr:+.3f}   "
                   f"{np.round(amps - amp_base, 3)} {ar:+.3f}")
 except KeyboardInterrupt:
