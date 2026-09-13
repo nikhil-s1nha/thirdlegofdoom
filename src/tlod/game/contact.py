@@ -50,8 +50,14 @@ class ContactEvent:
 class ContactSensor(abc.ABC):
     """Reports at most one contact per arming."""
 
-    def arm(self) -> None:
-        """Ready for the next strike; discard anything pending."""
+    def arm(self, blank_for: float | None = None) -> None:
+        """Ready for the next strike; discard anything pending.
+
+        `blank_for` is how long after arming to ignore, for sensors that
+        cannot tell contact from the strike's own launch. A real contact
+        cannot happen in the first part of a drop, because the paddle has
+        not reached the hand yet.
+        """
 
     @abc.abstractmethod
     def poll(self, **kwargs) -> ContactEvent | None: ...
@@ -68,7 +74,7 @@ class GeometricContactSensor(ContactSensor):
         self.plane_tolerance = plane_tolerance
         self._fired = False
 
-    def arm(self) -> None:
+    def arm(self, blank_for: float = 0.0) -> None:
         self._fired = False
 
     def poll(self, tool_xyz=None, hand_xyz=None, **kwargs) -> ContactEvent | None:
@@ -153,11 +159,17 @@ class ServoLoadContactSensor(ContactSensor):
         state_source,
         threshold: float = 0.12,
         joints: tuple[int, ...] | None = None,
+        blank_for: float = 0.10,
     ) -> None:
         self.state_source = state_source
         self.threshold = threshold
+        # How long after arming to ignore, when the caller does not say.
+        # A caller that knows the strike duration should pass a fraction
+        # of it; this default is for one that does not.
+        self.blank_for = blank_for
         self.joints = list(self.STRIKE_JOINTS if joints is None else joints)
         self._baseline: np.ndarray | None = None
+        self._blank_until = 0.0
         self._fired = False
         # Diagnostics, for tuning the threshold on the first real session.
         self.peak_rise = 0.0
@@ -174,22 +186,32 @@ class ServoLoadContactSensor(ContactSensor):
             return None
         return np.abs(np.asarray(state.load, float)[self.joints])
 
-    def arm(self) -> None:
+    def arm(self, blank_for: float | None = None) -> None:
         self._fired = False
-        self._baseline = self._load()
+        self._baseline = None
+        window = self.blank_for if blank_for is None else max(blank_for, 0.0)
+        self._blank_until = time.perf_counter() + window
 
     def poll(self, **kwargs) -> ContactEvent | None:
-        if self._fired:
+        if self._fired or time.perf_counter() < self._blank_until:
             return None
         current = self._load()
         if current is None:
             return None
         if self._baseline is None:
-            # No baseline: the read at arm() failed, or the backend had
-            # no load to give then and does now. Take it here rather than
-            # falling back to zeros -- against a zero baseline the pose's
-            # own resting load reads as a hit on the first tick of the
-            # strike, and every round scores as an instant contact.
+            # The baseline is taken here, on the first poll after the
+            # blanking window, rather than at arm().
+            #
+            # Taking it while hovering does not work: the joints have to
+            # produce torque to accelerate the arm downward, and at
+            # 35 rad/s^2 that rise clears any workable threshold on the
+            # first tick of the strike. Observed on hardware -- the swing
+            # was aborted about a millimetre in, every time, and read as
+            # the arm failing to move rather than as a false contact.
+            #
+            # Measured against the descent instead, the reference is the
+            # load of an arm already travelling, and what remains above
+            # it is the hand.
             self._baseline = current
             return None
         rise = float(np.max(current - self._baseline))
@@ -247,7 +269,7 @@ class SerialContactSensor(ContactSensor):
             with self._lock:
                 self._latest = ContactEvent(time.perf_counter(), "piezo", amplitude)
 
-    def arm(self) -> None:
+    def arm(self, blank_for: float = 0.0) -> None:
         with self._lock:
             self._latest = None
 

@@ -414,8 +414,8 @@ def test_servo_load_contact_fires_on_a_load_spike():
     load = np.zeros(6)
     state = lambda: JointState(q=np.zeros(6), stamp=0.0, load=load.copy())
     sensor = ServoLoadContactSensor(state, threshold=0.12)
-    sensor.arm()
-    assert sensor.poll() is None            # resting
+    sensor.arm(blank_for=0.0)               # no launch to ignore here
+    assert sensor.poll() is None            # resting: sets the baseline
     load[2] = 0.30                          # elbow resists
     event = sensor.poll()
     assert event is not None and event.source == "servo_load"
@@ -493,3 +493,33 @@ def test_the_retract_target_follows_the_hand():
         assert gap < 0.06, f"would retract {gap * 1000:.0f} mm from the hand"
     finally:
         robot.controller.stop(park=False)
+
+
+def test_the_strike_launch_does_not_read_as_contact():
+    """Servo load cannot tell the torque of accelerating the arm from the
+    torque of meeting a hand, and at 35 rad/s^2 the launch clears any
+    workable threshold. Observed on hardware: contact fired on the first
+    tick of every strike, the swing was aborted about a millimetre in,
+    and it read as the arm failing to move rather than as a false hit."""
+    from tlod.game.contact import ServoLoadContactSensor
+
+    launching = np.array([0.0, 0.40, 0.35, 0.30, 0.0, 0.0])   # torque to accelerate
+    descending = np.array([0.0, 0.10, 0.08, 0.06, 0.0, 0.0])  # coasting down
+    on_contact = descending + 0.25
+
+    load = {"value": launching}
+    sensor = ServoLoadContactSensor(
+        lambda: SimpleNamespace(load=load["value"]), threshold=0.12)
+
+    sensor.arm(blank_for=0.05)
+    assert sensor.poll() is None, "fired during the launch"
+    time.sleep(0.06)
+
+    load["value"] = descending
+    assert sensor.poll() is None, "the first poll after blanking is the baseline"
+    assert sensor.poll() is None, "coasting read as contact"
+
+    load["value"] = on_contact
+    event = sensor.poll()
+    assert event is not None and event.source == "servo_load"
+    assert sensor.poll() is None, "fired twice for one strike"
