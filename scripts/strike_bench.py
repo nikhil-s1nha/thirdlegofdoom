@@ -12,12 +12,29 @@ what the arm actually did.
 Press Enter to strike, Ctrl-C to stop. Contact is not detected and the
 swing is never aborted, so every run travels the whole way.
 
-The load trace is the point. Run it once over an empty table and once
-over a book, and compare: the difference between those two is the only
-honest basis for a contact threshold. On this arm the swing raises all
-three pitch joints by ~0.12 on its own, purely from braking, at the same
+The traces are the point. Run it once over an empty table and once over
+a book, and compare: the difference between those two is the only honest
+basis for a contact threshold. On this arm the swing raises all three
+pitch joints by ~0.12 on its own, purely from braking, at the same
 instant every time -- so a threshold set without that comparison detects
 the arm rather than the hand.
+
+Two signals are traced, and they are not the same measurement:
+
+  load     Present_Load, addr 60. The PWM duty the servo is commanding.
+           Torque_Limit hard-clamps it, and `Strike` drops that limit to
+           350/1000 for the swing, so on this arm load pins at ~0.35
+           over an *empty* table. A signal already at its ceiling cannot
+           rise further for a hand. This is why load-based contact
+           detection was abandoned.
+  current  Present_Current, addr 69, in amps. What the motor actually
+           draws. Not clamped by Torque_Limit. Holding a rotor back at
+           unchanged duty collapses its back-EMF and the current climbs,
+           so this still has headroom exactly where load has none.
+
+If current separates empty-table from book and load does not, current is
+the contact signal. If neither separates, this arm cannot feel a hand
+and vision is the only judge available.
 """
 
 import sys
@@ -65,14 +82,16 @@ try:
 
         motion = Strike([x, y, plane], limits, duration=0.25)
         motion.start(controller)
-        trace: list[tuple[float, float, np.ndarray]] = []
+        trace: list[tuple[float, float, np.ndarray, np.ndarray]] = []
         t0 = time.perf_counter()
         while not motion.step(controller, period):
             state = controller.state()
             load = (np.abs(np.asarray(state.load, float))[list(WATCHED)]
                     if state.load is not None else np.zeros(3))
+            amps = (np.abs(np.asarray(state.current, float))[list(WATCHED)]
+                    if state.current is not None else np.zeros(3))
             trace.append((time.perf_counter() - t0,
-                          model.fk(state.q[:5])[2, 3], load))
+                          model.fk(state.q[:5])[2, 3], load, amps))
             time.sleep(period)
 
         n += 1
@@ -80,20 +99,32 @@ try:
         if not trace:
             print("  no samples -- the motion finished before the first read")
             continue
-        base = trace[0][2]
-        rises = [float(np.max(load - base)) for _, _, load in trace]
-        peak_at, peak = max(zip((t for t, _, _ in trace), rises), key=lambda p: p[1])
+        # Baselines from the first sample: resting load and current both
+        # depend on the arm's configuration, so an absolute threshold would
+        # fire on posture instead of on contact.
+        load_base, amp_base = trace[0][2], trace[0][3]
+        load_rise = [float(np.max(load - load_base)) for _, _, load, _ in trace]
+        amp_rise = [float(np.max(amps - amp_base)) for _, _, _, amps in trace]
+        stamps = [t for t, _, _, _ in trace]
+        load_at, load_peak = max(zip(stamps, load_rise), key=lambda p: p[1])
+        amp_at, amp_peak = max(zip(stamps, amp_rise), key=lambda p: p[1])
 
         print(f"\n  strike {n}")
         print(f"    travelled  {started.z * 1000:.0f} -> {ended.z * 1000:.0f} mm "
               f"({(started.z - ended.z) * 1000:.0f} mm) in "
               f"{trace[-1][0] * 1000:.0f} ms")
-        print(f"    peak load rise {peak:.3f} at {peak_at * 1000:.0f} ms")
-        print("    ms     z mm    load rise (shoulder, elbow, wrist)")
+        print(f"    peak load rise    {load_peak:+.3f}      at {load_at * 1000:4.0f} ms"
+              f"   (ceiling {limits.torque_limit / 1000:.3f})")
+        print(f"    peak current rise {amp_peak:+.3f} A    at {amp_at * 1000:4.0f} ms")
+        if float(np.max([np.max(a) for _, _, _, a in trace])) == 0.0:
+            print("    current reads zero throughout -- this servo firmware does not"
+                  "\n    populate Present_Current, so only load is available")
+        print("    ms     z mm    load rise            current rise A")
         # Every other sample: enough to see the shape, short enough to read.
-        for (t, z, load), rise in list(zip(trace, rises))[::2]:
+        for (t, z, load, amps), lr, ar in list(zip(trace, load_rise, amp_rise))[::2]:
             print(f"    {t * 1000:5.0f}  {z * 1000:6.0f}    "
-                  f"{np.round(load - base, 3)}  max {rise:+.3f}")
+                  f"{np.round(load - load_base, 3)} {lr:+.3f}   "
+                  f"{np.round(amps - amp_base, 3)} {ar:+.3f}")
 except KeyboardInterrupt:
     print("\n  stopped")
 finally:
