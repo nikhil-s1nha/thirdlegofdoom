@@ -39,15 +39,25 @@ apart, which is exactly one 6.5 mA quantisation step, and smaller than
 the sample-to-sample jitter within either run. Neither channel can see a
 hand.
 
-Which is why the third column exists. `Strike` drops Torque_Limit to 350
-for the swing, and at 350 the arm cannot track its own command even with
-nothing under it: it is asked down to 27 mm and reaches 44 mm. That
-17 mm shortfall is the servos already saturated against gravity and
-friction alone, before a hand is involved -- the same "no headroom left"
-failure as load, in a different register. If raising the torque limit
-closes that gap over an empty table, the remaining lag becomes a real
-contact signal. If it does not, this arm cannot feel a hand at all and
-vision is the only judge available.
+The hand was really touched in that run. That is what makes it decisive
+rather than inconclusive: a confirmed contact moved neither channel.
+
+Which is why the third column exists. Both runs travelled 91 -> 44 mm
+along paths identical to the millimetre -- the hand did not slow the arm
+even by one encoder count -- while the commanded floor was 27 mm. At
+Torque_Limit 350 the servos are saturated against gravity and friction
+before a hand is ever involved, so the swing arrives at the hand with
+nothing left to press with. It grazes rather than lands, a hand is far
+more compliant than the arm's own stiction, and every torque-derived
+signal needs the arm to be *resisted*.
+
+So the question the lag column answers is not "which register is more
+sensitive" but "is the arm pressing at all". Raise Torque_Limit and the
+empty-table lag should collapse toward zero; the strike then reaches
+27 mm instead of stopping at 44, which is real depth into the hand
+rather than a brush at the end of travel. If lag stays at 17 mm even
+then, this arm cannot feel a hand and vision is the only judge
+available.
 """
 
 import sys
