@@ -82,6 +82,31 @@ class StrikeLimits:
     plane_margin: float = 0.005         # never command below target plane minus this
     torque_limit: int = 350             # of 1000, while striking; yields on contact
     normal_torque_limit: int = 800
+    # Stay down at the bottom, still at `torque_limit`, before retracting.
+    #
+    # This is what makes contact detectable at all, and it is worth being
+    # precise about why. Measured on this arm across nothing / a book / a
+    # hand, the peak load *during* the swing read 0.330 / 0.326 / 0.350 --
+    # a rigid book, the easiest thing there is to feel, landed between the
+    # other two. Load climbs monotonically to the ceiling in every run,
+    # empty table included, because the arm is accelerating and braking its
+    # own mass: the whole swing is one transient, and anything measured
+    # during it describes the swing rather than what the swing hit.
+    #
+    # Held still at the bottom the same three read 0.001 / 0.038 / 0.037.
+    # With no acceleration left to confound it, what remains is the arm
+    # pressing on what is underneath. The servo's own load filter needs
+    # ~250 ms to decay from the swing before that is true, and the arm is
+    # still arriving for the first ~60 ms of the hold besides -- on the
+    # measured traces `settled()` reported done with 10 mm left to travel.
+    # So this is 300 ms of settling plus margin, not a round number.
+    # Shorter and the transient is still in the reading: empty air looks
+    # like a hand.
+    press_hold: float = 0.45
+    # Load above the hover baseline, held, that counts as something being
+    # there. Nothing measured 0.001 and the two real obstacles 0.037-0.038,
+    # so this sits in a gap almost two orders of magnitude wide.
+    press_threshold: float = 0.02
     # A backstop, not the working cadence. HandSlapGame's own dwells --
     # retract, then 0.6 s of settle, then 0.4 s of ready before the hazard
     # rate is allowed to fire -- already put ~1.3 s between strikes, so
@@ -244,6 +269,7 @@ class Strike(Motion):
         self._q1: np.ndarray | None = None
         self._restored = False
         self._controller = None
+        self._holding_since: float | None = None
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
@@ -279,6 +305,7 @@ class Strike(Motion):
                         f", clamped by {', '.join(violations)}" if violations else "")
 
         self._controller = controller
+        self._holding_since = None
         set_limit = getattr(controller.backend, "set_torque_limit", None)
         if callable(set_limit):
             set_limit(self.limits.torque_limit)
@@ -299,13 +326,32 @@ class Strike(Motion):
             self.finished = True
             self._restore(controller)
             return True
-        s = minimum_jerk(self.elapsed / self.duration)
-        controller._write(self._q0 + (self._q1 - self._q0) * s,
-                          max_speed=self.limits.strike_speed, dt=dt)
-        if self._complete(controller, self.duration):
+        if self._holding_since is None:
+            s = minimum_jerk(self.elapsed / self.duration)
+            controller._write(self._q0 + (self._q1 - self._q0) * s,
+                              max_speed=self.limits.strike_speed, dt=dt)
+            if self._complete(controller, self.duration):
+                if self.limits.press_hold > 0.0:
+                    self._holding_since = time.perf_counter()
+                else:
+                    self.finished = True
+                    self._restore(controller)
+            return self.finished
+        # Pressing. Keep commanding the floor, and keep the lowered torque
+        # limit: the point of the hold is to lean on whatever is down there
+        # with the same authority the swing had, and restoring torque here
+        # would both change what is being measured and press harder than
+        # the strike was ever authorised to.
+        controller._write(self._q1, max_speed=self.limits.strike_speed, dt=dt)
+        if time.perf_counter() - self._holding_since >= self.limits.press_hold:
             self.finished = True
             self._restore(controller)
         return self.finished
+
+    @property
+    def pressing(self) -> bool:
+        """Down, stopped, and leaning -- the only time load means anything."""
+        return self._holding_since is not None and not self.finished
 
     def abort(self) -> None:
         """Restore torque on the way out.

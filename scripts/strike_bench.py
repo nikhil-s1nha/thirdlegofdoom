@@ -66,7 +66,8 @@ from tlod.config import Config  # noqa: E402
 from tlod.types import Pose  # noqa: E402
 
 WATCHED = (1, 2, 3)          # shoulder_lift, elbow_flex, wrist_flex
-HOLD = 0.4                   # seconds pressing at the bottom before retract
+HOLD = 0.5                   # seconds pressing at the bottom before retract
+SETTLE = 0.30                # of that, discarded before reading; see below
 HOVER_TOLERANCE = 0.004      # metres; a start further off than this is flagged
 
 argv = [a for a in sys.argv[1:]]
@@ -84,6 +85,12 @@ cfg = Config.load(config)
 limits = StrikeLimits()
 if torque is not None:
     limits.torque_limit = torque
+# Strike now holds at the bottom by itself, which is what makes contact
+# detectable in the game. Here that would double up with the bench's own
+# hold and fold the press into the reported drop time, so the primitive's
+# hold is switched off and this script does the holding -- which keeps
+# "how long did the drop take" an honest number.
+limits.press_hold = 0.0
 plane = cfg.vision.hand_height                 # where a flat palm sits
 hover = Pose(x, y, plane + limits.hover_height)
 # The floor Strike will command from a full-height hover, computed the
@@ -176,9 +183,12 @@ try:
         load_at, load_peak = max(zip(stamps, load_rise), key=lambda p: p[1])
         amp_at, amp_peak = max(zip(stamps, amp_rise), key=lambda p: p[1])
 
-        # The steady-state numbers: the back half of the hold, by which
-        # point the arm has stopped moving and only the press remains.
-        settled = hold[len(hold) // 2:]
+        # The steady-state numbers: everything after SETTLE seconds of
+        # pressing, by which point the arm has stopped arriving and the
+        # servo's load filter has forgotten the swing. This is the same
+        # window ServoPressContactSensor reads, so the numbers below are
+        # directly comparable with its threshold.
+        settled = [r for r in hold if r[0] > drop_ms / 1000 + SETTLE]
         title = f"strike {n}" + (f" -- {label}" if label else "")
         print(f"\n  {title}")
         print(f"    travelled  {started.z * 1000:.0f} -> {ended.z * 1000:.0f} mm "

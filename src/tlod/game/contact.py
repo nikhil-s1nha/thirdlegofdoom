@@ -236,6 +236,130 @@ class ServoLoadContactSensor(ContactSensor):
         return ContactEvent(time.perf_counter(), "servo_load", strength=min(rise, 1.0))
 
 
+class ServoPressContactSensor(ContactSensor):
+    """Detect contact from what the arm is still pushing against once it stops.
+
+    This is the sensor that works on this arm, and it exists because the
+    obvious one does not. `ServoLoadContactSensor` reads the same register
+    during the swing, and measured across nothing / a book / a hand it
+    returned 0.330 / 0.326 / 0.350 -- a rigid book between the other two.
+    Load climbs monotonically to its ceiling in every run, empty table
+    included, because the arm is accelerating and braking its own mass.
+    The swing is one long transient and nothing read during it is about
+    what was hit.
+
+    Held still at the bottom, the same three conditions read 0.001 /
+    0.038 / 0.037. That is the whole idea: wait for the arm to stop, wait
+    for the servo's load filter to forget the swing, and then read what
+    torque is still being spent. In steady state the only thing left to
+    spend it on is whatever is under the paddle.
+
+    The reading is gated on `pressing`, which `Strike` sets when it has
+    finished travelling and is leaning on the floor, rather than on any
+    speed threshold of this sensor's own. That is deliberate. The obvious
+    alternative -- watch `dq` and call the arm still when it drops below
+    some number -- needs a number nobody has measured, and the arm is also
+    briefly stationary at the *start* of a drop, before the profile has
+    accelerated it. `ArmController.settled()` is no better: on the
+    measured traces it reported settled while the paddle still had 10 mm
+    to travel. The motion knows what phase it is in; nothing else does.
+
+    Without a `pressing` kwarg this sensor never fires, so a caller that
+    forgets it scores every round as a dodge rather than inventing hits.
+
+    `Strike.press_hold` must exceed `settle`, or the arm retracts before
+    this ever gets a reading. `cmd_play` checks and warns.
+
+    Reads are wrapped because `poll` runs on the control thread inside a
+    committed strike. A transient sync-read failure on the half-duplex bus
+    is a known event on this rig, and an exception escaping here reaches
+    `RobotApp._control_loop`, which answers a failed policy tick by
+    e-stopping -- freezing the arm mid-swing, directly above the hand it
+    was aiming at. A dropped reading costs one round scored as a dodge.
+    That is the cheaper failure by a wide margin.
+    """
+
+    # shoulder_lift, elbow_flex, wrist_flex
+    STRIKE_JOINTS: tuple[int, ...] = (1, 2, 3)
+
+    def __init__(
+        self,
+        state_source,
+        threshold: float = 0.02,
+        joints: tuple[int, ...] | None = None,
+        settle: float = 0.30,
+    ) -> None:
+        self.state_source = state_source
+        self.threshold = threshold
+        # How long the arm must have been pressing before the reading
+        # means anything. Measured: the servo's load filter takes ~250 ms
+        # to decay from the swing, and at +300 ms nothing reads 0.000
+        # against 0.032-0.036 for a book and a hand.
+        self.settle = settle
+        self.joints = list(self.STRIKE_JOINTS if joints is None else joints)
+        self._baseline: np.ndarray | None = None
+        self._armed_at = 0.0
+        self._pressing_since: float | None = None
+        self._fired = False
+        # Diagnostics. `peak_rise` is the largest *settled* rise seen,
+        # which is the number to set `threshold` from after a session.
+        self.peak_rise = 0.0
+        self.read_failures = 0
+
+    def _load(self) -> np.ndarray | None:
+        try:
+            state = self.state_source()
+        except Exception:
+            self.read_failures += 1
+            return None
+        if state.load is None:
+            return None
+        return np.abs(np.asarray(state.load, float)[self.joints])
+
+    def arm(self, blank_for: float | None = None) -> None:
+        # `blank_for` is accepted and ignored: the caller's guess at how
+        # long the launch takes is exactly what `pressing` replaces.
+        self._fired = False
+        self._baseline = None
+        self._pressing_since = None
+        self._armed_at = time.perf_counter()
+
+    def poll(self, pressing: bool = False, **kwargs) -> ContactEvent | None:
+        if self._fired:
+            return None
+        load = self._load()
+        if load is None:
+            return None
+        if self._baseline is None:
+            # Taken on the first poll after arming, while the arm is still
+            # at the hover holding itself statically. That is the right
+            # reference precisely because the comparison happens in the
+            # same regime -- one static hold against another, with the
+            # swing between them excluded rather than averaged in.
+            self._baseline = load
+            return None
+        if not pressing:
+            self._pressing_since = None
+            return None
+        now = time.perf_counter()
+        if self._pressing_since is None:
+            self._pressing_since = now
+            return None
+        if now - self._pressing_since < self.settle:
+            return None
+        rise = float(np.max(load - self._baseline))
+        self.peak_rise = max(self.peak_rise, rise)
+        if rise < self.threshold:
+            return None
+        self._fired = True
+        log.debug("press: rise %.3f (threshold %.3f) after %.0f ms pressing, "
+                  "%.0f ms since arming; baseline %s, now %s",
+                  rise, self.threshold, (now - self._pressing_since) * 1e3,
+                  (now - self._armed_at) * 1e3,
+                  np.round(self._baseline, 3), np.round(load, 3))
+        return ContactEvent(now, "servo_press", strength=min(rise, 1.0))
+
+
 class SerialContactSensor(ContactSensor):
     """Piezo impact detector on a microcontroller.
 

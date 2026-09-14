@@ -488,7 +488,13 @@ class HandSlapGame(StateMachine):
     def _state_strike(self, robot, controller, dt) -> None:
         tool = controller.pose().xyz()
         hand = self._hand_for_scoring(robot)
-        if self.contact.poll(tool_xyz=tool, hand_xyz=hand) is not None:
+        # Whether the paddle has stopped travelling and is leaning on
+        # whatever is under it. Only a load-based sensor uses this, and it
+        # is the only thing that tells one apart from the swing's own
+        # braking torque -- see ServoPressContactSensor.
+        pressing = bool(getattr(self.motion, "pressing", False))
+        if self.contact.poll(tool_xyz=tool, hand_xyz=hand,
+                             pressing=pressing) is not None:
             self._resolve(robot, controller, hit=True)
             return
         if self.step_motion(controller, dt):
