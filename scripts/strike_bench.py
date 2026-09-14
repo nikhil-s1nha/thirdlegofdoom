@@ -96,7 +96,7 @@ hover = Pose(x, y, plane + limits.hover_height)
 # The floor Strike will command from a full-height hover, computed the
 # same way it computes it, so the printout can say how far short of its
 # own target the arm stopped.
-floor = max(plane + limits.plane_margin,
+floor = max(plane - limits.press_depth,
             hover.z - limits.clamp_drop(hover.z - plane))
 
 print(f"\n  strike bench: over ({x:+.3f}, {y:+.3f}), target plane {plane * 1000:.0f} mm")
@@ -146,7 +146,7 @@ try:
 
         motion = Strike([x, y, plane], limits, duration=0.25)
         motion.start(controller)
-        bottom = Pose(x, y, max(plane + limits.plane_margin,
+        bottom = Pose(x, y, max(plane - limits.press_depth,
                                 started.z - limits.clamp_drop(started.z - plane)))
         trace = []
         t0 = time.perf_counter()
