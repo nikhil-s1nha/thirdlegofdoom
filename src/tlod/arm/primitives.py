@@ -486,42 +486,37 @@ class Move:
     cycles: float
 
 
-# Big, slow gestures. Amplitude and speed trade against each other and
-# the trade is not negotiable: peak joint acceleration for a swing of
-# amplitude A at f Hz is A(2*pi*f)^2, against a configured 35 rad/s^2. So
-# a half-radian wiggle at 10 Hz asks for ~2000 and arrives as a tremble,
-# while the *same* half radian over a second and a bit asks for 14 and
-# arrives whole. Wanting bigger movements therefore means wanting slower
-# ones, and at 1.2 s a swing can be over a radian -- 60-plus degrees,
-# which is unmistakable from the other side of a room.
+# Amplitudes are timid on the joints that translate the tool and generous
+# on the ones that do not: a 26-degree wrist roll is unmistakable across a
+# room and moves the gripper nowhere, where the same angle at the shoulder
+# would sweep it through 10 cm of table.
 #
-# Still timid on the joints that translate the tool relative to the ones
-# that do not: a wrist roll of a radian moves the gripper nowhere, where
-# a radian of shoulder pan would sweep it two hand-widths across the
-# table. The roll and the gripper are where the theatre is cheapest.
+# One swing each, and a slow one, because the motion profile is not a
+# suggestion. Peak joint acceleration for a swing of amplitude A at f Hz
+# is A(2*pi*f)^2, so a 0.5 rad wiggle at 10 Hz asks for ~2000 rad/s^2
+# against a configured 35 and arrives as a 1.5-degree tremble -- correctly
+# smoothed into nothing. At one cycle over 0.8 s the same amplitude needs
+# ~28 rad/s^2 and survives. A single deliberate gesture also simply reads
+# better than a buzz.
 FLOURISHES: dict[str, Move] = {
     #          pan   lift  elbow wrist roll  grip
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.10, 0.00), 1.0),
-    "spin":   Move((0.00, 0.00, 0.00, 0.00, 2.20, 0.00), 0.5),
-    "wag":    Move((0.45, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
-    "nod":    Move((0.00, 0.00, 0.00, 0.75, 0.00, 0.00), 1.0),
-    "bow":    Move((0.00, 0.55, 0.00, 0.45, 0.00, 0.00), 0.5),
-    "bob":    Move((0.00, 0.35, -0.45, 0.00, 0.00, 0.00), 1.0),
-    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.90), 1.0),
-    "jig":    Move((0.30, 0.22, 0.00, 0.00, 0.00, 0.00), 2.0),
-    "droop":  Move((0.00, 0.55, 0.00, 0.40, 0.00, 0.00), 0.5),
-    "strut":  Move((0.28, 0.00, 0.00, 0.00, 0.95, 0.00), 1.0),
-    "flail":  Move((0.35, 0.28, -0.30, 0.00, 1.00, 0.00), 1.0),
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.45, 0.00), 1.0),
+    "wag":    Move((0.13, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0),
+    "nod":    Move((0.00, 0.00, 0.00, 0.25, 0.00, 0.00), 1.0),
+    "bob":    Move((0.00, 0.10, -0.13, 0.00, 0.00, 0.00), 1.0),
+    "chomp":  Move((0.00, 0.00, 0.00, 0.00, 0.00, 0.60), 1.0),
+    "droop":  Move((0.00, 0.13, 0.00, 0.10, 0.00, 0.00), 0.5),
+    "strut":  Move((0.09, 0.00, 0.00, 0.00, 0.35, 0.00), 1.0),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
 # result so the game reads as a performer rather than a scoreboard.
 MOODS: dict[str, tuple[str, ...]] = {
-    "gloat": ("spin", "shimmy", "strut", "flail", "chomp"),   # it landed one
-    "sulk": ("droop", "bow", "nod"),                          # it missed
-    "smug": ("wag", "shimmy", "jig"),                         # its bluff worked
-    "caught": ("nod", "droop", "bow"),                        # the human held
-    "idle": ("bob", "jig", "chomp"),
+    "gloat": ("shimmy", "strut", "chomp"),      # it landed one
+    "sulk": ("droop", "nod"),                   # it missed
+    "smug": ("wag", "shimmy"),                  # its bluff worked
+    "caught": ("nod", "droop"),                 # the human held through it
+    "idle": ("bob", "chomp"),
 }
 
 
@@ -540,7 +535,7 @@ class Flourish(Motion):
 
     name = "flourish"
 
-    def __init__(self, move: Move, duration: float = 1.2, speed: float = 2.5) -> None:
+    def __init__(self, move: Move, duration: float = 0.8, speed: float = 2.0) -> None:
         super().__init__()
         self.move = move
         self.duration = max(duration, 1e-3)
@@ -567,7 +562,7 @@ class Flourish(Motion):
         return self.finished
 
 
-def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 2.5) -> Flourish:
+def flourish(mood: str, rng=None, duration: float = 0.8, speed: float = 2.0) -> Flourish:
     """A flourish suiting `mood`, picked at random so it does not stale.
 
     Repetition is what makes a performance stop being funny, and this one
