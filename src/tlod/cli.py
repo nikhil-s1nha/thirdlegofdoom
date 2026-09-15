@@ -529,8 +529,16 @@ def cmd_play(args) -> int:
         # taken mid-swing, where the arm's own braking reached the torque
         # cap in every measured run including the empty one, so a high
         # peak there says very little.
-        print(f"\n  contact: peak load rise {contact.peak_rise:.3f} "
-              f"(threshold {contact.threshold:.3f})")
+        # Each sensor's peak means something different and carries
+        # different units -- a fraction of rated torque for the two load
+        # sensors, millimetres for the collision plane. Printing one as
+        # the other turned an 8 mm shortfall into "peak load rise 0.008",
+        # which reads as a sensor that saw nothing.
+        summary = getattr(contact, "peak_summary", None)
+        print(f"\n  contact: " + (
+            summary() if callable(summary)
+            else f"peak load rise {contact.peak_rise:.3f} "
+                 f"(threshold {contact.threshold:.3f})"))
         if contact.read_failures:
             print(f"  {contact.read_failures} servo reads failed during strikes "
                   f"(scored as dodges rather than e-stopping mid-swing)")

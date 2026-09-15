@@ -832,3 +832,64 @@ class TestCollisionPlaneContact:
                 "the round did not report its numbers"
         finally:
             robot.controller.stop(park=False)
+
+
+class TestStrikeGeometryIsSelfConsistent:
+    """max_drop, hover_height and press_depth are one constraint, not three.
+
+    A strike from `hover_height` above the hand must travel that plus
+    `press_depth` to put the paddle below it, and `max_drop` caps the
+    travel. When 80 + 17 > 80 the floor silently rose to exactly the hand
+    plane, and the contact sensor was asked to separate a hit from a miss
+    across a band of zero width. It ran a full hardware session that way:
+    every log line read "floor 22 mm, hand 22 mm". Nothing downstream can
+    catch that, because a floor at the hand plane is an ordinary number.
+    """
+
+    def test_the_defaults_can_reach_below_the_hand(self):
+        from tlod.arm.primitives import StrikeLimits
+
+        limits = StrikeLimits()
+        assert limits.hover_height + limits.press_depth <= limits.max_drop, (
+            f"hover {limits.hover_height * 1e3:.0f} + press "
+            f"{limits.press_depth * 1e3:.0f} > max_drop {limits.max_drop * 1e3:.0f}")
+        assert limits.reachable_floor_offset == limits.press_depth
+
+    def test_the_configured_arm_lands_below_the_hand(self):
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.config import Config
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        cfg = Config.load("configs/opi.yaml")
+        limits = StrikeLimits()
+        hand = cfg.vision.hand_height
+        hover = hand + limits.hover_height
+        floor = max(hand - limits.press_depth,
+                    hover - limits.clamp_drop(hover - (hand - limits.press_depth)),
+                    cfg.safety.min_height)
+        band = hand - floor
+        assert band > 0, f"floor {floor * 1e3:.0f} mm is at or above the hand"
+        margin = CollisionPlaneContactSensor(lambda: (0, 0)).margin
+        assert band > margin * 3, (
+            f"band is only {band * 1e3:.0f} mm against a {margin * 1e3:.0f} mm margin")
+
+    def test_an_inconsistent_geometry_says_so(self):
+        from tlod.arm.primitives import StrikeLimits
+
+        limits = StrikeLimits()
+        limits.hover_height = 0.08
+        limits.press_depth = 0.017
+        limits.max_drop = 0.08
+        assert limits.reachable_floor_offset < 0.001, \
+            "the paddle cannot get below the hand, and the property should say so"
+
+    def test_the_peak_is_reported_in_the_units_it_was_measured_in(self):
+        """"peak load rise 0.008" for an 8 mm shortfall reads as nothing seen."""
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        sensor = CollisionPlaneContactSensor(lambda: (0.030, 0.005), settle=0.0)
+        sensor.arm()
+        sensor.poll(pressing=True)
+        sensor.poll(pressing=True)
+        assert "mm" in sensor.peak_summary()
+        assert "25 mm" in sensor.peak_summary(), sensor.peak_summary()

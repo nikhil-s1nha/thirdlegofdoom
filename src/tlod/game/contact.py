@@ -301,6 +301,11 @@ class CollisionPlaneContactSensor(ContactSensor):
         self._pressing_since = None
         self.last = None
 
+    def peak_summary(self) -> str:
+        """End-of-run line. In millimetres, because this is not a torque."""
+        return (f"peak shortfall {self.peak_rise * 1e3:.0f} mm "
+                f"(margin {self.margin * 1e3:.0f} mm)")
+
     def report(self) -> str:
         """What the last judged round actually looked like, in millimetres."""
         if self.last is None:
