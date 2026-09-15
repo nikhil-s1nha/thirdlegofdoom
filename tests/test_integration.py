@@ -16,6 +16,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from tlod.arm.controller import ArmController, SafetyLimits
 from tlod.arm.mock import MockArm
@@ -893,3 +894,62 @@ class TestStrikeGeometryIsSelfConsistent:
         sensor.poll(pressing=True)
         assert "mm" in sensor.peak_summary()
         assert "25 mm" in sensor.peak_summary(), sensor.peak_summary()
+
+
+class TestCalibrateFindsItsOwnIntrinsics:
+    """`calibrate extrinsics` should not ask for a path the config holds.
+
+    The camera having moved is exactly when this command is reached for,
+    and refusing to start until a path is looked up -- one the rest of
+    the pipeline already loads from `camera.intrinsics` -- puts a step
+    between a diagnosis and its fix for no reason.
+    """
+
+    def _args(self, tmp_path, intrinsics=""):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            what="extrinsics", intrinsics=intrinsics, output=str(tmp_path / "e.npz"),
+            camera=0, pattern="9x6", square=0.025, views=12, gripper=0.0,
+            heights="", marker="red", preview=0, fisheye=False, timeout=60,
+            sim=False, config=None)
+
+    def test_it_falls_back_to_the_config(self, tmp_path, monkeypatch):
+        from tlod import cli
+        from tlod.config import Config
+
+        cfg = Config()
+        cfg.camera.intrinsics = str(tmp_path / "absent.npz")
+        monkeypatch.setattr(cli.Config, "load", staticmethod(lambda *a, **k: cfg))
+
+        # The path from the config is the one it complains about, which is
+        # only possible if it looked there.
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_calibrate(self._args(tmp_path))
+        assert "absent.npz" in str(e.value)
+        assert "config" in str(e.value)
+
+    def test_an_explicit_flag_still_wins(self, tmp_path, monkeypatch):
+        from tlod import cli
+        from tlod.config import Config
+
+        cfg = Config()
+        cfg.camera.intrinsics = str(tmp_path / "from_config.npz")
+        monkeypatch.setattr(cli.Config, "load", staticmethod(lambda *a, **k: cfg))
+
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_calibrate(self._args(tmp_path, intrinsics=str(tmp_path / "flag.npz")))
+        assert "flag.npz" in str(e.value)
+        assert "from_config.npz" not in str(e.value)
+
+    def test_neither_set_says_how_to_get_them(self, tmp_path, monkeypatch):
+        from tlod import cli
+        from tlod.config import Config
+
+        cfg = Config()
+        cfg.camera.intrinsics = ""
+        monkeypatch.setattr(cli.Config, "load", staticmethod(lambda *a, **k: cfg))
+
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_calibrate(self._args(tmp_path))
+        assert "calibrate intrinsics" in str(e.value)
