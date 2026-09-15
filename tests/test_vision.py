@@ -300,3 +300,38 @@ def test_closing_the_hand_detector_twice_is_harmless():
     detector.close()
     detector.close()
     assert Landmarker.closes == 1
+
+
+def test_a_wrong_plane_height_moves_the_hand_sideways(projector):
+    """Why "it keeps aiming at my index finger" was a calibration bug.
+
+    With depth_mode: plane the pixel ray is intersected against an assumed
+    height. The camera looks down at an angle, so getting that height
+    wrong slides the answer *sideways* along the table -- always the same
+    direction, since the camera does not move. No landmark choice can
+    correct it, which is what two sessions of turning PALM_BIAS found out
+    the slow way. The tell is that the offset stays put when the hand
+    rotates.
+    """
+    truth = np.array([0.22, 0.0, 0.028])
+    u, v = projector.project(truth)
+
+    exact = projector.pixel_to_plane(u, v, 0.028)
+    assert np.linalg.norm(exact - truth) < 1e-6
+
+    # 6 mm low, which is what configs/opi.yaml had before it was measured.
+    wrong = projector.pixel_to_plane(u, v, 0.022)
+    sideways = float(np.linalg.norm((wrong - truth)[:2]))
+    assert sideways > 0.003, (
+        "this projector is too close to straight down for the test to mean "
+        "anything; the real rig sees ~0.87 mm per mm")
+
+    # And the direction is fixed by the camera, not by the hand: the same
+    # height error at a different spot on the table pushes the same way.
+    other = np.array([0.24, 0.06, 0.028])
+    u2, v2 = projector.project(other)
+    drift_a = (wrong - truth)[:2]
+    drift_b = (projector.pixel_to_plane(u2, v2, 0.022) - other)[:2]
+    cos = float(np.dot(drift_a, drift_b) /
+                (np.linalg.norm(drift_a) * np.linalg.norm(drift_b)))
+    assert cos > 0.9, f"drift direction is not consistent across the table ({cos:.2f})"
