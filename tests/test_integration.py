@@ -665,3 +665,102 @@ class TestStrikeAimsBelowTheHand:
             assert floor >= 0.06 - 2e-3, f"drove to {floor * 1e3:.1f} mm, under min_height"
         finally:
             controller.stop(park=False)
+
+
+class TestToolHeightContact:
+    """The simplest instrument on the arm: did the paddle get where it was sent?
+
+    Grounded in a measured pose. Driven to the joint angles at which the
+    gripper rests on the table, FK reports the tool at +0.2 mm -- so model
+    z is height above the work surface, the floor sits at 5 mm, and a hand
+    of 22-29 mm stops the paddle 17-24 mm short of it. Against an 8 mm
+    threshold and an unobstructed press that converges within ~3 mm, that
+    is a decision with an order of magnitude of margin, taken from
+    encoders rather than from a filtered torque estimate.
+    """
+
+    def test_it_fires_when_the_paddle_is_stopped_short(self):
+        from tlod.game.contact import ToolHeightContactSensor
+
+        heights = {"reached": 0.005, "commanded": 0.005}
+        sensor = ToolHeightContactSensor(
+            lambda: (heights["reached"], heights["commanded"]), settle=0.05)
+        sensor.arm()
+        assert sensor.poll(pressing=True) is None, "fired before settling"
+
+        heights["reached"] = 0.022                 # a hand, 17 mm of it
+        t0 = time.perf_counter()
+        event = None
+        while event is None and time.perf_counter() - t0 < 1.0:
+            event = sensor.poll(pressing=True)
+            time.sleep(0.005)
+        assert event is not None and event.source == "tool_height"
+        assert time.perf_counter() - t0 >= 0.05, "settle window not honoured"
+        assert sensor.poll(pressing=True) is None, "fired twice on one arming"
+
+    def test_reaching_the_floor_is_a_dodge(self):
+        from tlod.game.contact import ToolHeightContactSensor
+
+        # An unobstructed press converges to within about 3 mm, and can
+        # sit slightly under the floor. Neither is a hand.
+        sensor = ToolHeightContactSensor(lambda: (0.008, 0.005), settle=0.0)
+        sensor.arm()
+        sensor.poll(pressing=True)
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 0.2:
+            assert sensor.poll(pressing=True) is None, "tracking error scored as a hit"
+            time.sleep(0.005)
+        assert sensor.peak_rise < 0.008
+
+    def test_nothing_is_read_until_the_arm_is_pressing(self):
+        """Mid-swing the paddle is far above the floor by definition."""
+        from tlod.game.contact import ToolHeightContactSensor
+
+        sensor = ToolHeightContactSensor(lambda: (0.080, 0.005), settle=0.0)
+        sensor.arm()
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 0.2:
+            assert sensor.poll(pressing=False) is None, "fired during the descent"
+            time.sleep(0.005)
+
+    def test_a_read_failure_is_a_dodge_not_an_exception(self):
+        """An exception here reaches the control loop, which e-stops --
+        freezing the arm mid-swing directly above the hand."""
+        from tlod.game.contact import ToolHeightContactSensor
+
+        def boom():
+            raise OSError("sync read failed")
+
+        sensor = ToolHeightContactSensor(boom, settle=0.0)
+        sensor.arm()
+        assert sensor.poll(pressing=True) is None
+        assert sensor.poll(pressing=True) is None
+        assert sensor.read_failures == 1
+
+    def test_the_floor_leaves_the_measured_table_clear(self):
+        """Regression on the frame itself, not on the sensor.
+
+        The config used to say the table sat 17 mm below the base, which
+        made every clearance figure derived from it wrong by 17 mm in the
+        dangerous direction. The pose below is measured: gripper resting
+        on the table.
+        """
+        from tlod.arm import model
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.config import Config
+
+        touching = np.array([-0.304, 0.210, 0.302, 1.068, -0.005])
+        table_z = model.tool_pose(touching).z
+        assert abs(table_z) < 0.003, f"table is at {table_z * 1e3:.1f} mm, not ~0"
+
+        cfg = Config.load("configs/opi.yaml")
+        limits = StrikeLimits()
+        floor = max(cfg.vision.hand_height - limits.press_depth, cfg.safety.min_height)
+        assert floor > table_z, "the commanded floor is at or below the table"
+        assert floor - table_z >= 0.004, (
+            f"only {(floor - table_z) * 1e3:.1f} mm of air over the table")
+        # And deep enough that a thin hand still stops the paddle well
+        # clear of the threshold.
+        from tlod.game.contact import ToolHeightContactSensor
+        thin_hand = 0.020
+        assert thin_hand - floor > ToolHeightContactSensor(lambda: (0, 0)).threshold * 1.5

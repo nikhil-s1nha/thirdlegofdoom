@@ -20,17 +20,21 @@ safety:
   max_speed: 3.5
   max_accel: 35.0
   max_jerk: 400.0
-  # This floor is only about not driving into the table, which sits 17 mm
-  # below the base on its riser. 5 mm still leaves 22 mm of air.
+  # This floor is only about not driving into the table -- and the table
+  # is at z = 0, not 17 mm below it as this comment used to claim. Driven
+  # to the joint angles at which the gripper rests on the table, FK
+  # reports the tool at +0.2 mm: the riser is already absorbed into the
+  # calibration, so model z is height above the work surface directly.
+  # 5 mm therefore means 5 mm of air, not 22.
   #
   # It was 20 mm, back when the strike aimed 5 mm *above* the hand plane
   # and so never came near this. It does now: StrikeLimits.press_depth
-  # commands 10 mm below the estimated hand surface, because the press
-  # sensor only reads something when the arm is blocked short of its
-  # floor, and a floor above the hand means a real touch spends no torque
-  # and scores as a dodge. That puts the target at 12 mm, which 20 mm
-  # would clamp straight back to 20 -- undoing the change silently and
-  # leaving nothing in the log but a strike that stopped high.
+  # commands 17 mm below the 22 mm hand plane, landing the floor exactly
+  # here. Both contact sensors need that -- they ask whether the paddle
+  # was stopped short, and a floor above the hand is one an untouched
+  # paddle and a touched one both reach. 20 mm would clamp the floor
+  # straight back to 20, undoing it silently and leaving nothing in the
+  # log but a strike that stopped high.
   #
   # What bounds the force is arm torque_limit during the swing (350/1000,
   # a 0.038 lean against a rigid book), not this number.

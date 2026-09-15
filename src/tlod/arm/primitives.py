@@ -99,13 +99,21 @@ class StrikeLimits:
     # same hand held flatter, reaches 27 mm unobstructed and reads 0.001.
     #
     # Commanding below the surface instead makes the press deep enough
-    # that a few millimetres of hand thickness stop mattering. 10 mm
-    # covers the spread seen between one round and the next.
+    # that hand thickness stops mattering, and 10 mm was not enough of
+    # that. The number now comes from the arm's own frame rather than
+    # from a guess: driven to the joint angles at which the gripper rests
+    # on the table, FK reports the tool at +0.2 mm, so **model z = 0 is
+    # the work surface**. Against a 22 mm hand plane, 17 mm of depth puts
+    # the floor at 5 mm -- five millimetres of air -- and a hand of any
+    # plausible thickness is then blocking the paddle by 17-24 mm rather
+    # than the 2 mm that was being asked to carry the whole decision.
     #
     # `safety.min_height` still has the last word, and is what keeps this
     # off the table -- so raising press_depth without lowering min_height
-    # changes nothing at all.
-    press_depth: float = 0.010
+    # changes nothing at all. At 5 mm the two now meet exactly, which is
+    # deliberate: the floor is the guard, not something the guard has to
+    # rescue.
+    press_depth: float = 0.017
     torque_limit: int = 350             # of 1000, while striking; yields on contact
     normal_torque_limit: int = 800
     # Stay down at the bottom, still at `torque_limit`, before retracting.
