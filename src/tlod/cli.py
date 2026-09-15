@@ -1496,7 +1496,7 @@ def cmd_calibrate(args) -> int:
         with camera:
             time.sleep(1.0)
             heights = tuple(float(v) for v in args.heights.split(","))
-            extr, residuals = run_extrinsics(
+            extr, residuals, marker_offset, naive_rms = run_extrinsics(
                 camera, controller, intr,
                 poses=calibration_poses(heights=heights),
                 gripper=args.gripper,
@@ -1511,6 +1511,16 @@ def cmd_calibrate(args) -> int:
     residuals = np.array(residuals)
     print(f"\n  camera at ({extr.t[0]:+.3f}, {extr.t[1]:+.3f}, {extr.t[2]:+.3f}) m in base frame")
     print(f"  reprojection: RMS {extr.rms:.2f} px, worst point {residuals.max():.2f} px")
+    if np.linalg.norm(marker_offset) > 1e-4:
+        print(f"  marker sits {np.linalg.norm(marker_offset) * 1e3:.0f} mm off the tool "
+              f"point ({', '.join(f'{v * 1e3:+.0f}' for v in marker_offset)} mm in the "
+              f"tool frame),")
+        print(f"  which is solved for rather than assumed away -- RMS would be "
+              f"{naive_rms:.2f} px without it.")
+        if np.linalg.norm(marker_offset) > 0.05:
+            print("  NOTE: that is a long way for tape on a gripper. Check the jaw is")
+            print("  actually closed (--gripper 1 if 0 opens it) and that nothing else")
+            print("  in frame is that colour.")
     print(f"  -> {out}")
     if residuals.max() > 3 * max(extr.rms, 0.5):
         print("  NOTE: one point is far worse than the rest -- likely a mislocated")

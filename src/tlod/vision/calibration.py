@@ -369,6 +369,93 @@ def solve_extrinsics(
     return Extrinsics(R, t, rms)
 
 
+def solve_extrinsics_with_marker_offset(
+    tool_t: np.ndarray,
+    tool_R: np.ndarray,
+    points_image: np.ndarray,
+    intr: Intrinsics,
+    iterations: int = 30,
+) -> tuple[Extrinsics, np.ndarray]:
+    """PnP that also solves for where the marker sits on the gripper.
+
+    `solve_extrinsics` assumes the thing the camera sees is exactly the
+    point forward kinematics reports. It never is: the marker is a piece
+    of tape on a jaw, centimetres from the tool point, and if the gripper
+    is not fully closed it is further still.
+
+    A *fixed* offset in the base frame would be harmless -- the solve
+    would absorb it into the camera position and reproject perfectly, just
+    placing the camera slightly wrong. What makes it bite is that the
+    gripper rotates between poses, so the same offset points somewhere
+    different each time and no camera pose can explain all of them at
+    once. That is exactly the signature seen on the rig: an intrinsics
+    fit of 0.165 px feeding an extrinsics fit of 8.6 px.
+
+    So the offset becomes three more unknowns, in the *tool* frame where
+    it is actually constant:
+
+        marker_base(i) = tool_t(i) + tool_R(i) @ offset
+
+    Solved by alternating -- PnP for the camera given the offset, then
+    Gauss-Newton for the offset given the camera. Both halves are cheap
+    and each is convex given the other; a dozen passes is plenty. Zero
+    offset is in the search space, so a marker genuinely at the tool point
+    costs nothing but a few milliseconds.
+
+    Returns the extrinsics and the offset in metres. The offset is worth
+    printing: it is a physical distance on a real gripper, so a solve that
+    reports 8 cm has found something other than the marker.
+    """
+    tool_t = np.asarray(tool_t, np.float64).reshape(-1, 3)
+    tool_R = np.asarray(tool_R, np.float64).reshape(-1, 3, 3)
+    points_image = np.asarray(points_image, np.float64).reshape(-1, 2)
+    # 6 camera parameters plus 3 offset against 2 residuals per point.
+    if len(tool_t) < 6:
+        return solve_extrinsics(tool_t, points_image, intr), np.zeros(3)
+
+    normalized = intr.normalize(points_image).reshape(-1, 2)
+    eye, none = np.eye(3), np.zeros(5)
+    offset = np.zeros(3)
+    rvec = tvec = None
+
+    for _ in range(iterations):
+        marker = tool_t + np.einsum("nij,j->ni", tool_R, offset)
+        ok, rvec, tvec = cv2.solvePnP(marker, normalized.reshape(-1, 1, 2), eye, none,
+                                      flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            raise RuntimeError("solvePnP failed")
+        rvec, tvec = cv2.solvePnPRefineLM(marker, normalized.reshape(-1, 1, 2),
+                                          eye, none, rvec, tvec)
+        R_cb, _ = cv2.Rodrigues(rvec)
+
+        # One Gauss-Newton step on the offset, in normalised coordinates
+        # so the lens model does not have to be differentiated.
+        cam = (R_cb @ marker.T).T + tvec.ravel()
+        z = cam[:, 2]
+        if np.any(z <= 1e-6):
+            break
+        pred = cam[:, :2] / z[:, None]
+        resid = (pred - normalized).ravel()
+        # d(pred)/d(cam) for each point, then chain through R_cb @ tool_R.
+        dpdc = np.zeros((len(cam), 2, 3))
+        dpdc[:, 0, 0] = 1.0 / z
+        dpdc[:, 1, 1] = 1.0 / z
+        dpdc[:, 0, 2] = -cam[:, 0] / z ** 2
+        dpdc[:, 1, 2] = -cam[:, 1] / z ** 2
+        J = np.einsum("nab,bc,ncd->nad", dpdc, R_cb, tool_R).reshape(-1, 3)
+        step, *_ = np.linalg.lstsq(J, -resid, rcond=None)
+        offset = offset + step
+        if np.linalg.norm(step) < 1e-6:
+            break
+
+    marker = tool_t + np.einsum("nij,j->ni", tool_R, offset)
+    R = R_cb.T
+    t = (-R_cb.T @ tvec).ravel()
+    proj = intr.project(marker, rvec, tvec)
+    rms = float(np.sqrt(np.mean(np.sum((proj - points_image) ** 2, axis=1))))
+    return Extrinsics(R, t, rms), offset
+
+
 def extrinsics_from_arm_points(
     tcp_points_base: np.ndarray, pixels: np.ndarray, intr: Intrinsics
 ) -> Extrinsics:
