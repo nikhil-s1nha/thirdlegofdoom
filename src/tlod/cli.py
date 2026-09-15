@@ -427,14 +427,17 @@ def cmd_play(args) -> int:
 
             limits = build_strike_limits(cfg)
 
-            def _heights():
-                """(where the paddle got to, where it was sent), metres."""
-                # One bus read: pose() reads state, commanded is cached.
-                return (app.controller.pose().z,
-                        float(model.tool_pose(app.controller.commanded[:5]).z))
+            def _floor():
+                """Where the paddle was sent, metres. No bus traffic.
+
+                `commanded` is cached in the controller, and where the
+                paddle actually got to arrives on the poll's `tool_xyz`,
+                which the game has already read this tick.
+                """
+                return float(model.tool_pose(app.controller.commanded[:5]).z)
 
             contact = CollisionPlaneContactSensor(
-                _heights,
+                _floor,
                 **({} if args.contact_threshold is None
                    else {"margin": args.contact_threshold}))
             source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
@@ -705,7 +708,12 @@ def _serve_overlay(app, projector, port: int):
             try:
                 server.offer(viewer.render_once())
             except Exception:
-                log.debug("overlay render failed", exc_info=True)
+                # `log` is not a module global here, and reaching for it
+                # turned a swallowed render failure into a NameError that
+                # killed the overlay thread -- an error handler that fails
+                # only when it is needed.
+                logging.getLogger(__name__).debug(
+                    "overlay render failed", exc_info=True)
 
     threading.Thread(target=pump, name="overlay", daemon=True).start()
     original = server.stop

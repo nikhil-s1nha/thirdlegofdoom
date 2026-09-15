@@ -270,12 +270,20 @@ class CollisionPlaneContactSensor(ContactSensor):
 
     def __init__(
         self,
-        geometry_source,
+        floor_source,
         margin: float = 0.004,
         settle: float = 0.12,
     ) -> None:
-        # () -> (reached_z, floor_z) in metres, base frame, from encoders.
-        self.geometry_source = geometry_source
+        # () -> commanded floor height, metres. Where the paddle actually
+        # reached comes in on `tool_xyz`, which the caller has already read
+        # this tick.
+        #
+        # It used to read that itself, which meant two bus transactions per
+        # tick during a strike where one would do. On a half-duplex servo
+        # bus that is not free: a sync read failed mid-strike, the control
+        # loop e-stopped, and the arm froze above the hand. The commanded
+        # position is cached in the controller and costs nothing.
+        self.floor_source = floor_source
         # How far above the floor counts as "stopped short". An
         # unobstructed press converges to within about 3 mm and can sit
         # slightly under, so this is that plus a little -- not a tuning
@@ -316,8 +324,9 @@ class CollisionPlaneContactSensor(ContactSensor):
                 f"hand {hand * 1e3:.0f} mm -> {short * 1e3:+.0f} mm short "
                 f"(needs {self.margin * 1e3:.0f})")
 
-    def poll(self, pressing: bool = False, hand_xyz=None, **kwargs) -> ContactEvent | None:
-        if self._fired:
+    def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
+             **kwargs) -> ContactEvent | None:
+        if self._fired or tool_xyz is None:
             return None
         if not pressing:
             self._pressing_since = None
@@ -329,10 +338,11 @@ class CollisionPlaneContactSensor(ContactSensor):
         if now - self._pressing_since < self.settle:
             return None
         try:
-            reached, floor = self.geometry_source()
+            floor = self.floor_source()
         except Exception:
             self.read_failures += 1
             return None
+        reached = float(tool_xyz[2])
         hand = float(hand_xyz[2]) if hand_xyz is not None else float("nan")
         self.last = (float(reached), float(floor), hand)
         short = float(reached) - float(floor)

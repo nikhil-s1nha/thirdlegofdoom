@@ -683,17 +683,16 @@ class TestCollisionPlaneContact:
     def test_it_fires_when_the_paddle_is_stopped_short(self):
         from tlod.game.contact import CollisionPlaneContactSensor
 
-        heights = {"reached": 0.005, "commanded": 0.005}
-        sensor = CollisionPlaneContactSensor(
-            lambda: (heights["reached"], heights["commanded"]), settle=0.05)
+        tool = np.array([0.22, 0.0, 0.005])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.05)
         sensor.arm()
-        assert sensor.poll(pressing=True) is None, "fired before settling"
+        assert sensor.poll(pressing=True, tool_xyz=tool) is None, "fired before settling"
 
-        heights["reached"] = 0.022                 # a hand, 17 mm of it
+        tool = np.array([0.22, 0.0, 0.022])        # a hand, 17 mm of it
         t0 = time.perf_counter()
         event = None
         while event is None and time.perf_counter() - t0 < 1.0:
-            event = sensor.poll(pressing=True)
+            event = sensor.poll(pressing=True, tool_xyz=tool)
             time.sleep(0.005)
         assert event is not None and event.source == "collision_plane"
         assert time.perf_counter() - t0 >= 0.05, "settle window not honoured"
@@ -704,12 +703,14 @@ class TestCollisionPlaneContact:
 
         # An unobstructed press converges to within about 3 mm, and can
         # sit slightly under the floor. Neither is a hand.
-        sensor = CollisionPlaneContactSensor(lambda: (0.008, 0.005), margin=0.010, settle=0.0)
+        tool = np.array([0.22, 0.0, 0.008])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, margin=0.010, settle=0.0)
         sensor.arm()
-        sensor.poll(pressing=True)
+        sensor.poll(pressing=True, tool_xyz=tool)
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 0.2:
-            assert sensor.poll(pressing=True) is None, "tracking error scored as a hit"
+            assert sensor.poll(pressing=True, tool_xyz=tool) is None, \
+                "tracking error scored as a hit"
             time.sleep(0.005)
         assert sensor.peak_rise < sensor.margin
 
@@ -717,11 +718,13 @@ class TestCollisionPlaneContact:
         """Mid-swing the paddle is far above the floor by definition."""
         from tlod.game.contact import CollisionPlaneContactSensor
 
-        sensor = CollisionPlaneContactSensor(lambda: (0.080, 0.005), settle=0.0)
+        tool = np.array([0.22, 0.0, 0.080])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
         sensor.arm()
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 0.2:
-            assert sensor.poll(pressing=False) is None, "fired during the descent"
+            assert sensor.poll(pressing=False, tool_xyz=tool) is None, \
+                "fired during the descent"
             time.sleep(0.005)
 
     def test_a_read_failure_is_a_dodge_not_an_exception(self):
@@ -732,10 +735,11 @@ class TestCollisionPlaneContact:
         def boom():
             raise OSError("sync read failed")
 
+        tool = np.array([0.22, 0.0, 0.030])
         sensor = CollisionPlaneContactSensor(boom, settle=0.0)
         sensor.arm()
-        assert sensor.poll(pressing=True) is None
-        assert sensor.poll(pressing=True) is None
+        assert sensor.poll(pressing=True, tool_xyz=tool) is None
+        assert sensor.poll(pressing=True, tool_xyz=tool) is None
         assert sensor.read_failures == 1
 
     def test_the_floor_leaves_the_measured_table_clear(self):
@@ -764,7 +768,7 @@ class TestCollisionPlaneContact:
         # clear of the threshold.
         from tlod.game.contact import CollisionPlaneContactSensor
         thin_hand = 0.020
-        assert thin_hand - floor > CollisionPlaneContactSensor(lambda: (0, 0)).margin * 1.5
+        assert thin_hand - floor > CollisionPlaneContactSensor(lambda: 0.0).margin * 1.5
 
     def test_it_reports_its_numbers_whichever_way_the_round_went(self):
         """A verdict alone is unfalsifiable from outside the arm.
@@ -777,29 +781,34 @@ class TestCollisionPlaneContact:
         """
         from tlod.game.contact import CollisionPlaneContactSensor
 
-        sensor = CollisionPlaneContactSensor(lambda: (0.007, 0.005), settle=0.0)
+        tool = np.array([0.22, 0.0, 0.007])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
         assert "no reading" in sensor.report()
 
         sensor.arm()
-        sensor.poll(pressing=True, hand_xyz=np.array([0.22, 0.0, 0.022]))
+        hand = np.array([0.22, 0.0, 0.022])
+        sensor.poll(pressing=True, tool_xyz=tool, hand_xyz=hand)
         for _ in range(5):
-            sensor.poll(pressing=True, hand_xyz=np.array([0.22, 0.0, 0.022]))
+            sensor.poll(pressing=True, tool_xyz=tool, hand_xyz=hand)
             time.sleep(0.005)
         report = sensor.report()
         assert "7 mm" in report and "5 mm" in report and "22 mm" in report, report
         assert "+2 mm short" in report, report
 
-    def test_a_whole_round_of_the_real_game_scores_a_block_as_a_hit(self):
-        """End to end through HandSlapGame, which is where the wiring lives.
+    def test_the_game_polls_the_sensor_while_the_paddle_is_pressing(self):
+        """The wiring, which is the only thing below the whole loop can miss.
 
-        The sensor firing in isolation says nothing about whether the game
-        ever polls it while the arm is pressing, for long enough to clear
-        `settle`. That is a property of Strike.press_hold, the strike
-        state and run_motion together, and nothing below the whole loop
-        tests it.
+        A sensor firing in isolation says nothing about whether the game
+        ever calls it while the arm is down, with a tool position, for
+        long enough to clear `settle`. That is `Strike.press_hold`, the
+        strike state and `run_motion` acting together, and every one of
+        those has been wrong at some point in this file's history.
+
+        Deliberately not asserted by scoring a hit off the mock arm's own
+        tracking: it stops ~10 mm above the floor on its own, so a test
+        written that way passes with no hand anywhere near it.
         """
         import sys
-        from types import SimpleNamespace
 
         sys.path.insert(0, "tests")
         from test_game import fake_robot
@@ -809,10 +818,17 @@ class TestCollisionPlaneContact:
         from tlod.game.handslap import Difficulty, HandSlapGame, Personality
 
         hand = np.array([0.22, 0.0, 0.022])
-        # A hand that stops the paddle 17 mm above the floor it was sent to.
-        sensor = CollisionPlaneContactSensor(lambda: (0.022, 0.005))
+        seen: list[tuple[float, object]] = []
+
+        class Spy(CollisionPlaneContactSensor):
+            def poll(self, pressing=False, tool_xyz=None, **kw):
+                if pressing:
+                    seen.append((time.perf_counter(), tool_xyz))
+                return super().poll(pressing=pressing, tool_xyz=tool_xyz, **kw)
+
+        sensor = Spy(lambda: 0.005)
         difficulty = Difficulty.preset("easy")
-        difficulty.feint_probability = 0.0        # strikes only; feints are judged elsewhere
+        difficulty.feint_probability = 0.0     # strikes only; feints judge elsewhere
 
         robot = fake_robot(hand)
         game = HandSlapGame(difficulty, limits=StrikeLimits(),
@@ -822,17 +838,44 @@ class TestCollisionPlaneContact:
         game.running = True
         try:
             t0 = time.perf_counter()
-            while time.perf_counter() - t0 < 25.0 and game.score.rounds < 2:
+            while time.perf_counter() - t0 < 25.0 and game.strikes < 1:
                 game.update(robot, None, 0.01)
                 time.sleep(0.01)
+            # Let the strike finish so the whole pressing window is seen.
+            while time.perf_counter() - t0 < 25.0 and game.state == "strike":
+                game.update(robot, None, 0.01)
+                time.sleep(0.01)
+
             assert game.strikes >= 1, "the game never struck; test proved nothing"
-            assert game.score.robot == game.score.rounds, (
-                f"a blocked paddle scored {game.score}; "
-                f"last reading: {sensor.report()}")
-            assert any("short" in line for line in game.log), \
-                "the round did not report its numbers"
+            assert seen, "the sensor was never polled while pressing"
+            assert all(t is not None for _, t in seen), \
+                "polled while pressing but with no tool position to judge from"
+            window = seen[-1][0] - seen[0][0]
+            assert window >= sensor.settle, (
+                f"only {window * 1e3:.0f} ms of pressing reached the sensor, "
+                f"which needs {sensor.settle * 1e3:.0f} ms -- press_hold is too "
+                f"short or the strike state leaves early")
         finally:
             robot.controller.stop(park=False)
+
+    def test_a_blocked_paddle_scores_a_hit_and_a_clear_one_does_not(self):
+        """Both directions, at the sensor, where the heights are controlled."""
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        def verdict(reached):
+            sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.02)
+            sensor.arm()
+            tool = np.array([0.22, 0.0, reached])
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 0.5:
+                if sensor.poll(pressing=True, tool_xyz=tool) is not None:
+                    return True
+                time.sleep(0.005)
+            return False
+
+        assert verdict(0.022), "a hand 17 mm thick scored as a dodge"
+        assert not verdict(0.005), "reaching the floor scored as a hit"
+        assert not verdict(0.003), "overshooting the floor scored as a hit"
 
 
 class TestStrikeGeometryIsSelfConsistent:
@@ -870,7 +913,7 @@ class TestStrikeGeometryIsSelfConsistent:
                     cfg.safety.min_height)
         band = hand - floor
         assert band > 0, f"floor {floor * 1e3:.0f} mm is at or above the hand"
-        margin = CollisionPlaneContactSensor(lambda: (0, 0)).margin
+        margin = CollisionPlaneContactSensor(lambda: 0.0).margin
         assert band > margin * 3, (
             f"band is only {band * 1e3:.0f} mm against a {margin * 1e3:.0f} mm margin")
 
@@ -888,10 +931,11 @@ class TestStrikeGeometryIsSelfConsistent:
         """"peak load rise 0.008" for an 8 mm shortfall reads as nothing seen."""
         from tlod.game.contact import CollisionPlaneContactSensor
 
-        sensor = CollisionPlaneContactSensor(lambda: (0.030, 0.005), settle=0.0)
+        tool = np.array([0.22, 0.0, 0.030])
+        sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
         sensor.arm()
-        sensor.poll(pressing=True)
-        sensor.poll(pressing=True)
+        sensor.poll(pressing=True, tool_xyz=tool)
+        sensor.poll(pressing=True, tool_xyz=tool)
         assert "mm" in sensor.peak_summary()
         assert "25 mm" in sensor.peak_summary(), sensor.peak_summary()
 
@@ -998,3 +1042,79 @@ class TestCalibrateFindsItsOwnIntrinsics:
         with pytest.raises(SystemExit) as e:
             cli.cmd_calibrate(self._args(tmp_path))
         assert "calibrate intrinsics" in str(e.value)
+
+
+class TestEstopSurvivesTheBusItIsStoppingFor:
+    """An e-stop must not need the thing that just failed.
+
+    From the rig: a sync read failed mid-strike, the control loop answered
+    it by calling estop(), estop() read the bus, the read failed again,
+    and the exception took out the control thread -- with the arm still
+    commanded downward, above the hand it was aiming at. The safety action
+    was the one action that could not tolerate the failure it exists to
+    handle.
+    """
+
+    def _controller(self, fail_reads: bool = False, fail_writes: bool = False):
+        from tlod.arm.controller import ArmController, SafetyLimits
+        from tlod.arm.mock import MockArm
+
+        class FlakyArm(MockArm):
+            def __init__(self):
+                super().__init__(q0=np.concatenate([HOME, [0.0]]))
+                self.break_reads = False
+                self.break_writes = False
+
+            def read(self):
+                if self.break_reads:
+                    raise OSError("sync read failed: [TxRxResult] There is no status packet!")
+                return super().read()
+
+            def write(self, q):
+                if self.break_writes:
+                    raise OSError("sync write failed")
+                return super().write(q)
+
+        backend = FlakyArm()
+        controller = ArmController(backend, SafetyLimits(), 100.0)
+        controller.start()
+        backend.break_reads = fail_reads
+        backend.break_writes = fail_writes
+        return backend, controller
+
+    def test_it_still_stops_when_the_bus_is_gone(self):
+        backend, controller = self._controller()
+        try:
+            controller.goto_pose(controller.pose().offset(dz=-0.02), duration=0.2)
+            before = controller.commanded.copy()
+            backend.break_reads = True
+            controller.estop()                       # must not raise
+            assert controller.estopped
+            # Frozen at the last command, since there is no fresh reading.
+            assert np.allclose(controller.commanded, before)
+        finally:
+            backend.break_reads = False
+            controller.stop(park=False)
+
+    def test_it_still_stops_when_writes_fail_too(self):
+        backend, controller = self._controller(fail_reads=True, fail_writes=True)
+        try:
+            controller.estop()
+            assert controller.estopped, "a failed write left the stop un-engaged"
+        finally:
+            backend.break_reads = backend.break_writes = False
+            controller.stop(park=False)
+
+    def test_a_command_after_a_failed_estop_is_still_refused(self):
+        """The point of the flag: nothing further reaches the servos."""
+        backend, controller = self._controller()
+        try:
+            backend.break_reads = True
+            controller.estop()
+            backend.break_reads = False
+            before = controller.commanded.copy()
+            controller.servo_pose(controller.pose().offset(dz=-0.05))
+            assert np.allclose(controller.commanded, before), \
+                "a command got through after the e-stop"
+        finally:
+            controller.stop(park=False)

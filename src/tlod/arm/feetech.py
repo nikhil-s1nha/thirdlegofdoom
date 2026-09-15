@@ -217,20 +217,21 @@ class FeetechArm(ArmBackend):
         if not self._port_handler.setBaudRate(self.baudrate):
             raise RuntimeError(f"could not set baudrate {self.baudrate}")
 
-        # One sync read covering position through current in a single bus
-        # transaction, instead of a round trip per register per motor. At
-        # 100 Hz that difference is most of the loop budget.
+        # One sync read covering position+speed+load in a single bus
+        # transaction: 3 registers x 6 motors in ~1 ms instead of 18 round
+        # trips. At 100 Hz that difference is most of the loop budget.
         #
-        # The span runs 56..70 rather than the 6 bytes of position+speed+
-        # load, to reach Present_Current at 69. The seven bytes in between
-        # (voltage, temperature, status) are dead weight on the wire and
-        # are not decoded here -- `probe()` reads those separately, off the
-        # control path. Paying for them buys the only contact signal this
-        # arm has: load is clamped by Torque_Limit and pins at the ceiling
-        # during a strike, current is not clamped and still has headroom.
+        # This briefly spanned 56..70 to pick up Present_Current, on the
+        # theory that current is not clamped by Torque_Limit where load is
+        # and so might see a contact that load cannot. Measured across
+        # nothing / a book / a hand it separated them by 0.006 A -- one
+        # 6.5 mA quantisation step, smaller than the jitter within a single
+        # run. It bought nothing and cost fifteen bytes per servo per tick
+        # instead of six, on a half-duplex bus that already drops the
+        # occasional transaction under load. `probe()` still reads current
+        # off the control path, where the cost does not matter.
         self._sync_read = scs.GroupSyncRead(
-            self._port_handler, self._packet_handler, ADDR_PRESENT_POSITION,
-            ADDR_PRESENT_CURRENT + 2 - ADDR_PRESENT_POSITION,
+            self._port_handler, self._packet_handler, ADDR_PRESENT_POSITION, 6
         )
         for mid in self.motor_ids:
             if not self._sync_read.addParam(mid):
@@ -322,7 +323,6 @@ class FeetechArm(ArmBackend):
         counts = np.empty(NUM_JOINTS)
         speeds = np.empty(NUM_JOINTS)
         loads = np.empty(NUM_JOINTS)
-        currents = np.empty(NUM_JOINTS)
         for i, mid in enumerate(self.motor_ids):
             counts[i] = self._sync_read.getData(mid, ADDR_PRESENT_POSITION, 2)
             # Speed and load are both sign-magnitude: bit 15 is direction,
@@ -333,17 +333,12 @@ class FeetechArm(ArmBackend):
             raw_load = int(self._sync_read.getData(mid, ADDR_PRESENT_LOAD, 2))
             magnitude = (raw_load & 0x3FF) / 1000.0
             loads[i] = -magnitude if raw_load & 0x400 else magnitude
-            # Current is unsigned magnitude, and unlike load it is a
-            # measurement rather than a command, so it is not clamped by
-            # Torque_Limit.
-            currents[i] = int(self._sync_read.getData(mid, ADDR_PRESENT_CURRENT, 2)) & 0x7FFF
 
         return JointState(
             q=self.calib.to_rad(counts),
             stamp=stamp,
             dq=self.calib.sign * speeds * RAD_PER_COUNT,
             load=loads,
-            current=currents * AMPS_PER_CURRENT_COUNT,
         )
 
     def write(self, q: np.ndarray) -> None:

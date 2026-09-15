@@ -202,15 +202,39 @@ class ArmController:
         and it may be falling onto the hand that triggered the stop.
         """
         with self._lock:
-            state = self.backend.read()
+            # Set first, and unconditionally. Everything below can fail --
+            # it talks to the same bus that is the most likely reason an
+            # e-stop was called for in the first place -- and a stop that
+            # raises before it has stopped anything is not a stop.
+            #
+            # This is not hypothetical. A sync read failed mid-strike, the
+            # control loop answered it by calling estop(), estop() read the
+            # bus, the read failed again, and the exception took out the
+            # control thread with the arm still commanded downward. The
+            # safety action was the one action that could not tolerate the
+            # failure it existed to handle.
             self._estop = True
-            self._command = state.q.copy()
+            try:
+                q = self.backend.read().q
+            except Exception:
+                # No fresh reading, so freeze at the last command instead.
+                # Slightly ahead of where the arm physically is, which is
+                # the safe direction: it stops the profile advancing, and
+                # the arm is already tracking toward it.
+                log.warning("e-stop could not read the arm; freezing at the "
+                            "last command", exc_info=True)
+                q = self._command.copy()
+            self._command = q.copy()
             # Discard the profile's velocity and acceleration too. Freezing
             # only the position would leave the shaper mid-motion, and
             # releasing the stop would resume the swing that caused it.
-            self.profile.reset(state.q)
-            self.backend.write(state.q)
-        log.warning("E-STOP engaged at q=%s", np.round(state.q, 3))
+            self.profile.reset(q)
+            try:
+                self.backend.write(q)
+            except Exception:
+                log.error("e-stop could not command the arm; the servos hold "
+                          "their last goal position", exc_info=True)
+        log.warning("E-STOP engaged at q=%s", np.round(q, 3))
 
     def release_estop(self) -> None:
         with self._lock:
