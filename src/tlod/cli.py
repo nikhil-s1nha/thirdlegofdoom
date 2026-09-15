@@ -1366,7 +1366,27 @@ def cmd_calibrate(args) -> int:
     from tlod.vision.calibration import Intrinsics
 
     cfg = Config.load(args.config)
-    out = Path(args.output)
+    # Resolved per subcommand, from the config, rather than one default for
+    # both. It was a single `-o` defaulting to calib/intrinsics.npz for the
+    # whole `calibrate` command -- correct for intrinsics and destructive
+    # for extrinsics, which happily wrote its own solve over a lens
+    # calibration that takes a chessboard and twenty minutes to reshoot.
+    # There is no warning at the point of loss: the run prints a camera
+    # position and an RMS and looks like it worked.
+    default_out = (cfg.camera.intrinsics if args.what == "intrinsics"
+                   else cfg.camera.extrinsics)
+    out = Path(args.output or default_out or f"calib/{args.what}.npz")
+
+    # And a hard stop, because a default is only the usual way to get this
+    # wrong. These two files are not interchangeable and neither solve can
+    # detect that it has been handed the other's data.
+    other = (cfg.camera.extrinsics if args.what == "intrinsics"
+             else cfg.camera.intrinsics)
+    if other and out.resolve() == Path(other).resolve():
+        raise SystemExit(
+            f"refusing to write {args.what} to {out}, which is the "
+            f"{'extrinsics' if args.what == 'intrinsics' else 'intrinsics'} "
+            f"file in this config. Pass -o with a different path.")
 
     if args.what == "intrinsics":
         cfg = cfg.with_overrides(camera={"source": "opencv", "index": args.camera})
@@ -1946,7 +1966,10 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("calibrate", help="measure the lens, then where the camera is")
     s.add_argument("what", choices=["intrinsics", "extrinsics"])
-    s.add_argument("-o", "--output", default="calib/intrinsics.npz")
+    s.add_argument("-o", "--output", default="",
+                   help="where to write the result. Defaults to camera.intrinsics "
+                        "or camera.extrinsics from the config, whichever this "
+                        "subcommand produces")
     s.add_argument("--camera", type=int, default=0)
     s.add_argument("--pattern", default="9x6", help="inner corners, e.g. 9x6")
     s.add_argument("--square", type=float, default=0.025, help="square size, metres")
