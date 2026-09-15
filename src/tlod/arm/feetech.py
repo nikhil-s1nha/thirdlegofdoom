@@ -317,7 +317,9 @@ class FeetechArm(ArmBackend):
             if result == 0:
                 break
             if attempt == retries:
-                raise OSError(f"sync read failed: {self._packet_handler.getTxRxResult(result)}")
+                raise OSError(
+                    f"sync read failed: {self._packet_handler.getTxRxResult(result)}"
+                    f"{self._why_silent()}")
             time.sleep(backoff)
 
         counts = np.empty(NUM_JOINTS)
@@ -340,6 +342,47 @@ class FeetechArm(ArmBackend):
             dq=self.calib.sign * speeds * RAD_PER_COUNT,
             load=loads,
         )
+
+    def _why_silent(self) -> str:
+        """Which servo went quiet, and what it says is wrong. Best effort.
+
+        "There is no status packet" names nothing: not which of the six
+        stopped answering, nor why. A servo that latches a fault -- over
+        temperature, over current, undervoltage -- drops off the bus and
+        stays off until it is power cycled, and that is indistinguishable
+        from a wiring fault or a busy bus unless somebody asks.
+
+        So on the last retry, ask each one individually. It costs six
+        round trips on a path that has already failed and is about to
+        raise, and it turns an unactionable message into a diagnosis.
+        Wrapped completely: this runs while something is already wrong,
+        and a failure to explain a failure must not replace it.
+        """
+        try:
+            silent, faults = [], []
+            for mid in self.motor_ids:
+                err, comm, _ = self._packet_handler.read1ByteTxRx(
+                    self._port_handler, mid, ADDR_ERROR_STATUS)
+                if comm != 0:
+                    silent.append(mid)
+                    continue
+                named = [name for bit, name in ERROR_BITS if int(err) & bit]
+                if named:
+                    faults.append(f"{mid}:{'+'.join(named)}")
+            parts = []
+            if silent:
+                parts.append("no reply from servo "
+                             + ", ".join(str(m) for m in silent))
+            if faults:
+                parts.append("faults " + ", ".join(faults))
+            if not parts:
+                return (" (every servo answers individually and none reports a "
+                        "fault, so this is a busy or noisy line rather than a "
+                        "dead servo)")
+            return (" -- " + "; ".join(parts)
+                    + ". A latched fault holds until the servo is power cycled.")
+        except Exception:
+            return ""
 
     def write(self, q: np.ndarray) -> None:
         self._require()

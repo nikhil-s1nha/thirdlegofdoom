@@ -29,6 +29,11 @@ MARKER_COLOURS = ("green", "blue", "yellow", "magenta", "red")
 
 from tlod.config import Config
 
+# This module had no logger of its own, so every `log.` in it was a
+# NameError waiting for its branch to be taken -- one of them killed the
+# overlay thread, in the handler meant to swallow a render failure.
+log = logging.getLogger(__name__)
+
 
 def _log_setup(verbose: bool) -> None:
     logging.basicConfig(
@@ -360,6 +365,25 @@ def play_config(cfg: Config, camera: int, real: bool) -> Config:
     )
 
 
+def _size_hold_to(limits, contact) -> None:
+    """Hold at the bottom for at least as long as the sensor needs to read.
+
+    The hold is not free -- it is the servos stalled at their torque
+    limit, and sustained stall current is what an undersized supply has
+    least of -- so the default is sized to the cheapest sensor and
+    stretched only for one that needs more. Warning instead and carrying
+    on would mean every round scoring as a dodge, which is a silent
+    failure dressed as a game.
+    """
+    need = getattr(contact, "settle", 0.0) + 0.08
+    if limits.press_hold < need:
+        log.info("holding %.0f ms at the bottom instead of %.0f: %s needs %.0f ms "
+                 "of pressing before its reading means anything",
+                 need * 1e3, limits.press_hold * 1e3,
+                 type(contact).__name__, contact.settle * 1e3)
+        limits.press_hold = need
+
+
 def cmd_play(args) -> int:
     """Play hand slap. The robot slaps; you dodge.
 
@@ -422,10 +446,15 @@ def cmd_play(args) -> int:
         # What it genuinely cannot do is see a dodge inside the last
         # ~100 ms, because that is how stale the hand estimate is. A hand
         # pulled at the last instant scores as a hit it did not take.
+        # One object, built here and handed to the game below. It was
+        # built twice -- once in the sensor branches to check press_hold
+        # against the sensor, once for HandSlapGame -- so the check was
+        # reading a throwaway and could never have changed what ran.
+        limits = build_strike_limits(cfg)
+
         if args.contact == "height":
             from tlod.arm import model
 
-            limits = build_strike_limits(cfg)
 
             def _floor():
                 """Where the paddle was sent, metres. No bus traffic.
@@ -442,13 +471,8 @@ def cmd_play(args) -> int:
                    else {"margin": args.contact_threshold}))
             source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
                       f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
-            if limits.press_hold < contact.settle:
-                log.warning("press_hold is %.0f ms but the sensor needs %.0f ms of "
-                            "pressing: the arm will retract before it ever reads, "
-                            "and every round will score as a dodge",
-                            limits.press_hold * 1e3, contact.settle * 1e3)
+            _size_hold_to(limits, contact)
         elif args.contact == "press":
-            limits = build_strike_limits(cfg)
             # Left unset, each sensor keeps its own measured default: 0.02
             # for press, which reads a settled arm, and 0.12 for servo,
             # which reads one mid-swing. One flag cannot carry a sensible
@@ -459,11 +483,7 @@ def cmd_play(args) -> int:
                    else {"threshold": args.contact_threshold}))
             source = (f"servo press, threshold {contact.threshold:.3f} of rated "
                       f"torque after {contact.settle * 1000:.0f} ms still")
-            if limits.press_hold < contact.settle:
-                log.warning("press_hold is %.0f ms but the sensor needs %.0f ms of "
-                            "stillness: the arm will retract before it ever reads, "
-                            "and every round will score as a dodge",
-                            limits.press_hold * 1e3, contact.settle * 1e3)
+            _size_hold_to(limits, contact)
         elif args.contact == "servo":
             contact = ServoLoadContactSensor(
                 app.controller.state,
@@ -475,7 +495,7 @@ def cmd_play(args) -> int:
             contact = ProximityContactSensor()
             source = (f"proximity, {contact.radius*1000:.0f} mm across and "
                       f"{contact.plane_tolerance*1000:.0f} mm deep")
-        game = HandSlapGame(args.difficulty, limits=build_strike_limits(cfg),
+        game = HandSlapGame(args.difficulty, limits=limits,
                             personality=Personality(enabled=not args.deadpan),
                             contact=contact, seed=args.seed)
         app.policy = game
@@ -708,12 +728,7 @@ def _serve_overlay(app, projector, port: int):
             try:
                 server.offer(viewer.render_once())
             except Exception:
-                # `log` is not a module global here, and reaching for it
-                # turned a swallowed render failure into a NameError that
-                # killed the overlay thread -- an error handler that fails
-                # only when it is needed.
-                logging.getLogger(__name__).debug(
-                    "overlay render failed", exc_info=True)
+                log.debug("overlay render failed", exc_info=True)
 
     threading.Thread(target=pump, name="overlay", daemon=True).start()
     original = server.stop

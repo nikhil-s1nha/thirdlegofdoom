@@ -12,6 +12,7 @@ of the kind found during bring-up (a mock camera running 30x too fast,
 which pushed loop jitter to 70 ms).
 """
 
+import logging
 import threading
 import time
 
@@ -1118,3 +1119,58 @@ class TestEstopSurvivesTheBusItIsStoppingFor:
                 "a command got through after the e-stop"
         finally:
             controller.stop(park=False)
+
+
+class TestTheHoldIsSizedToTheSensor:
+    """`press_hold` is stall time, so it is spent, not chosen freely.
+
+    Holding at the bottom means the servos stalled against a hand at
+    their torque limit for the whole window, every strike, and sustained
+    stall current is what an undersized supply has least of. It went in
+    at 450 ms -- sized for the torque sensor's filter -- and the bus began
+    dropping transactions the same afternoon. The encoder-based sensor
+    needs 120 ms, so the default is that plus margin and only a sensor
+    that needs more stretches it.
+    """
+
+    def test_the_default_covers_the_encoder_sensor(self):
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        limits, sensor = StrikeLimits(), CollisionPlaneContactSensor(lambda: 0.0)
+        assert limits.press_hold > sensor.settle, (
+            f"hold {limits.press_hold * 1e3:.0f} ms cannot cover a "
+            f"{sensor.settle * 1e3:.0f} ms settle; every round scores as a dodge")
+        # And not extravagantly longer, since the cost is stall current.
+        assert limits.press_hold < sensor.settle + 0.15
+
+    def test_a_slower_sensor_stretches_the_hold(self):
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.cli import _size_hold_to
+        from tlod.game.contact import ServoPressContactSensor
+
+        limits = StrikeLimits()
+        sensor = ServoPressContactSensor(lambda: None)
+        assert limits.press_hold < sensor.settle, "test does not exercise the stretch"
+        _size_hold_to(limits, sensor)
+        assert limits.press_hold > sensor.settle
+
+    def test_a_fast_sensor_does_not_shorten_it(self):
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.cli import _size_hold_to
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        limits = StrikeLimits()
+        before = limits.press_hold
+        _size_hold_to(limits, CollisionPlaneContactSensor(lambda: 0.0, settle=0.01))
+        assert limits.press_hold == before
+
+    def test_cli_has_a_logger(self):
+        """Every `log.` in cli.py was a NameError waiting for its branch.
+
+        One of them killed the overlay thread, inside the handler whose
+        job was to swallow a render failure.
+        """
+        from tlod import cli
+
+        assert isinstance(getattr(cli, "log", None), logging.Logger)
