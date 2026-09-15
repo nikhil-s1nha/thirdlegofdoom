@@ -175,6 +175,18 @@ class StrikeLimits:
                 (self.max_drop - self.press_depth) * 1e3, needed * 1e3)
 
     @property
+    def max_hover(self) -> float:
+        """The highest hover from which the paddle can still reach its floor.
+
+        `max_drop` caps the travel and the swing has to cover the hover
+        *and* the press below the hand, so this is what any caller
+        choosing a hover has to clamp against -- not `max_drop` itself,
+        which is the mistake that leaves the floor sitting exactly on the
+        hand plane.
+        """
+        return self.max_drop - self.press_depth
+
+    @property
     def reachable_floor_offset(self) -> float:
         """Depth below the hand the paddle can actually get to, in metres.
 

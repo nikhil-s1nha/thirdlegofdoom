@@ -98,21 +98,28 @@ def test_no_preset_asks_for_a_strike_the_arm_cannot_land():
 
 
 def test_no_preset_hovers_beyond_the_reachable_drop():
-    """`Strike` clamps the drop, so a high hover stops short of the hand."""
-    max_drop = StrikeLimits().max_drop
+    """`Strike` clamps the drop, so a high hover stops short of its floor.
+
+    The ceiling is `max_hover`, not `max_drop`. It was `max_drop` while
+    the strike aimed at the hand plane exactly; once `press_depth` put the
+    floor below the hand, the drop had to cover the hover *and* the press,
+    and a bound written against `max_drop` passes while every strike lands
+    17 mm high.
+    """
+    ceiling = StrikeLimits().max_hover
     for name in ("easy", "normal", "hard"):
-        assert Difficulty.preset(name).hover_height <= max_drop, name
+        assert Difficulty.preset(name).hover_height <= ceiling + 1e-9, name
 
 
-def test_a_hover_above_max_drop_is_clamped_not_obeyed():
+def test_a_hover_above_the_reachable_drop_is_clamped_not_obeyed():
     """The guard behind the preset bound, for callers passing their own.
 
-    A 12 cm hover against an 8 cm clamped drop leaves the paddle 4 cm above
-    the hand at the end of the strike, which is twice the contact tolerance
-    -- an "easy" difficulty that is really a broken one.
+    A 12 cm hover against an 8 cm clamped drop leaves the paddle well
+    above its floor at the end of the strike -- an "easy" difficulty that
+    is really a broken one.
     """
     game = HandSlapGame(Difficulty(hover_height=0.12), seed=0)
-    assert game.limits.hover_height == game.limits.max_drop
+    assert game.limits.hover_height == game.limits.max_hover
 
 
 def test_unknown_difficulty_raises():
@@ -638,3 +645,64 @@ def test_a_round_is_not_scored_until_the_camera_has_caught_up():
                 f"withdrawn={withdrawn} scored {game.last_result}")
         finally:
             robot.controller.stop(park=False)
+
+
+class TestEveryDifficultyCanActuallyLand:
+    """The strike has to reach below the hand, on every preset.
+
+    HandSlapGame clamps `Difficulty.hover_height` into its StrikeLimits,
+    and that clamp was against `max_drop` -- correct only while the strike
+    aimed at the hand plane. Once `press_depth` put the floor below the
+    hand, the drop had to cover the hover *and* the press, and this line
+    was silently overwriting a corrected StrikeLimits with the
+    Difficulty's stale 0.08 on every game. The floor came out exactly on
+    the hand plane and both contact sensors were judging across a band of
+    zero width.
+
+    It survived a `StrikeLimits.__post_init__` guard added for precisely
+    this, because that runs at construction and the overwrite runs after,
+    and it survived four geometry tests that all checked StrikeLimits
+    rather than the game. So this checks the object the game will really
+    use, through the constructor, for every preset there is.
+    """
+
+    HAND_Z = 0.022
+
+    def _floor(self, limits):
+        hover = self.HAND_Z + limits.hover_height
+        want = self.HAND_Z - limits.press_depth
+        return max(want, hover - limits.clamp_drop(hover - want))
+
+    @pytest.mark.parametrize("preset", ["easy", "normal", "hard"])
+    def test_the_floor_lands_below_the_hand(self, preset):
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        game = HandSlapGame(Difficulty.preset(preset), limits=StrikeLimits())
+        floor = self._floor(game.limits)
+        band = self.HAND_Z - floor
+        margin = CollisionPlaneContactSensor(lambda: (0, 0)).margin
+        assert band > margin * 3, (
+            f"{preset}: floor {floor * 1e3:.0f} mm against a hand at "
+            f"{self.HAND_Z * 1e3:.0f} mm leaves a {band * 1e3:.0f} mm band, "
+            f"and the sensor needs {margin * 1e3:.0f} mm")
+
+    @pytest.mark.parametrize("preset", ["easy", "normal", "hard"])
+    def test_no_preset_asks_for_a_hover_it_cannot_strike_from(self, preset):
+        """The clamp is a backstop. A preset needing it is a preset that lies
+        about how far the arm draws back."""
+        from tlod.arm.primitives import StrikeLimits
+
+        difficulty = Difficulty.preset(preset)
+        assert difficulty.hover_height <= StrikeLimits().max_hover + 1e-9, (
+            f"{preset} asks for {difficulty.hover_height * 1e3:.0f} mm, "
+            f"ceiling is {StrikeLimits().max_hover * 1e3:.0f} mm")
+
+    def test_a_caller_asking_for_too_much_hover_is_clamped_not_broken(self):
+        from tlod.arm.primitives import StrikeLimits
+
+        difficulty = Difficulty.preset("normal")
+        difficulty.hover_height = 0.20
+        game = HandSlapGame(difficulty, limits=StrikeLimits())
+        assert game.limits.hover_height == game.limits.max_hover
+        assert self._floor(game.limits) < self.HAND_Z

@@ -41,6 +41,7 @@ flinch, and the recovery from the flinch is an opening.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -51,6 +52,8 @@ from tlod.arm.primitives import Feint, Hover, Retract, Strike, StrikeLimits, flo
 from tlod.game.base import StateMachine
 from tlod.game.contact import ContactSensor, GeometricContactSensor
 from tlod.types import Pose
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -125,15 +128,20 @@ class Difficulty:
       * `strike_duration` has a floor of 0.25 s. Asking for less does not
         get the paddle there sooner; it gets the same strike landing
         further from where it was aimed.
-      * `hover_height` has a ceiling of `StrikeLimits.max_drop`. The drop
-        is clamped there, so a higher hover ends the strike short of the
-        hand rather than giving the human more warning.
+      * `hover_height` has a ceiling of `StrikeLimits.max_hover`, which
+        is `max_drop` less `press_depth`. The drop is clamped at
+        `max_drop` and has to cover the hover *and* the press below the
+        hand, so a higher hover ends the strike short of its floor rather
+        than giving the human more warning.
 
     Within those, the dial that actually changes the game is the feint
     rate -- which is the one the design wanted all along.
     """
 
-    hover_height: float = 0.08        # travel and impact, not reaction time; <= max_drop
+    # <= StrikeLimits.max_hover, which is max_drop less press_depth. This
+    # was 0.08 -- equal to max_drop, correct only while the strike aimed
+    # at the hand plane rather than below it.
+    hover_height: float = 0.063       # travel and impact, not reaction time
     strike_duration: float = 0.25     # the measured floor; slower is allowed, faster is not
     feint_probability: float = 0.45   # the human's main scoring opportunity
     mean_wait: float = 1.8            # seconds of expected hesitation
@@ -179,7 +187,13 @@ class Difficulty:
             # not score at all; it was "easy" because it was broken. Both
             # now sit on honest geometry and separate on the dials that
             # work.
-            "easy": cls(hover_height=0.08,      # the most travel that can still land
+            #
+            # `easy` then repeated the same mistake once more, at 0.08:
+            # right while the strike aimed at the hand plane, wrong the
+            # moment press_depth put the floor below it, since the drop
+            # must now cover the hover *and* the press. The ceiling is
+            # StrikeLimits.max_hover, and it is 0.063.
+            "easy": cls(hover_height=0.063,     # the most travel that can still land
                         strike_duration=0.30,   # a measured row: 0.35 s, 7.9 mm
                         feint_probability=0.65, mean_wait=2.4, settle_bonus=1.4),
             "normal": cls(),                    # the floor: 0.25 -> 0.31 s, 8.8 mm
@@ -226,12 +240,29 @@ class HandSlapGame(StateMachine):
             difficulty if isinstance(difficulty, Difficulty) else Difficulty.preset(difficulty)
         )
         self.limits = limits or StrikeLimits()
-        # Clamped, not copied. `Strike` clamps its drop to `max_drop`, so a
-        # hover above that ends the strike (hover - max_drop) above the
-        # hand and nothing can ever land -- which is how the old `easy`
-        # preset shipped a broken difficulty rather than a gentle one. A
-        # caller supplying its own Difficulty gets the same guard.
-        self.limits.hover_height = min(self.difficulty.hover_height, self.limits.max_drop)
+        # Clamped, not copied. `Strike` clamps its drop to `max_drop`, and
+        # the swing has to cover the hover *and* `press_depth` below the
+        # hand, so a hover above `max_hover` ends the strike short of its
+        # floor -- which is how the old `easy` preset shipped a broken
+        # difficulty rather than a gentle one.
+        #
+        # The ceiling used to be `max_drop`, which was right only while
+        # the strike aimed at the hand plane exactly. Once press_depth
+        # arrived, this line was quietly overwriting a corrected
+        # StrikeLimits with the Difficulty's stale 0.08 on every single
+        # game, so the floor came out at the hand plane and both contact
+        # sensors were judging across a band of zero width. The warning in
+        # StrikeLimits.__post_init__ could not catch it: it runs at
+        # construction, and this runs after.
+        wanted = self.difficulty.hover_height
+        self.limits.hover_height = min(wanted, self.limits.max_hover)
+        if wanted > self.limits.max_hover + 1e-9:
+            log.warning(
+                "difficulty asks to hover %.0f mm above the hand but the strike "
+                "can only reach its floor from %.0f mm (max_drop %.0f less "
+                "press_depth %.0f); hovering lower instead",
+                wanted * 1e3, self.limits.max_hover * 1e3,
+                self.limits.max_drop * 1e3, self.limits.press_depth * 1e3)
         self.contact = contact or GeometricContactSensor()
         self.rng = np.random.default_rng(seed)
         self.running = auto_start
