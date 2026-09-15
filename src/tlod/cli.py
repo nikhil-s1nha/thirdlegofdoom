@@ -375,7 +375,7 @@ def cmd_play(args) -> int:
         ProximityContactSensor,
         ServoLoadContactSensor,
         ServoPressContactSensor,
-        ToolHeightContactSensor,
+        CollisionPlaneContactSensor,
     )
     from tlod.game.handslap import HandSlapGame, Personality
     from tlod.game.opponent import DodgingHand
@@ -433,11 +433,11 @@ def cmd_play(args) -> int:
                 return (app.controller.pose().z,
                         float(model.tool_pose(app.controller.commanded[:5]).z))
 
-            contact = ToolHeightContactSensor(
+            contact = CollisionPlaneContactSensor(
                 _heights,
                 **({} if args.contact_threshold is None
-                   else {"threshold": args.contact_threshold}))
-            source = (f"tool height, {contact.threshold * 1e3:.0f} mm short of the "
+                   else {"margin": args.contact_threshold}))
+            source = (f"collision plane, {contact.margin * 1e3:.0f} mm above the "
                       f"commanded floor after {contact.settle * 1000:.0f} ms pressing")
             if limits.press_hold < contact.settle:
                 log.warning("press_hold is %.0f ms but the sensor needs %.0f ms of "

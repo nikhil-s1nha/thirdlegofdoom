@@ -667,8 +667,8 @@ class TestStrikeAimsBelowTheHand:
             controller.stop(park=False)
 
 
-class TestToolHeightContact:
-    """The simplest instrument on the arm: did the paddle get where it was sent?
+class TestCollisionPlaneContact:
+    """Did the paddle stop inside the band where the hand is?
 
     Grounded in a measured pose. Driven to the joint angles at which the
     gripper rests on the table, FK reports the tool at +0.2 mm -- so model
@@ -680,10 +680,10 @@ class TestToolHeightContact:
     """
 
     def test_it_fires_when_the_paddle_is_stopped_short(self):
-        from tlod.game.contact import ToolHeightContactSensor
+        from tlod.game.contact import CollisionPlaneContactSensor
 
         heights = {"reached": 0.005, "commanded": 0.005}
-        sensor = ToolHeightContactSensor(
+        sensor = CollisionPlaneContactSensor(
             lambda: (heights["reached"], heights["commanded"]), settle=0.05)
         sensor.arm()
         assert sensor.poll(pressing=True) is None, "fired before settling"
@@ -694,29 +694,29 @@ class TestToolHeightContact:
         while event is None and time.perf_counter() - t0 < 1.0:
             event = sensor.poll(pressing=True)
             time.sleep(0.005)
-        assert event is not None and event.source == "tool_height"
+        assert event is not None and event.source == "collision_plane"
         assert time.perf_counter() - t0 >= 0.05, "settle window not honoured"
         assert sensor.poll(pressing=True) is None, "fired twice on one arming"
 
     def test_reaching_the_floor_is_a_dodge(self):
-        from tlod.game.contact import ToolHeightContactSensor
+        from tlod.game.contact import CollisionPlaneContactSensor
 
         # An unobstructed press converges to within about 3 mm, and can
         # sit slightly under the floor. Neither is a hand.
-        sensor = ToolHeightContactSensor(lambda: (0.008, 0.005), settle=0.0)
+        sensor = CollisionPlaneContactSensor(lambda: (0.008, 0.005), margin=0.010, settle=0.0)
         sensor.arm()
         sensor.poll(pressing=True)
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 0.2:
             assert sensor.poll(pressing=True) is None, "tracking error scored as a hit"
             time.sleep(0.005)
-        assert sensor.peak_rise < 0.008
+        assert sensor.peak_rise < sensor.margin
 
     def test_nothing_is_read_until_the_arm_is_pressing(self):
         """Mid-swing the paddle is far above the floor by definition."""
-        from tlod.game.contact import ToolHeightContactSensor
+        from tlod.game.contact import CollisionPlaneContactSensor
 
-        sensor = ToolHeightContactSensor(lambda: (0.080, 0.005), settle=0.0)
+        sensor = CollisionPlaneContactSensor(lambda: (0.080, 0.005), settle=0.0)
         sensor.arm()
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 0.2:
@@ -726,12 +726,12 @@ class TestToolHeightContact:
     def test_a_read_failure_is_a_dodge_not_an_exception(self):
         """An exception here reaches the control loop, which e-stops --
         freezing the arm mid-swing directly above the hand."""
-        from tlod.game.contact import ToolHeightContactSensor
+        from tlod.game.contact import CollisionPlaneContactSensor
 
         def boom():
             raise OSError("sync read failed")
 
-        sensor = ToolHeightContactSensor(boom, settle=0.0)
+        sensor = CollisionPlaneContactSensor(boom, settle=0.0)
         sensor.arm()
         assert sensor.poll(pressing=True) is None
         assert sensor.poll(pressing=True) is None
@@ -761,6 +761,74 @@ class TestToolHeightContact:
             f"only {(floor - table_z) * 1e3:.1f} mm of air over the table")
         # And deep enough that a thin hand still stops the paddle well
         # clear of the threshold.
-        from tlod.game.contact import ToolHeightContactSensor
+        from tlod.game.contact import CollisionPlaneContactSensor
         thin_hand = 0.020
-        assert thin_hand - floor > ToolHeightContactSensor(lambda: (0, 0)).threshold * 1.5
+        assert thin_hand - floor > CollisionPlaneContactSensor(lambda: (0, 0)).margin * 1.5
+
+    def test_it_reports_its_numbers_whichever_way_the_round_went(self):
+        """A verdict alone is unfalsifiable from outside the arm.
+
+        "dodged" looks identical whether the paddle stopped on a hand and
+        the margin was too wide, the floor sat above the hand so there was
+        nothing to stop short of, or the hand compressed to the floor.
+        Each has a different fix. Several rounds of guesswork happened for
+        want of this line.
+        """
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        sensor = CollisionPlaneContactSensor(lambda: (0.007, 0.005), settle=0.0)
+        assert "no reading" in sensor.report()
+
+        sensor.arm()
+        sensor.poll(pressing=True, hand_xyz=np.array([0.22, 0.0, 0.022]))
+        for _ in range(5):
+            sensor.poll(pressing=True, hand_xyz=np.array([0.22, 0.0, 0.022]))
+            time.sleep(0.005)
+        report = sensor.report()
+        assert "7 mm" in report and "5 mm" in report and "22 mm" in report, report
+        assert "+2 mm short" in report, report
+
+    def test_a_whole_round_of_the_real_game_scores_a_block_as_a_hit(self):
+        """End to end through HandSlapGame, which is where the wiring lives.
+
+        The sensor firing in isolation says nothing about whether the game
+        ever polls it while the arm is pressing, for long enough to clear
+        `settle`. That is a property of Strike.press_hold, the strike
+        state and run_motion together, and nothing below the whole loop
+        tests it.
+        """
+        import sys
+        from types import SimpleNamespace
+
+        sys.path.insert(0, "tests")
+        from test_game import fake_robot
+
+        from tlod.arm.primitives import StrikeLimits
+        from tlod.game.contact import CollisionPlaneContactSensor
+        from tlod.game.handslap import Difficulty, HandSlapGame, Personality
+
+        hand = np.array([0.22, 0.0, 0.022])
+        # A hand that stops the paddle 17 mm above the floor it was sent to.
+        sensor = CollisionPlaneContactSensor(lambda: (0.022, 0.005))
+        difficulty = Difficulty.preset("easy")
+        difficulty.feint_probability = 0.0        # strikes only; feints are judged elsewhere
+
+        robot = fake_robot(hand)
+        game = HandSlapGame(difficulty, limits=StrikeLimits(),
+                            personality=Personality(enabled=False),
+                            contact=sensor, seed=1)
+        game.truth_provider = lambda: hand
+        game.running = True
+        try:
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 25.0 and game.score.rounds < 2:
+                game.update(robot, None, 0.01)
+                time.sleep(0.01)
+            assert game.strikes >= 1, "the game never struck; test proved nothing"
+            assert game.score.robot == game.score.rounds, (
+                f"a blocked paddle scored {game.score}; "
+                f"last reading: {sensor.report()}")
+            assert any("short" in line for line in game.log), \
+                "the round did not report its numbers"
+        finally:
+            robot.controller.stop(park=False)

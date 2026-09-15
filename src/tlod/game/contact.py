@@ -236,69 +236,82 @@ class ServoLoadContactSensor(ContactSensor):
         return ContactEvent(time.perf_counter(), "servo_load", strength=min(rise, 1.0))
 
 
-class ToolHeightContactSensor(ContactSensor):
-    """Did the paddle get where it was sent? If not, something stopped it.
+class CollisionPlaneContactSensor(ContactSensor):
+    """Hit if the paddle stopped inside the band where the hand is.
 
-    The simplest instrument on the arm, and on measurement the best one.
-    The strike commands a floor below any plausible hand; the encoders say
-    where the paddle actually ended up; the difference is the thickness of
-    whatever was in the way. Nothing is inferred, nothing is filtered, and
-    the encoders resolve 0.087 degrees -- about 0.1 mm at the tool, against
-    a hand worth twenty-odd millimetres.
+    The rule, in full: the strike commands a floor *below* the hand. If
+    nothing is there the paddle reaches that floor. If a hand is there the
+    paddle stops on top of it -- somewhere in the band between the floor
+    and the hand's own height. So a paddle that ends up inside that band
+    was stopped by something, and a paddle that reaches the floor was not.
+    Both positions come from the encoders, so neither is late and neither
+    is filtered.
 
-    Compare with the two torque-based sensors in this file. Load is a
-    commanded quantity that Torque_Limit clamps, so it pins at its ceiling
-    mid-swing and reads a rigid book as indistinguishable from empty air.
-    Current is a real measurement but quantised at 6.5 mA, which turned out
-    to be the entire size of the effect. Held still, load does separate --
-    0.001 empty against 0.037 on a hand -- but only after waiting ~300 ms
-    for the servo's load filter to forget the swing. Height needs no such
-    wait: the number is already correct as soon as the arm has stopped.
+    That is all of it. The three earlier attempts in this file were all
+    the same idea measured worse: load and current try to infer the block
+    from torque, which Torque_Limit clamps and the swing's own braking
+    swamps, and proximity asks the camera where the hand is at the one
+    moment the arm is between the camera and the hand.
 
-    Two things it does need.
+    Two ways it can be wrong, both worth naming because they are the ones
+    to check when it misreports:
 
-    The floor has to be *below* the hand, or an untouched paddle and a
-    touched one both arrive and the shortfall is zero either way. That is
-    `StrikeLimits.press_depth`, and it is the same requirement the press
-    sensor has, for the same reason.
+      * The floor is above the hand. Then an untouched paddle and a
+        touched one stop in the same place and everything reads as a
+        dodge. `StrikeLimits.press_depth` is what puts the floor below,
+        and `safety.min_height` can silently clamp it back up.
+      * The hand compresses to the floor. Flesh is soft and the paddle
+        keeps pushing for `press_hold`; if it squashes the last few
+        millimetres out of a palm, the band closes.
 
-    And the arm has to be capable of reaching that floor when nothing is
-    there, or its own tracking error reads as a hand. It is: measured, an
-    unobstructed press converges to within about 3 mm, which is why the
-    threshold is 8 mm rather than something tighter.
-
-    Reads are wrapped because `poll` runs on the control thread inside a
-    committed strike, and an exception escaping here reaches
-    `RobotApp._control_loop`, which answers a failed policy tick by
-    e-stopping -- freezing the arm mid-swing, directly above the hand it
-    was aiming at. A dropped reading costs one round scored as a dodge.
+    `report()` exists for exactly those two, and the game logs it every
+    round: guessing at which one is happening is what this class replaced.
     """
 
     def __init__(
         self,
-        height_source,
-        threshold: float = 0.008,
-        settle: float = 0.15,
+        geometry_source,
+        margin: float = 0.004,
+        settle: float = 0.12,
     ) -> None:
-        # () -> (reached_z, commanded_z) in metres, base frame.
-        self.height_source = height_source
-        self.threshold = threshold
-        # Long enough for an unobstructed press to have arrived. Measured,
-        # it is within 3 mm about 60 ms into the hold; this is that with
-        # room to spare, and still half of what the load channel needs.
+        # () -> (reached_z, floor_z) in metres, base frame, from encoders.
+        self.geometry_source = geometry_source
+        # How far above the floor counts as "stopped short". An
+        # unobstructed press converges to within about 3 mm and can sit
+        # slightly under, so this is that plus a little -- not a tuning
+        # knob so much as the width of the arm's own tracking error.
+        self.margin = margin
+        # Long enough for an unobstructed press to have arrived.
         self.settle = settle
         self._pressing_since: float | None = None
         self._fired = False
+        self.last: tuple[float, float, float] | None = None   # reached, floor, hand
         # Diagnostics: the largest settled shortfall seen, in metres.
         self.peak_rise = 0.0
         self.read_failures = 0
+
+    @property
+    def threshold(self) -> float:
+        """Alias, so callers that tune a threshold reach the right knob."""
+        return self.margin
 
     def arm(self, blank_for: float | None = None) -> None:
         # `blank_for` is accepted and ignored -- `pressing` replaces it.
         self._fired = False
         self._pressing_since = None
+        self.last = None
 
-    def poll(self, pressing: bool = False, **kwargs) -> ContactEvent | None:
+    def report(self) -> str:
+        """What the last judged round actually looked like, in millimetres."""
+        if self.last is None:
+            return "no reading (the paddle never settled at the bottom)"
+        reached, floor, hand = self.last
+        short = reached - floor
+        return (f"paddle stopped {reached * 1e3:.0f} mm, floor {floor * 1e3:.0f} mm, "
+                f"hand {hand * 1e3:.0f} mm -> {short * 1e3:+.0f} mm short "
+                f"(needs {self.margin * 1e3:.0f})")
+
+    def poll(self, pressing: bool = False, hand_xyz=None, **kwargs) -> ContactEvent | None:
         if self._fired:
             return None
         if not pressing:
@@ -311,20 +324,25 @@ class ToolHeightContactSensor(ContactSensor):
         if now - self._pressing_since < self.settle:
             return None
         try:
-            reached, commanded = self.height_source()
+            reached, floor = self.geometry_source()
         except Exception:
             self.read_failures += 1
             return None
-        short = float(reached) - float(commanded)
+        hand = float(hand_xyz[2]) if hand_xyz is not None else float("nan")
+        self.last = (float(reached), float(floor), hand)
+        short = float(reached) - float(floor)
         self.peak_rise = max(self.peak_rise, short)
-        if short < self.threshold:
+        if short < self.margin:
             return None
         self._fired = True
-        log.debug("height: stopped %.1f mm above the %.1f mm floor "
-                  "(threshold %.1f mm) after %.0f ms pressing",
-                  short * 1e3, float(commanded) * 1e3, self.threshold * 1e3,
-                  (now - self._pressing_since) * 1e3)
-        return ContactEvent(now, "tool_height", strength=min(short / 0.03, 1.0))
+        log.debug("collision: %s", self.report())
+        return ContactEvent(now, "collision_plane", strength=min(short / 0.02, 1.0))
+
+
+# The name this was published under for one commit. Kept so a config or
+# script pinned to it does not break; the class above is the same sensor
+# with the band stated explicitly and a report() worth reading.
+ToolHeightContactSensor = CollisionPlaneContactSensor
 
 
 class ServoPressContactSensor(ContactSensor):

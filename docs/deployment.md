@@ -156,11 +156,24 @@ conditions by 0.006 A, exactly one 6.5 mA quantisation step, and smaller
 than the jitter within a single run.
 
 **`--contact height` is the recommended one.** During that same hold the
-encoders answer the question directly: the strike commands a floor below
-any plausible hand, and whatever the paddle stops short by is the
-thickness of what was in the way. It needs no torque model, no baseline,
-and half the settling time, and it resolves 0.1 mm at the tool against a
-hand worth twenty-odd millimetres.
+encoders answer the question directly. The strike commands a floor below
+the hand, so there is a band between that floor and the hand's own
+height: a paddle that ends up inside the band was stopped by something,
+and a paddle that reaches the floor was not. Both positions come from
+encoders, so neither is late and neither is filtered.
+
+It reports its own numbers every round, whichever way the round went:
+
+```
+dodged (robot 1 - 4 human)
+    paddle stopped 6 mm, floor 5 mm, hand 22 mm -> +1 mm short (needs 4)
+```
+
+That line is the diagnosis. `+1 mm short` on a round you know landed
+means the hand compressed to the floor, and `press_hold` is leaning on it
+too long or `press_depth` is too deep. A floor at or above the hand means
+`press_depth` is too shallow, or `safety.min_height` clamped it back up.
+A verdict on its own distinguishes none of these.
 
 Both need the floor to be *below* the hand, which is what
 `StrikeLimits.press_depth` is for, and both need to know where the table
