@@ -62,6 +62,14 @@ RING_MCP = 13
 PINKY_MCP = 17
 PINKY_TIP = 20
 
+# How far along the wrist-to-knuckles axis the arm aims. 0.0 is the wrist
+# landmark, 1.0 the centre of the knuckle line. One line, because it is
+# the kind of number only the hardware can settle: 0.8 (which is what a
+# plain five-point centroid gives) landed on the edge of the index
+# finger, and 0.5 -- the anatomical middle of the palm -- was further off
+# still rather than nearer.
+PALM_BIAS = 1.0
+
 # Distance across the knuckles, index MCP to pinky MCP. Used to recover
 # metric depth from apparent size. Adult range is roughly 7-9 cm; the
 # error this introduces is proportional, so a 10% wrong palm gives a 10%
@@ -80,29 +88,26 @@ class Hand2D:
 
     @property
     def palm_center(self) -> np.ndarray:
-        """Halfway between the wrist and the knuckle line -- the flat of the palm.
+        """Where the arm aims, on the wrist-to-knuckles axis.
 
-        This is where the arm aims, so it is worth being exact about which
-        point it is. Fingertips are out: they move independently of the
-        hand and a strike aimed at one lands on a moving target. The wrist
-        alone is out too: it swings widely as the hand rotates.
+        `PALM_BIAS` is the whole knob: 0.0 is the wrist landmark, 1.0 is
+        the centre of the knuckle line, and anything between slides along
+        it. Laterally it is always the mean of the four knuckles, so it
+        stays centred between index and pinky rather than favouring an
+        edge.
 
-        The obvious middle ground -- the plain centroid of the wrist and
-        the four knuckles -- was what this returned, and it is wrong in a
-        way that only shows up on hardware. Four of its five points are
-        the knuckles, so it sits 80% of the way from wrist to knuckle
-        line: not the palm, but the crease where the fingers begin. On the
-        arm that reads as forever aiming at the edge of the index finger,
-        and it is the worst place on the hand to aim, because the finger
-        bases curve away and the paddle slides off them.
-
-        Weighting the wrist against the knuckles as a whole puts it at
-        50%, on the flat middle of the palm. Flat matters twice over: it
-        is a more consistent height, and contact is judged from how far
-        short the paddle stopped.
+        The history is worth keeping because the obvious value is wrong
+        twice over. It started as the plain centroid of the wrist and the
+        four knuckles, which is four parts knuckle to one part wrist and
+        therefore sits at 0.8 -- not a choice anyone made, just what a
+        mean of five points happens to give. Moving it to 0.5, the
+        anatomical middle of the palm, aimed *further* from where the
+        paddle should land on the real hand, so the axis does not map onto
+        the hand the way the landmark names suggest. This is set from what
+        the arm actually does, not from anatomy.
         """
         knuckles = self.landmarks[[INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]].mean(axis=0)
-        return 0.5 * self.landmarks[WRIST] + 0.5 * knuckles
+        return (1.0 - PALM_BIAS) * self.landmarks[WRIST] + PALM_BIAS * knuckles
 
     @property
     def palm_width_px(self) -> float:
