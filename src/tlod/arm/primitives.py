@@ -140,18 +140,23 @@ class StrikeLimits:
     # ~250 ms to decay from the swing before that is true, and 450 ms was
     # sized for that.
     #
-    # `--contact height` does not wait for any filter -- it reads the
-    # encoders, which are already right the moment the arm stops -- and
-    # needs 120 ms. This is that plus margin, because the hold is not
-    # free: it is the servos stalled against a hand at their torque limit,
-    # every strike, and sustained stall current is what a 5 A supply and
-    # six servos have least of. It went in at 450 ms this afternoon and
-    # the bus started dropping transactions the same afternoon.
+    # The encoders need none of that. They are right the moment the arm
+    # stops, and the descent no longer ends until it has -- so the hold is
+    # not waiting for anything to settle, it is only holding the paddle
+    # still long enough to take the readings. 30 ms of slack for bus
+    # jitter plus an 80 ms window is 8 readings at 100 Hz, which is what
+    # the 200 ms version got too; the other 90 ms was dead time inherited
+    # from when `pressing` began with the arm still moving.
     #
-    # Raise it back to 0.45 for `--contact press`, which reads a filtered
-    # torque estimate and does need the 300 ms. cmd_play warns if the hold
-    # is shorter than the sensor's settle window.
-    press_hold: float = 0.20
+    # It is worth being tight about, because the hold is not free: it is
+    # the servos stalled against a hand at their torque limit, every
+    # strike, and sustained stall current is what a 5 A supply and six
+    # servos have least of. It went in at 450 ms one afternoon and the bus
+    # started dropping transactions the same afternoon.
+    #
+    # `_size_hold_to` in cmd_play raises this to fit whichever sensor is
+    # running, so a sensor that needs longer gets it.
+    press_hold: float = 0.11
     # Load above the hover baseline, held, that counts as something being
     # there. Nothing measured 0.001 and the two real obstacles 0.037-0.038,
     # so this sits in a gap almost two orders of magnitude wide.
