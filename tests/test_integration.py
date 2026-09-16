@@ -206,6 +206,69 @@ class TestPlayConfig:
         cfg = play_config(Config(), camera=5, real=True)
         assert cfg.arm.backend == "feetech"
 
+    def test_there_is_no_way_to_ask_for_a_torque_sensor(self, monkeypatch):
+        """`--contact` is gone, and a stale invocation must fail loudly.
+
+        It offered four ways to judge a round and three were worse in
+        ways already measured, so it was not a choice -- it was a way to
+        run the wrong one by accident, which is what its `proximity`
+        default did for several commits after `height` landed. A script
+        or a shell history carrying `--contact press` should stop rather
+        than quietly do something else.
+        """
+        import pytest as _pytest
+
+        from tlod import cli
+
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_play", lambda args: seen.update(vars(args)) or 0)
+        assert cli.main(["play"]) == 0
+        assert "contact" not in seen
+
+        for stale in ("proximity", "press", "servo", "height"):
+            with _pytest.raises(SystemExit):
+                cli.main(["play", "--contact", stale])
+
+    def test_the_real_arm_is_judged_by_the_encoders(self):
+        """Tier C constructs one sensor, and torque is not it.
+
+        Reaching the construction for real needs a camera, an arm and a
+        calibration, so this reads the wiring instead. Crude, but it is
+        the thing that regressed: the sensor was right and the branch
+        selecting it was not.
+        """
+        import inspect
+
+        from tlod import cli
+
+        body = inspect.getsource(cli.cmd_play)
+        assert "CollisionPlaneContactSensor(" in body
+        assert "ServoPressContactSensor(" not in body
+        assert "ServoLoadContactSensor(" not in body
+        assert "SerialContactSensor(" not in body
+
+    def test_the_retired_sensors_are_kept_but_unreachable(self):
+        """Kept for their measurements; wired to nothing.
+
+        Deleting them means the next person re-runs the same three
+        experiments, so they stay -- but a class nothing constructs drifts
+        into looking like a live option, which is how `--contact press`
+        got run on a supply that could not hold it.
+        """
+        import inspect
+
+        from tlod import cli
+        from tlod.game import contact
+
+        for name in ("ServoLoadContactSensor", "ServoPressContactSensor",
+                     "SerialContactSensor"):
+            cls = getattr(contact, name)
+            assert cls.__doc__.lstrip().splitlines()[2].strip().startswith("UNUSED"), (
+                f"{name} is not constructed anywhere; its docstring has to say so")
+            # Named in a comment saying why they are absent is fine;
+            # constructed is not.
+            assert f"{name}(" not in inspect.getsource(cli)
+
     def test_without_real_nothing_can_move(self):
         from tlod.cli import play_config
         from tlod.config import Config
