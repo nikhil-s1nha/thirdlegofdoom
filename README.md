@@ -100,6 +100,11 @@ hardware are the same code path.
   process forgotten from an earlier session feeds the loop stale
   positions while the run you are watching looks fine. Check for one
   before believing anything strange.
+- **A contact threshold does not survive changing the motion.** Both
+  times hit detection was wrong, it was this: the threshold was
+  calibrated against one version of the strike, the strike changed, and
+  the threshold stayed. It is not noise and it is not calibration — the
+  clusters move. See [docs/hit-detection.md](docs/hit-detection.md).
 - **`configs/default.yaml` is not a base layer.** `Config.load` reads the
   single file you pass; everything absent falls back to the dataclass
   defaults in `config.py`, not to `default.yaml`. Editing it does not
@@ -119,6 +124,7 @@ and is still tested, but the Pi could not hold the loop even with no
 vision on it, so it is an option rather than the recommendation.
 
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — setup, usage, modification
+- [docs/hit-detection.md](docs/hit-detection.md) — did the slap land, and the four wrong answers
 - [docs/headless.md](docs/headless.md) — verifying vision with no screen
 - [docs/hardware.md](docs/hardware.md) — servo control table, wiring
 - [docs/power.md](docs/power.md) — current budgets, motion profiles, brownouts
