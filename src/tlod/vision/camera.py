@@ -62,6 +62,34 @@ class Camera(abc.ABC):
         self.stop()
 
 
+def _cannot_open(index) -> str:
+    """Why it did not open, and which index to use instead.
+
+    "could not open camera 0" is true and useless: on this board index 0
+    is a Rockchip codec that exists, opens far enough to fail, and is not
+    a camera. What the operator needs is the index that *is* one, and the
+    kernel already knows it.
+    """
+    lines = [f"could not open camera {index!r}."]
+    try:
+        nodes = capture_nodes()
+    except Exception:
+        nodes = {}
+    if nodes:
+        lines.append("  capture nodes this board is showing:")
+        for i, name in sorted(nodes.items()):
+            lines.append(f"    {i:>3}  {name}")
+        lines.append("  Pass the one that is your camera as --camera N, or set")
+        lines.append("  camera.index in the config. The Rockchip rkvdec/rkvenc/rga")
+        lines.append("  nodes are hardware codecs, not cameras.")
+    else:
+        lines.append("  no v4l2 capture nodes found at all. Check `lsusb` for the")
+        lines.append("  camera, and that it is not on a hub that just dropped it.")
+    lines.append("  `tlod cameras` lists this too. Indices move across reboots and")
+    lines.append("  replugs -- never trust last week's.")
+    return "\n".join(lines)
+
+
 class OpenCVCamera(Camera):
     def __init__(
         self,
@@ -105,7 +133,7 @@ class OpenCVCamera(Camera):
     def start(self) -> None:
         cap = cv2.VideoCapture(self.index) if self.backend is None else cv2.VideoCapture(self.index, self.backend)
         if not cap.isOpened():
-            raise RuntimeError(f"could not open camera {self.index!r}")
+            raise RuntimeError(_cannot_open(self.index))
 
         # Order matters: FOURCC before size before fps, or drivers ignore it.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc(*self.fourcc))
@@ -270,8 +298,55 @@ class MockCamera(Camera):
         return self.width, self.height
 
 
-def list_cameras(max_index: int = 6) -> list[int]:
-    """Indices that open successfully. Noisy on some backends; best effort."""
+def capture_nodes() -> dict[int, str]:
+    """`/dev/videoN` -> the name its driver reports, for capture nodes only.
+
+    V4L2 only, and empty everywhere else; the caller falls back to probing.
+    This exists because on this rig the index is not a guess worth making.
+    An Orange Pi 5 enumerates its Rockchip codecs first -- rkvdec, rkvenc,
+    rga, several nodes each -- so the USB camera lands somewhere above
+    /dev/video10 and the low indices are hardware that opens, reports
+    "Not a video capture device", and is not a camera. Probing indices
+    alone cannot tell those apart; the driver name can.
+
+    Nodes come in pairs: a UVC camera exposes one capture node and one
+    metadata node, and only the first is openable. `V4L2_CAP_VIDEO_CAPTURE`
+    is what separates them.
+    """
+    import glob
+    import re
+
+    nodes: dict[int, str] = {}
+    for path in sorted(glob.glob("/dev/video*")):
+        m = re.fullmatch(r"/dev/video(\d+)", path)
+        if m is None:
+            continue
+        index = int(m.group(1))
+        try:
+            with open(f"/sys/class/video4linux/video{index}/name") as fh:
+                name = fh.read().strip()
+        except OSError:
+            continue
+        # A metadata node shares its parent's name, so the name alone
+        # cannot rule one out. `index` under the same directory is 0 for
+        # the capture node of a UVC device.
+        try:
+            with open(f"/sys/class/video4linux/video{index}/index") as fh:
+                if fh.read().strip() != "0":
+                    continue
+        except OSError:
+            pass
+        nodes[index] = name
+    return nodes
+
+
+def list_cameras(max_index: int = 24) -> list[int]:
+    """Indices that open successfully. Noisy on some backends; best effort.
+
+    The ceiling was 6, which is below where a USB camera lands on an
+    Orange Pi 5 -- the Rockchip codecs take the low indices, so `tlod
+    cameras` reported nothing on a board with a camera plugged into it.
+    """
     found = []
     for i in range(max_index):
         cap = cv2.VideoCapture(i)

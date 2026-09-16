@@ -144,6 +144,39 @@ class TestHybridConfig:
     move looks the same as one that was never asked to.
     """
 
+    def test_a_configured_camera_index_survives(self):
+        """`--camera` unset must not overwrite the config with 0.
+
+        This is the trap that cost a hardware session. `--camera`
+        defaulted to 0 and was written in unconditionally, so
+        `camera.index` in a config file was dead text: you could set it to
+        11, pass `-c` on the command line, and still open index 0. On an
+        Orange Pi 5 the camera is never index 0 -- the Rockchip codecs
+        take the low indices -- so the run failed naming an index nobody
+        had chosen.
+        """
+        from tlod.cli import play_config
+        from tlod.config import Config
+
+        base = Config.from_dict({"camera": {"index": 11}})
+        assert play_config(base, None, real=True).camera.index == 11
+        assert play_config(base, 3, real=True).camera.index == 3
+
+    def test_the_camera_flag_defaults_to_leaving_the_config_alone(self):
+        """Every --camera, not just play's: they all had the same clobber."""
+        from tlod import cli
+
+        seen = {}
+        for command in ("play", "hybrid", "record", "vision-check"):
+            import unittest.mock as mock
+
+            target = {"play": "cmd_play", "hybrid": "cmd_hybrid",
+                      "record": "cmd_record", "vision-check": "cmd_vision_check"}[command]
+            with mock.patch.object(
+                    cli, target, lambda args: seen.update({command: args.camera}) or 0):
+                assert cli.main([command]) == 0
+        assert seen == dict.fromkeys(seen, None), seen
+
     def test_real_reaches_the_arm_backend(self):
         from tlod.cli import hybrid_config
         from tlod.config import Config
