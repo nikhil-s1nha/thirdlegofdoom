@@ -104,3 +104,75 @@ class TestCalibration:
         assert calib.center[0] == 2048 - 100
         assert calib.sign[JOINT_NAMES.index("elbow_flex")] == -1.0
         assert calib.sign[0] == 1.0
+
+
+class TestConnectAsksBeforeItEnergises:
+    """connect() must hear from a servo before it turns torque on.
+
+    The failure this pins: opening the port and setting the baud rate are
+    local to the USB adapter, which is powered from USB, so both succeed
+    with the arm's 12 V supply switched off. connect() then wrote goal
+    acceleration, speed, torque limit and torque-enable to six servos --
+    discarding every return value -- and logged "connected to 6 servos",
+    a count of the configured id list rather than of anything that
+    answered. The first verified transaction was the sync read one layer
+    up in ArmController.start(), so the traceback always pointed at
+    read() rather than at the dead rail.
+    """
+
+    def _arm(self, answers, errors=None):
+        from tlod.arm.feetech import FeetechArm
+
+        arm = FeetechArm(port="/dev/null")
+
+        class Packet:
+            def read1ByteTxRx(self, port, mid, addr):
+                if mid not in answers:
+                    return 0, -1, 0
+                return (errors or {}).get(mid, 0), 0, 0
+
+        arm._packet_handler = Packet()
+        arm._port_handler = object()
+        return arm
+
+    def test_a_silent_bus_is_reported_as_silent(self):
+        arm = self._arm(answers=())
+        answered, faults = arm._survey()
+        assert answered == [] and faults == []
+
+    def test_a_healthy_bus_answers_with_every_id(self):
+        arm = self._arm(answers=(1, 2, 3, 4, 5, 6))
+        answered, faults = arm._survey()
+        assert answered == [1, 2, 3, 4, 5, 6] and faults == []
+
+    def test_a_latched_fault_is_named_with_its_servo(self):
+        arm = self._arm(answers=(1, 2, 3, 4, 5, 6), errors={3: 0x01, 5: 0x04})
+        _, faults = arm._survey()
+        assert faults == ["3:voltage", "5:overheat"]
+
+    def test_a_dead_rail_says_so_and_names_the_switch(self):
+        arm = self._arm(answers=())
+        msg = arm._cannot_connect(list(arm.motor_ids), [])
+        assert "no servo on /dev/null answered" in msg
+        assert "12 V switch" in msg
+        assert "power cycled" in msg
+
+    def test_a_partial_chain_points_at_the_daisy_chain(self):
+        arm = self._arm(answers=(1, 2, 3))
+        msg = arm._cannot_connect([4, 5, 6], [])
+        assert "servo 4, 5, 6 did not answer" in msg
+        assert "daisy chain" in msg
+
+    def test_a_survey_that_throws_does_not_replace_the_failure(self):
+        """A failure to explain a failure must not become the failure."""
+        from tlod.arm.feetech import FeetechArm
+
+        arm = FeetechArm(port="/dev/null")
+
+        class Boom:
+            def read1ByteTxRx(self, *a):
+                raise RuntimeError("bus is on fire")
+
+        arm._packet_handler = Boom()
+        arm._port_handler = object()
+        assert arm._survey() == ([], [])

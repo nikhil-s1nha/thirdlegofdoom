@@ -234,15 +234,103 @@ class FeetechArm(ArmBackend):
             self._port_handler, self._packet_handler, ADDR_PRESENT_POSITION, 6
         )
         for mid in self.motor_ids:
+            # Local bookkeeping, not a bus transaction: addParam appends
+            # the id to the group and returns False only if it is already
+            # there. This used to raise "motor {mid} did not respond",
+            # which is the one thing it cannot possibly mean.
             if not self._sync_read.addParam(mid):
-                raise RuntimeError(f"sync read: motor {mid} did not respond")
+                raise RuntimeError(f"sync read: motor {mid} registered twice")
         self._sync_write = scs.GroupSyncWrite(
             self._port_handler, self._packet_handler, ADDR_GOAL_POSITION, 2
         )
 
+        # Nothing above this line has spoken to a servo. Opening the port
+        # and setting the baud rate are local to the adapter, and the
+        # adapter is powered from USB -- so all of it succeeds with the
+        # 12 V supply switched off and the arm completely dead.
+        #
+        # That mattered because what came next was `_configure_motors()`,
+        # which ends in `set_torque(True)`, and every write in it discards
+        # its return value. So connect() would energise six servos it had
+        # never heard from, log "connected to 6 servos" -- a count of the
+        # configured id list, not of anything that answered -- and hand
+        # back an arm whose first real transaction was the sync read in
+        # ArmController.start(). The traceback therefore landed in read(),
+        # one frame and one layer away from the actual fault, every time.
+        #
+        # So: ask first, and refuse to energise a bus that did not answer.
+        # Writing goal positions and torque-enable into servos that cannot
+        # be read is not a diagnostic inconvenience, it is the setup for a
+        # lurch.
+        answered, faults = self._survey()
+        missing = [m for m in self.motor_ids if m not in answered]
+        if missing or faults:
+            self._port_handler.closePort()
+            raise OSError(self._cannot_connect(missing, faults))
+
         self._connected = True
         self._configure_motors()
-        log.info("connected to %d servos on %s @ %d baud", len(self.motor_ids), self.port, self.baudrate)
+        log.info("connected to %d servos on %s @ %d baud (all answered)",
+                 len(answered), self.port, self.baudrate)
+
+    def _survey(self) -> tuple[list[int], list[str]]:
+        """Which servos answer, and what any of them calls wrong.
+
+        One round trip each, on a path that runs once per session, so the
+        cost does not matter and the answer is worth having before
+        anything is energised. Error status is the register to ask for
+        because it costs the same as any other and carries the diagnosis
+        with it.
+        """
+        answered, faults = [], []
+        for mid in self.motor_ids:
+            try:
+                err, comm, _ = self._packet_handler.read1ByteTxRx(
+                    self._port_handler, mid, ADDR_ERROR_STATUS)
+            except Exception:
+                continue
+            if comm != 0:
+                continue
+            answered.append(mid)
+            named = [name for bit, name in ERROR_BITS if int(err) & bit]
+            if named:
+                faults.append(f"{mid}:{'+'.join(named)}")
+        return answered, faults
+
+    def _cannot_connect(self, missing: list[int], faults: list[str]) -> str:
+        """Say which servo is wrong and what to do, in that order."""
+        lines = []
+        if missing == list(self.motor_ids):
+            lines.append(
+                f"no servo on {self.port} answered. The adapter is powered "
+                "from USB and answered fine, so this is the arm's own 12 V "
+                "rail, not the cable to the Pi.")
+            lines.append("  1. the inline 12 V switch -- is it on?")
+            lines.append("  2. the barrel jack at the adapter, and the supply "
+                         "itself (some kits ship 2 A; this needs 5 A)")
+            lines.append("  3. a servo that latched a fault holds it until it "
+                         "is power cycled -- switch off, count to five, on")
+            lines.append(f"  4. `tlod ports` -- {self.port} may not be the arm "
+                         "any more; the index moves across replugs")
+        elif missing:
+            lines.append(
+                "servo " + ", ".join(str(m) for m in missing)
+                + " did not answer; " + ", ".join(str(m) for m in
+                                                  self.motor_ids
+                                                  if m not in missing)
+                + " did. A gap that starts partway along is the daisy chain: "
+                  "check the cable into the first silent one. A servo that "
+                  "latched a fault stays silent until it is power cycled.")
+        if faults:
+            lines.append(
+                "faults latched: " + ", ".join(faults)
+                + ". These hold until the servo is power cycled -- switch the "
+                  "12 V off, count to five, and switch it back on. Undervoltage "
+                  "on more than one servo at once is the supply sagging, not "
+                  "six coincidences.")
+        lines.append("`tlod probe` reads the arm with torque off and is the "
+                     "safe thing to run next.")
+        return "cannot connect: " + "\n  ".join(lines)
 
     def _configure_motors(self) -> None:
         for mid in self.motor_ids:
