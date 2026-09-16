@@ -954,6 +954,128 @@ def cmd_move(args) -> int:
     return 0
 
 
+def cmd_flourish(args) -> int:
+    """Run flourishes one at a time, so each can be judged on its own.
+
+    A review tool, not part of the game. The game picks a flourish by
+    mood and buries it in the pause after a round, which is the right
+    thing for playing and the wrong thing for deciding whether a spin
+    reads as a spin. This runs exactly the gesture named, from HOME, and
+    waits for you between them.
+
+    It reports what the profile was *asked* for against what it actually
+    delivered, because those differ here and the difference is the point:
+    a swing of amplitude A at f Hz needs a peak joint speed the flourish
+    may not be allowed to spend, and the motion profile silently clips
+    it. A move whose delivered column is well under its asked column is
+    one the rig cannot perform at that size, however good it looks in the
+    table.
+    """
+    from tlod.arm.controller import ArmController
+    from tlod.arm.model import HOME
+    from tlod.arm.primitives import FLOURISHES, MOODS, Flourish
+    from tlod.types import JOINT_NAMES
+
+    names = list(args.names) if args.names else list(FLOURISHES)
+    unknown = [n for n in names if n not in FLOURISHES]
+    if unknown:
+        print(f"  no such flourish: {', '.join(unknown)}")
+        print(f"  have: {', '.join(FLOURISHES)}")
+        return 2
+
+    if args.list:
+        moods = {n: [m for m, ns in MOODS.items() if n in ns] for n in FLOURISHES}
+        print(f"  {'name':8s} {'cycles':>6s}  {'moves':38s} fires on")
+        for n, mv in FLOURISHES.items():
+            moved = ", ".join(f"{JOINT_NAMES[i]} {a:+.2f}"
+                              for i, a in enumerate(mv.amplitudes) if a)
+            print(f"  {n:8s} {mv.cycles:6.1f}  {moved:38s} {', '.join(moods[n]) or '-'}")
+        return 0
+
+    cfg = Config.load(args.config)
+    if args.real:
+        cfg = cfg.with_overrides(arm={"backend": "feetech"})
+    controller = ArmController(build_arm(cfg), build_limits(cfg),
+                               cfg.runtime.control_hz,
+                               governor=build_governor(cfg))
+    controller.start()
+    print(f"  backend {cfg.arm.backend}   duration {args.duration:.2f}s   "
+          f"speed {args.speed:.2f} rad/s")
+    print("  THE ARM WILL MOVE. Every flourish is joint space with no target and")
+    print("  an envelope that is zero at both ends, so each one returns to the")
+    print("  pose it started from. Ctrl-C stops and parks.")
+    if not args.yes:
+        try:
+            input("  press Enter when ready, Ctrl-C to abort... ")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            controller.stop(park=True)
+            return 130
+
+    dt = 1.0 / max(cfg.runtime.control_hz, 1.0)
+    rc = 0
+    try:
+        for name in names:
+            move = FLOURISHES[name]
+            amps = np.asarray(move.amplitudes, float)
+            moved = [i for i, a in enumerate(amps) if a]
+            controller.goto_joints(HOME, duration=args.settle)
+
+            for take in range(1, args.repeat + 1):
+                label = f"{name}" + (f" ({take}/{args.repeat})" if args.repeat > 1 else "")
+                print(f"\n  {label}: " + ", ".join(
+                    f"{JOINT_NAMES[i]} {amps[i]:+.2f} rad" for i in moved)
+                    + f"  x{move.cycles:g}")
+
+                start = controller.commanded.copy()
+                motion = Flourish(move, duration=args.duration, speed=args.speed)
+                motion.start(controller)
+                peak_cmd = np.zeros(len(amps))
+                peak_arm = np.zeros(len(amps))
+                t0 = time.perf_counter()
+                # The plan runs for `duration`; the return can take longer,
+                # so allow it and report what it cost rather than cutting
+                # it off at the plan and calling that the answer.
+                while time.perf_counter() - t0 < args.duration + 6.0:
+                    done = motion.step(controller, dt)
+                    peak_cmd = np.maximum(peak_cmd, np.abs(controller.commanded - start))
+                    try:
+                        q = controller.backend.read().q
+                        peak_arm = np.maximum(peak_arm, np.abs(q - start))
+                    except Exception:
+                        pass
+                    if done:
+                        break
+                    time.sleep(dt)
+                elapsed = time.perf_counter() - t0
+                drift = float(np.abs(controller.commanded - start).max())
+
+                print(f"    {'joint':14s} {'asked':>7s} {'commanded':>10s} {'arm':>7s}")
+                for i in moved:
+                    print(f"    {JOINT_NAMES[i]:14s} {abs(amps[i]):7.2f} "
+                          f"{peak_cmd[i]:10.2f} {peak_arm[i]:7.2f}")
+                clipped = [JOINT_NAMES[i] for i in moved
+                           if peak_cmd[i] < abs(amps[i]) - 0.05]
+                print(f"    took {elapsed:.2f}s, back within {drift*1e3:.1f} mrad")
+                if clipped:
+                    print(f"    clipped by the {args.speed:.1f} rad/s limit: "
+                          f"{', '.join(clipped)}")
+                if drift > 2e-3:
+                    print(f"    DID NOT RETURN: {drift:.4f} rad from where it began")
+                    rc = 1
+
+            if name != names[-1] and not args.no_pause:
+                try:
+                    input("\n  Enter for the next one, Ctrl-C to stop... ")
+                except EOFError:
+                    break
+    except KeyboardInterrupt:
+        print("\n  interrupted")
+    finally:
+        controller.stop(park=True)
+    return rc
+
+
 def cmd_reach(args) -> int:
     """Probe the reachable workspace. Answers 'can it get there?'."""
     from tlod.arm.model import HOME, ik_position
@@ -1941,6 +2063,24 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--park", action="store_true", help="return home afterwards")
     s.add_argument("--real", action="store_true", help="drive real hardware")
     s.set_defaults(func=cmd_move)
+
+    s = sub.add_parser("flourish", help="run each flourish on its own, to judge it")
+    s.add_argument("names", nargs="*", metavar="NAME",
+                   help="which to run; default all of them, in order")
+    s.add_argument("--list", action="store_true",
+                   help="print the table -- joints, sizes, which mood fires each -- and exit")
+    s.add_argument("--duration", type=float, default=1.2,
+                   help="seconds per gesture (Personality.flourish_duration)")
+    s.add_argument("--speed", type=float, default=2.5,
+                   help="rad/s ceiling (Personality.flourish_speed)")
+    s.add_argument("--repeat", type=int, default=1, help="takes per flourish")
+    s.add_argument("--settle", type=float, default=1.0,
+                   help="seconds to return HOME before each, so they start alike")
+    s.add_argument("--no-pause", action="store_true", dest="no_pause",
+                   help="do not wait for Enter between them")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    s.add_argument("--real", action="store_true", help="force the feetech backend")
+    s.set_defaults(func=cmd_flourish)
 
     s = sub.add_parser("reach", help="probe the reachable workspace")
     s.add_argument("--heights", default="0.02,0.05,0.10,0.15,0.20,0.30")
