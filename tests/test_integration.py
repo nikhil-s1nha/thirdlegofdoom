@@ -222,6 +222,64 @@ class TestHybridConfig:
         assert cfg.safety.max_speed == 3.5
 
 
+class TestTheThresholdSitsBetweenTheClusters:
+    """Measured hardware rounds, replayed. Floor 11 mm, hand plane 28 mm.
+
+    The absolute 4 mm margin sat exactly on the empty-table stall point,
+    so every round was a coin flip -- the same reading of 15 mm scored a
+    hit on one round and a dodge on the next, decided by the third
+    decimal place. These are the real numbers from that session, with the
+    ground truth the operator reported alongside them.
+    """
+
+    FLOOR, HAND = 0.011, 0.028
+    # (paddle height in metres, was there really a hand)
+    #
+    # Empty-table rows are from the run after the descent was fixed to
+    # wait for the arm; the 20-21 mm readings from the run before it are
+    # deliberately absent, because those were the descent quitting early
+    # rather than the arm's real stall point, and fitting a threshold to
+    # them would push it up into the hand cluster.
+    ROUNDS = [
+        (0.010, False), (0.014, False), (0.015, False), (0.016, False),
+        (0.024, True), (0.026, True), (0.027, True),
+    ]
+
+    def sensor(self):
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        return CollisionPlaneContactSensor(lambda: self.FLOOR, settle=0.0)
+
+    def test_every_measured_round_lands_on_the_right_side(self):
+        import time
+
+        for reached, was_hand in self.ROUNDS:
+            s = self.sensor()
+            s.arm()
+            fired = False
+            for _ in range(4):
+                if s.poll(pressing=True, tool_xyz=(0.22, 0.0, reached),
+                          hand_xyz=(0.22, 0.0, self.HAND)) is not None:
+                    fired = True
+                    break
+                time.sleep(0.005)
+            assert fired is was_hand, (
+                f"paddle at {reached * 1e3:.0f} mm scored "
+                f"{'hit' if fired else 'dodge'}; there was "
+                f"{'a hand' if was_hand else 'nothing'} there. {s.report()}")
+
+    def test_the_threshold_is_a_fraction_of_the_band_not_a_constant(self):
+        s = self.sensor()
+        band = self.HAND - self.FLOOR
+        assert s._threshold(self.FLOOR, self.HAND) == 0.5 * band
+        # And it never drops below the absolute floor, however thin the band.
+        assert s._threshold(self.FLOOR, self.FLOOR + 0.002) == s.margin
+
+    def test_without_a_hand_plane_it_falls_back_to_the_margin(self):
+        s = self.sensor()
+        assert s._threshold(self.FLOOR, float("nan")) == s.margin
+
+
 class TestPlayConfig:
     """`play --real` is the whole game on one board: camera, hand tracking,
     IK, servos and contact detection in one process, with the arm striking
