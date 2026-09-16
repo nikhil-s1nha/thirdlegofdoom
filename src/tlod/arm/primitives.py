@@ -353,16 +353,29 @@ class Strike(Motion):
 
     name = "strike"
 
-    # What counts as the arm having stopped. Measured from a bench trace:
-    # after the plan ended the paddle was still 16 mm above its command
-    # and travelling at ~0.18 m/s, and it went on moving for another
-    # ~360 ms -- first carrying 14 mm past on momentum, then creeping
-    # back. Both phases are slow enough that a per-tick threshold alone
-    # would call them stopped, so the reference height is only re-based
-    # when it actually moves: slow creep accumulates against it and keeps
-    # the timer reset until the arm is genuinely done.
+    # What counts as the arm having stopped, and it is deliberately a long
+    # time.
+    #
+    # The first version used 60 ms and ended every strike mid-descent:
+    # dodges quit at 17-21 mm instead of reaching the 11 mm floor, hits
+    # quit at 24-27 mm against a 28 mm hand instead of pressing into it.
+    # The reason is that a min-jerk plan *decelerates to zero velocity by
+    # design*, so near the end of the plan the arm is always crawling --
+    # whether it has arrived or not. "Moving slowly" and "stopped" are
+    # indistinguishable over a short window, and 60 ms is short.
+    #
+    # 150 ms is longer than the recovery creep in the bench trace, which
+    # covered 1-2 mm per 26 ms sample: over 150 ms that is 6-10 mm of
+    # travel, far past STILL_EPSILON, so a decelerating arm keeps
+    # resetting the timer and only a genuinely blocked one runs it out.
+    # Nothing waits this long on a clean dodge, because arrival
+    # short-circuits it -- see step().
     STILL_EPSILON: float = 0.0015     # metres of drift that still counts as stopped
-    STILL_DWELL: float = 0.06         # seconds of not moving before we believe it
+    STILL_DWELL: float = 0.15         # seconds of not moving before we believe it
+    # How close to the commanded floor counts as having got there. Well
+    # inside CollisionPlaneContactSensor's 4 mm margin, so a strike that
+    # ends this way always scores as a dodge -- which is what it is.
+    ARRIVE_EPSILON: float = 0.002
 
     def __init__(
         self,
@@ -385,6 +398,11 @@ class Strike(Motion):
         # Stillness, fed by observe(). See _arm_still.
         self._still_ref: float | None = None
         self._moved_at: float | None = None
+        self._seen_z: float | None = None
+        self._floor_z: float | None = None
+        # Why the descent ended, for the log line. Guessing at this is
+        # what turned one wrong constant into a session of confusion.
+        self.ended_because: str = ""
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
@@ -434,6 +452,9 @@ class Strike(Motion):
         self._holding_since = None
         self._still_ref = None
         self._moved_at = None
+        self._seen_z = None
+        self._floor_z = float(model.tool_pose(self._q1[:5]).z) if self.ok else None
+        self.ended_because = ""
         set_limit = getattr(controller.backend, "set_torque_limit", None)
         if callable(set_limit):
             set_limit(self.limits.torque_limit)
@@ -450,6 +471,7 @@ class Strike(Motion):
     def observe(self, tool_z: float) -> None:
         """Record where the paddle actually is. Called by whoever is stepping us."""
         now = time.perf_counter()
+        self._seen_z = float(tool_z)
         if self._still_ref is None or abs(tool_z - self._still_ref) > self.STILL_EPSILON:
             # Re-base only on real movement. Holding the reference across
             # small ticks is the point: a slow creep never exceeds the
@@ -458,6 +480,18 @@ class Strike(Motion):
             # while it recovers from overshooting the floor.
             self._still_ref = float(tool_z)
             self._moved_at = now
+
+    def _arrived(self) -> bool:
+        """Has the paddle got to the floor it was sent to?
+
+        Unambiguous, unlike stillness, and it short-circuits the dwell --
+        so an unobstructed strike ends the moment it lands rather than
+        waiting to prove it has stopped. Only a blocked one pays for the
+        wait, and a blocked one is not going anywhere.
+        """
+        if self._seen_z is None or self._floor_z is None:
+            return False
+        return self._seen_z <= self._floor_z + self.ARRIVE_EPSILON
 
     def _arm_still(self, controller) -> bool:
         """Has the paddle stopped moving?
@@ -500,10 +534,23 @@ class Strike(Motion):
             # against something that yields slowly might never go quiet.
             plan_done = self.elapsed >= self.duration
             timed_out = self.elapsed >= self.duration + self.settle_timeout
-            if plan_done and (self._arm_still(controller) or timed_out):
-                if timed_out and not self._arm_still(controller):
-                    log.warning("strike: arm never went still; pressing anyway "
-                                "after %.0f ms", self.elapsed * 1e3)
+            arrived, still = self._arrived(), self._arm_still(controller)
+            if plan_done and (arrived or still or timed_out):
+                self.ended_because = ("arrived" if arrived
+                                      else "stopped" if still else "timed out")
+                # Which of the three it was, because they mean different
+                # things and the numbers alone cannot tell them apart. A
+                # descent that "stopped" high is a paddle on a hand; one
+                # that "timed out" is a gate that never fired, and that is
+                # a bug rather than a round.
+                log.debug("strike: %s at %s mm after %.0f ms (floor %s mm)",
+                          self.ended_because,
+                          "?" if self._seen_z is None else f"{self._seen_z * 1e3:.0f}",
+                          self.elapsed * 1e3,
+                          "?" if self._floor_z is None else f"{self._floor_z * 1e3:.0f}")
+                if timed_out and not (arrived or still):
+                    log.warning("strike: arm never went still and never arrived; "
+                                "pressing anyway after %.0f ms", self.elapsed * 1e3)
                 if self.limits.press_hold > 0.0:
                     self._holding_since = time.perf_counter()
                 else:

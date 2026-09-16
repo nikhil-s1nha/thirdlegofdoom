@@ -277,6 +277,7 @@ class HandSlapGame(StateMachine):
         self.hand_at_commit: np.ndarray | None = None
         self._pending: str | None = None
         self._tool_at_bottom: np.ndarray | None = None
+        self._strike_ended_because: str = ""
         self.flinches = 0
         self.holds = 0
 
@@ -526,6 +527,10 @@ class HandSlapGame(StateMachine):
         # the paddle is still well above the floor and moving.
         if self.motion is not None:
             self.motion.observe(float(tool[2]))
+            # Kept here because `step_motion` drops the motion the moment
+            # it finishes, and the retract replaces it before the round is
+            # reported -- so by the time anything asks, the strike is gone.
+            self._strike_ended_because = getattr(self.motion, "ended_because", "")
         # Whether the paddle has stopped travelling and is leaning on
         # whatever is under it. Only a load-based sensor uses this, and it
         # is the only thing that tells one apart from the swing's own
@@ -560,7 +565,8 @@ class HandSlapGame(StateMachine):
         """
         report = getattr(self.contact, "report", None)
         if callable(report):
-            self.announce(f"    {report()}")
+            why = self._strike_ended_because or "?"
+            self.announce(f"    {report()}  [descent {why}]")
 
     def _resolve(self, robot, controller, hit: bool) -> None:
         self.last_strike = time.perf_counter()
