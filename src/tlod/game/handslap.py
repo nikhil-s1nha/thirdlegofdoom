@@ -114,8 +114,13 @@ class Personality:
     enabled: bool = True
     sway_radius: float = 0.022        # metres, horizontal only
     sway_period: float = 1.8          # seconds per lap
-    flourish_duration: float = 1.2    # one big slow swing; see FLOURISHES
-    flourish_speed: float = 2.5       # rad/s; jaunty, not violent
+    flourish_duration: float = 1.2    # fallback; every move carries its own
+    # 2.5 was not a limit, it was a guess, and it cost most of the gesture:
+    # `_write` obeys this verbatim rather than clamping it to
+    # `safety.max_speed`, and at 2.5 a spin asking 2.20 rad delivered 1.29.
+    # 3.5 is what the rig already sustains through a strike, and it is
+    # where the shipped moves were measured.
+    flourish_speed: float = 3.5       # rad/s; jaunty, not violent
 
 
 @dataclass(slots=True)
@@ -649,7 +654,13 @@ class HandSlapGame(StateMachine):
         # The dwell, and then however much of the reaction is still
         # playing -- capped, so a motion that never reports done cannot
         # wedge the game in a victory dance.
-        if self.in_state < 0.6 or (not idle and self.in_state < 2.4):
+        # 2.4 s was sized against gestures that were being silently clipped
+        # to about half their amplitude. The full-size ones take longer --
+        # a spin runs 1.9 s, and the retract it follows is still finishing
+        # when settle begins -- so the old cap cut the reaction off partway
+        # and handed `ready` an arm mid-swing. This is the reaction window
+        # only; nothing about how a round is judged depends on it.
+        if self.in_state < 0.6 or (not idle and self.in_state < 3.0):
             return
         self.last_result = ""
         self.transition("ready" if self._hand(robot) is not None else "idle")
