@@ -36,6 +36,7 @@ import numpy as np
 
 from tlod.arm import model
 from tlod.arm.controller import ArmController, minimum_jerk
+from tlod.arm.profile import ProfileLimits
 from tlod.types import Pose
 
 log = logging.getLogger(__name__)
@@ -706,16 +707,16 @@ FLOURISHES: dict[str, Move] = {
     #                pan    lift  elbow  wrist   roll   grip
     # One big one-way roll, slow because that is what buys the size: 109
     # degrees, against the 74 the old 2.20-rad entry actually delivered.
-    "spin": Move((0.00, 0.00, 0.00, 0.00, 1.90, 0.00), 0.5, 1.8),
+    "spin": Move((0.00, 0.00, 0.00, 0.00, 1.90, 0.00), 0.5, 0.60),
     # Three roll swings of 36 degrees rather than one of 27, which is the
     # difference between a shimmy and a wobble.
-    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.62, 0.00), 1.5, 1.7),
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 0.62, 0.00), 1.5, 0.55),
     # Further and faster: 31 degrees of pan in a second, from 18 in 1.2 s.
-    "wag": Move((0.58, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 1.05),
+    "wag": Move((0.58, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 0.38),
     # Rise once, dip twice while up -- a nod from a standing start rather
     # than a wrist twitch. Needs the per-joint cycle counts.
     "nod": Move((0.00, -0.40, 0.00, 0.35, 0.00, 0.00),
-                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 1.4),
+                (1.0, 0.5, 1.0, 2.0, 1.0, 1.0), 0.46),
     # Out further and back, but only so far: this is the one gesture that
     # travels *toward* the table, and `safety.min_height` does not protect
     # it -- `clamp_pose` guards Cartesian commands and a flourish writes
@@ -723,18 +724,25 @@ FLOURISHES: dict[str, Move] = {
     # else's. These amplitudes bottom out 29 mm up; 0.50/-0.66 reached
     # 20 mm, which is not enough air for a gesture nobody is watching the
     # height of.
-    "bob": Move((0.00, 0.42, -0.55, 0.00, 0.00, 0.00), 1.0, 1.2),
+    # Smaller than the rest of this table wants to be, and deliberately.
+    # At 400 rad/s^2 the arm can chase a target that jumped because the
+    # loop missed a tick, so a gesture can overswing its amplitude by a
+    # third -- measured at 1.35x on nod. Every other move here rotates or
+    # goes up, where overswinging is ugly. This one travels at the table.
+    # At 0.42/-0.55 it bottomed out 29 mm up, which a 1.4x overswing turns
+    # into 11 mm. These amplitudes sit 42 mm up, and 29 mm even overswung.
+    "bob": Move((0.00, 0.28, -0.38, 0.00, 0.00, 0.00), 1.0, 0.36),
     # Point up, then snap twice. The snap is acceleration-limited, not
     # speed-limited: at 35 rad/s^2 a 20-degree bite cannot come round
     # faster than about 0.75 s, and 39 is all the servo has.
     "chomp": Move((0.00, 0.00, 0.00, -0.30, 0.00, 0.38),
-                  (1.0, 1.0, 1.0, 0.5, 1.0, 2.0), 1.6),
+                  (1.0, 1.0, 1.0, 0.5, 1.0, 2.0), 0.50),
     # Two hops side to side while it rises once. The lift is a half cycle
     # on purpose: a whole one is a sine, which spends half its time going
     # *down*, and down from HOME is 71 mm of air and then the table -- at
     # a whole cycle this move passed 12 mm off it.
     "jig": Move((0.42, -0.34, 0.00, 0.00, 0.00, 0.00),
-                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 1.6),
+                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 0.54),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
@@ -770,11 +778,13 @@ class Flourish(Motion):
     # How close to the starting configuration counts as back there.
     HOME_EPSILON = 1e-3
 
-    def __init__(self, move: Move, duration: float = 1.2, speed: float = 3.5) -> None:
+    def __init__(self, move: Move, duration: float = 1.2, speed: float = 12.0,
+                 accel: float = 400.0, jerk: float = 8000.0) -> None:
         super().__init__()
         self.move = move
         self.duration = max(move.duration or duration, 1e-3)
         self.speed = speed
+        self.limits = ProfileLimits(max_speed=speed, max_accel=accel, max_jerk=jerk)
         self._cycles = np.broadcast_to(
             np.asarray(move.cycles, float), np.shape(move.amplitudes)).copy()
         self._q0: np.ndarray | None = None
@@ -801,7 +811,7 @@ class Flourish(Motion):
         swing = np.sin(2.0 * np.pi * self._cycles * s)
         amplitudes = np.asarray(self.move.amplitudes, float)
         controller._write(self._q0 + amplitudes * swing * envelope,
-                          max_speed=self.speed, dt=dt)
+                          dt=dt, limits=self.limits)
         if self.elapsed < self.duration:
             return False
         # Finished has to mean back where it started, which is not the
@@ -827,7 +837,8 @@ class Flourish(Motion):
         return self.finished
 
 
-def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 3.5) -> Flourish:
+def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 12.0,
+             accel: float = 400.0, jerk: float = 8000.0) -> Flourish:
     """A flourish suiting `mood`, picked at random so it does not stale.
 
     Repetition is what makes a performance stop being funny, and this one
@@ -836,7 +847,8 @@ def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 3.5) -> 
     names = MOODS.get(mood) or MOODS["idle"]
     pick = (rng.choice(len(names)) if rng is not None
             else np.random.randint(len(names)))
-    return Flourish(FLOURISHES[names[int(pick)]], duration=duration, speed=speed)
+    return Flourish(FLOURISHES[names[int(pick)]], duration=duration, speed=speed,
+                    accel=accel, jerk=jerk)
 
 
 class Hold(Motion):

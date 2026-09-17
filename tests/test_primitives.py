@@ -380,8 +380,43 @@ def test_every_flourish_stays_within_its_amplitudes(rig):
             if done:
                 break
             time.sleep(0.005)
-        allowed = np.abs(np.asarray(move.amplitudes, float)) + 2e-3
+        # Bounded overswing rather than none, and the bound is the point.
+        # This asserted `worst <= amplitude` back when a flourish ran under
+        # safety.max_accel, 35 rad/s^2, which was too low to chase the step
+        # a missed control tick puts in the target -- so the profile
+        # smoothed the jump away and never overshot. A flourish now carries
+        # its own 400 rad/s^2, which is what makes it quick, and the same
+        # jump gets followed: measured 1.35x on nod under loop jitter.
+        # That is a real cost of the speed and not a bug, but a factor of
+        # two would be, so this still catches an amplitude typo or a
+        # runaway envelope.
+        allowed = np.abs(np.asarray(move.amplitudes, float)) * 1.5 + 2e-3
         assert np.all(worst <= allowed), f"{name} overswung: {worst} > {allowed}"
+
+
+def test_no_flourish_can_reach_the_table(rig):
+    """The guard that overswing actually threatens.
+
+    `safety.min_height` does not cover any of this: `clamp_pose` bounds
+    Cartesian commands and a flourish writes joint space, so nothing
+    downstream is checking how close these get to the work surface. HOME
+    is only 71 mm up and positive shoulder_lift, elbow_flex and wrist_flex
+    all drive the tool *down*, which is how the old bow and droop came to
+    hit the table.
+
+    Checked at 1.5x amplitude, matching the overswing the test above
+    allows, because the clearance has to survive the overshoot rather than
+    just the nominal swing.
+    """
+    s = np.linspace(0.0, 1.0, 2000)
+    for name, move in FLOURISHES.items():
+        amps = np.asarray(move.amplitudes, float) * 1.5
+        cycles = np.broadcast_to(np.asarray(move.cycles, float), amps.shape)
+        offsets = amps * (np.sin(np.pi * s)[:, None]
+                          * np.sin(2.0 * np.pi * cycles * s[:, None]))
+        lowest = min(model.tool_pose(model.HOME + o[:5]).xyz()[2]
+                     for o in offsets[::10])
+        assert lowest > 0.020, f"{name} reaches {lowest * 1e3:.0f} mm off the table"
 
 
 def test_a_flourish_is_actually_visible(rig):
