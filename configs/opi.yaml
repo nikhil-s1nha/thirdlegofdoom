@@ -11,7 +11,7 @@ camera:
 
 arm:
   backend: feetech
-  port: ''
+  port: /dev/ttyACM0
   calibration: calib/mine.json
   servo_accel: 35.0
   torque_limit: 800
