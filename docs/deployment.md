@@ -230,7 +230,8 @@ Ubuntu or Debian arm64, Python 3.12 or 3.13. glibc 2.28 or newer, which
 any current Ubuntu or Debian arm64 image has.
 
 ```bash
-sudo apt install -y python3-venv python3-dev libgl1 libglib2.0-0 v4l-utils
+sudo apt install -y python3-venv python3-dev libgl1 libglib2.0-0 \
+                    libegl1 libgles2 v4l-utils
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[hands]"
 pip install pyserial feetech-servo-sdk        # the arm
@@ -246,6 +247,14 @@ its *calibration* tooling (`lerobot-setup-motors`, `lerobot-calibrate`),
 and that need not be this board — `arm.calibration` reads the JSON
 lerobot writes, so calibrate wherever it installs and copy the file
 across.
+
+`libegl1` and `libgles2` are mediapipe's, not OpenCV's, and they are the
+ones a minimal image is missing: mediapipe 1.0 loads a C shared library
+that links libEGL, so without them `HandLandmarker.create_from_options`
+dies with `OSError: libEGL.so.1: cannot open shared object file` -- from
+inside ctypes, several frames below anything recognisable. `v4l-utils` is
+not needed to run anything; it is needed to find out *why* a camera will
+not open, which is worth having installed before you need it.
 
 ### mediapipe
 
