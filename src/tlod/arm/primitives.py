@@ -782,8 +782,15 @@ FLOURISHES: dict[str, Move] = {
     # gripper snapping three times through it and the shoulder lifting
     # twice underneath. Sharing a joint with another gesture is what made
     # the last one read as a slower wag.
-    "shimmy": Move((0.00, -0.30, 0.00, 0.00, 1.30, 0.90),
-                   (1.0, 2.0, 1.0, 1.0, 1.5, 3.0),
+    #
+    # wrist_flex is a *half* cycle, which is what holds it up rather than
+    # waving it. A half cycle is sin(pi s) against the envelope's own
+    # sin(pi s), so the offset is sin^2 -- one broad hump that rises, sits
+    # near 69 degrees through the whole middle of the gesture, and eases
+    # back. A whole cycle would be a sine: up, through the start, down the
+    # other side, which is a flap, not a pose held while the wrist works.
+    "shimmy": Move((0.00, -0.30, 0.00, -1.20, 1.30, 0.90),
+                   (1.0, 2.0, 1.0, 0.5, 1.5, 3.0),
                    1.40, (False, True, False, False, False, True)),
     # 49 degrees of pan with the elbow rising on each end of the swing --
     # one-way, so the elbow lifts twice rather than dipping at the table
