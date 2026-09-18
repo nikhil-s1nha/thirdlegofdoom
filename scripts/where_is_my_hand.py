@@ -62,6 +62,11 @@ if "--truth" in argv:
     i = argv.index("--truth")
     truth = np.array([float(argv[i + 1]), float(argv[i + 2])])
     del argv[i:i + 3]
+# `-c path` as well as a bare path. Every `tlod` subcommand takes -c, so
+# that is what gets typed here too, and hand-rolled argv parsing answered
+# it by trying to open a file called "-c".
+if argv and argv[0] in ("-c", "--config"):
+    del argv[0]
 cfg = Config.load(argv[0] if argv else "configs/opi.yaml")
 projector = build_projector(cfg)
 # A scripted detector or a mock camera needs a scene to read hands from,
