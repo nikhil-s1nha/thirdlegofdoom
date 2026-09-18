@@ -48,7 +48,12 @@ parser.add_argument("--marker", default=None, choices=sorted(MARKER_BANDS))
 parser.add_argument("--camera", type=_camera, default=None,
                     help="v4l2 index or /dev/v4l/by-id/... path; defaults to "
                          "camera.index from the config")
-parser.add_argument("-c", "--config", default=None, help="YAML config path")
+# Not None. `Config.load(None)` returns the *defaults*, so a script that
+# meant "read the config" and passed None silently read `index: 0` out of
+# CameraConfig and never opened the file at all -- which on this rig is a
+# Rockchip codec node, not the camera.
+parser.add_argument("-c", "--config", default="configs/opi.yaml",
+                    help="YAML config path")
 parser.add_argument("--port", type=int, default=8080)
 args = parser.parse_args()
 
