@@ -1864,7 +1864,11 @@ def cmd_cameras(args) -> int:
     # property of the camera, and on this board it is shared with six
     # Rockchip codec nodes. by-id comes from the device's own descriptor,
     # so it survives a replug -- which remounting the camera is.
-    paths = {i: p for i, p in stable_paths().items() if i in found}
+    # Not filtered by `found`. A node that the kernel named and OpenCV
+    # could not open is the case where these matter most: the by-id link
+    # says whether the camera is even still enumerated, which "indices
+    # that actually open: none" does not.
+    paths = stable_paths()
     if paths:
         print("\n  stable paths, which do not move when the camera is replugged:")
         for i, path in sorted(paths.items()):
@@ -1872,6 +1876,10 @@ def cmd_cameras(args) -> int:
         first = paths[sorted(paths)[0]]
         print(f"\n  put one in the config and stop chasing indices:\n"
               f"    camera:\n      index: {first}")
+        if not found:
+            print("\n  none of them opened, though. A by-id link with nothing "
+                  "behind it\n  means the camera enumerated and then stopped "
+                  "answering -- power,\n  the cable, or the hub, not the index.")
     else:
         print("  Indices move across reboots and replugs -- never trust "
               "last week's.")
