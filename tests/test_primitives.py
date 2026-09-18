@@ -13,10 +13,10 @@ from tlod.arm import model
 from tlod.arm.controller import ArmController, SafetyLimits
 from tlod.arm.mock import MockArm
 from tlod.arm.primitives import (
-    FLOURISHES, Feint, Flourish, GoTo, GoToPose, Hold, Hover, Retract, Sequence,
+    FLOURISHES, MEASURED_TRAVEL, Feint, Flourish, GoTo, GoToPose, Hold, Hover, Retract, Sequence,
     Strike, StrikeLimits, flourish,
 )
-from tlod.types import Pose
+from tlod.types import JOINT_NAMES, Pose
 
 
 @pytest.fixture
@@ -392,6 +392,61 @@ def test_every_flourish_stays_within_its_amplitudes(rig):
         # runaway envelope.
         allowed = np.abs(np.asarray(move.amplitudes, float)) * 1.5 + 2e-3
         assert np.all(worst <= allowed), f"{name} overswung: {worst} > {allowed}"
+
+
+def test_no_flourish_commands_past_the_motors_travel():
+    """The limit that actually stops a gesture, and the one nothing checks.
+
+    `model.JOINT_LIMITS` comes from the URDF and is far wider than the
+    motors: it allows wrist_roll +-2.7 rad where the joint has 0.513 in
+    total. `_write` clamps to the URDF, so a command outside the real
+    travel is stopped by nothing in software -- it is issued in full, and
+    the encoder reports the joint sitting where it started. That is what a
+    1.90 rad spin was, and it read as 4 degrees at every speed and size.
+
+    Checked at 1.5x amplitude to match the overswing jitter can add.
+    """
+    s = np.linspace(0.0, 1.0, 2000)
+    home = np.concatenate([model.HOME, [0.0]])
+    for name, move in FLOURISHES.items():
+        amps = np.asarray(move.amplitudes, float) * 1.5
+        cycles = np.broadcast_to(np.asarray(move.cycles, float), amps.shape)
+        offsets = amps * (np.sin(np.pi * s)[:, None]
+                          * np.sin(2.0 * np.pi * cycles * s[:, None]))
+        for i, joint in enumerate(JOINT_NAMES):
+            if not amps[i]:
+                continue
+            lo, hi = MEASURED_TRAVEL[joint]
+            reach = home[i] + offsets[:, i]
+            assert reach.min() >= lo, (
+                f"{name} drives {joint} to {reach.min():+.3f}, past its {lo:+.3f} stop")
+            assert reach.max() <= hi, (
+                f"{name} drives {joint} to {reach.max():+.3f}, past its {hi:+.3f} stop")
+
+
+def test_one_way_joints_get_one_way_swings():
+    """A whole cycle is a sine and spends half its time going backwards.
+
+    Two joints have almost nothing behind them -- wrist_roll starts 0.054
+    rad off its lower stop and the gripper 0.179 off its closed one -- so
+    on those a whole-cycle swing drives into a hard stop for half of every
+    cycle. Measured, that is exactly what halved the old shimmy: 0.62 rad
+    commanded on the roll, 0.22 reached.
+    """
+    home = np.concatenate([model.HOME, [0.0]])
+    for name, move in FLOURISHES.items():
+        cycles = np.broadcast_to(np.asarray(move.cycles, float),
+                                 np.shape(move.amplitudes))
+        for i, joint in enumerate(JOINT_NAMES):
+            if not move.amplitudes[i]:
+                continue
+            lo, hi = MEASURED_TRAVEL[joint]
+            behind = min(home[i] - lo, hi - home[i])
+            if behind < 0.25 and cycles[i] % 1.0 == 0.0:
+                raise AssertionError(
+                    f"{name} swings {joint} through whole cycles, but it has "
+                    f"only {behind:.3f} rad on one side of HOME -- use a half "
+                    f"cycle so the swing goes one way")
 
 
 def test_no_flourish_can_reach_the_table(rig):
