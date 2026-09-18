@@ -317,6 +317,15 @@ class HandSlapGame(StateMachine):
         # reacting to the performance wants the second one.
         self.last_flourish: str = ""
         self.flourishes = 0
+        # Why it is not playing, said out loud. `self.reason` has always
+        # existed and has always gone only to `hud()`, which needs --view
+        # or --preview to see -- so on a headless board a game that
+        # refuses every hand prints nothing at all and looks broken. It is
+        # not: three times on this rig the answer was "out of reach" or
+        # "uncertain", and every counter in the run summary read healthy
+        # while the arm sat still. Logged on change rather than per tick.
+        self._said_reason: str = ""
+        self._said_reason_at: float = 0.0
 
     # -- gating ------------------------------------------------------------
     def _hand(self, robot):
@@ -423,9 +432,24 @@ class HandSlapGame(StateMachine):
         handler(robot, controller, dt)
 
     # -- states ------------------------------------------------------------
+    def _announce_reason(self) -> None:
+        """Say why no hand was accepted, once per distinct reason.
+
+        Per-tick would be a hundred lines a second; only-once would hide a
+        reason that changed ten minutes into a session. So: on change, and
+        again if the same one persists for half a minute.
+        """
+        now = time.perf_counter()
+        if self.reason == self._said_reason and now - self._said_reason_at < 30.0:
+            return
+        self._said_reason, self._said_reason_at = self.reason, now
+        if self.reason:
+            log.info("not playing: %s", self.reason)
+
     def _state_idle(self, robot, controller, dt) -> None:
         self.step_motion(controller, dt)
         track = self._hand(robot)
+        self._announce_reason()
         if track is not None:
             self.transition("acquire")
             self.run_motion(Hover(track.filter.position, self.limits, duration=0.6), controller)
