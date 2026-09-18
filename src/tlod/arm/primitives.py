@@ -701,7 +701,22 @@ MEASURED_TRAVEL: dict[str, tuple[float, float]] = {
     "shoulder_lift": (-1.775, 1.827),
     "elbow_flex":    (-1.793, 1.584),
     "wrist_flex":    (-1.733, 1.800),
-    "wrist_roll":    (-0.054, 0.459),   # 0.513 rad, all of it
+    # A full-turn joint whose *reading* wraps, which is not the same as a
+    # joint with no travel. `Calibration.to_rad` is
+    # `(counts - center) * RAD_PER_COUNT` with center 2839 of 4096, so
+    # turning one way walks the count to 0 and the angle to -4.354 rad;
+    # one more step wraps the count to 4095 and the angle jumps to +1.927.
+    # Rotating the wrist through 360 degrees therefore reads 0 -> -4.354,
+    # jump, +1.927 -> 0. Measuring the ends by hand and taking min and max
+    # across that discontinuity is what produced "0.513 rad of travel" and
+    # sent a spin to the wrong side of the arm.
+    #
+    # The usable span is what can be reached without crossing the wrap, and
+    # it is wildly asymmetric: 4.354 rad going negative, 1.927 positive.
+    # `to_counts` clips to 0..4095 in silence, so a command past either end
+    # is not refused or logged, it simply stops arriving -- which is what
+    # +1.90 rad was doing, 18 counts short of the boundary.
+    "wrist_roll":    (-4.354, 1.927),
     "gripper":       (-0.179, 2.100),   # opens wide, shuts at once
 }
 
@@ -721,14 +736,17 @@ MEASURED_TRAVEL: dict[str, tuple[float, float]] = {
 # hit it. Anything large goes up: negative.
 FLOURISHES: dict[str, Move] = {
     #                pan    lift  elbow  wrist   roll   grip
-    # The wrist rotator has 26 degrees of usable travel, so there is no
-    # such thing as a spin here. What sells it is the sweep underneath --
-    # 53 degrees of wrist_flex rising -- with the roll adding what it can.
-    "spin": Move((0.00, 0.00, 0.00, -0.92, 0.26, 0.00),
-                 (1.0, 1.0, 1.0, 0.5, 0.5, 1.0), 0.34),
-    # Moved off the roll entirely and onto the shoulder, which has 3.5 rad
-    # to give: three swings of 63 degrees, against 12 measured on the roll.
-    "shimmy": Move((1.10, 0.00, 0.00, 0.00, 0.00, 0.00), 1.5, 1.10),
+    # 158 degrees of roll, one way, in a second. Negative because that is
+    # the long way round from centre -- 4.354 rad against 1.927 -- and the
+    # direction is the whole reason this works at all.
+    "spin": Move((0.00, 0.00, 0.00, 0.00, -2.75, 0.00),
+                 (1.0, 1.0, 1.0, 1.0, 0.5, 1.0), 1.01),
+    # Back on the roll, where a shimmy belongs. Three swings of 74 degrees.
+    # A positive amplitude at 1.5 cycles has its largest excursion on the
+    # *negative* side -- the peak of sin(pi s)sin(3 pi s) is -1 at s=0.5 --
+    # so the big half of every swing takes the roomy direction and the
+    # small half stays well clear of the wrap.
+    "shimmy": Move((0.00, 0.00, 0.00, 0.00, 1.30, 0.00), 1.5, 1.30),
     "wag": Move((1.12, 0.00, 0.00, 0.00, 0.00, 0.00), 1.0, 0.82),
     # Rise 38 degrees, then dip twice through 44.
     "nod": Move((0.00, -0.66, 0.00, 0.82, 0.00, 0.00),
