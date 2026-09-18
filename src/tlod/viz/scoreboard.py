@@ -195,6 +195,14 @@ PAGE = ("""<!doctype html><meta charset=utf-8>
            color:var(--dim); opacity:0; transition:opacity .4s ease; }
   body.stale #score { opacity:.25; }
   body.stale #stale { opacity:1; }
+  /* Deliberately quiet and always visible. A browser will not make a
+     sound until the page has been clicked, so a scoreboard that simply
+     stayed silent would read as broken; this says which state it is in
+     and how to change it, without competing with the score. */
+  #sound { position:fixed; right:2vw; top:2vh; font-size:1.6vh;
+           letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+           cursor:pointer; user-select:none; }
+  #sound.on { color:var(--human); }
   @media (prefers-reduced-motion:reduce) {
     #flash.on { animation-duration:400ms; }
   }
@@ -209,6 +217,7 @@ PAGE = ("""<!doctype html><meta charset=utf-8>
 </div>
 <div id=flash><div id=word></div></div>
 <div id=stale>lost the board</div>
+<div id=sound>sound off &middot; click or press S</div>
 <script>
 // Who the result favours, which is the thing to read first: red is a
 // point for the arm, green is a point for the hand. The word is there to
@@ -232,7 +241,113 @@ function flash(word, ms) {
   elFlash.classList.remove("on");
   void elFlash.offsetWidth;
   elFlash.classList.add("on");
+  sound(word);
 }
+
+// Synthesised rather than sampled. Four short files would have to be
+// served from somewhere, and the whole point of this page is that it has
+// no dependencies and works on a board with no route off the LAN -- so
+// the slap is a noise burst and the rest are oscillators, which cost
+// nothing to ship and never 404.
+var actx = null, wantSound = false, noise = null;
+
+function audio() {
+  if (actx) { return actx; }
+  var C = window.AudioContext || window.webkitAudioContext;
+  if (!C) { return null; }
+  actx = new C();
+  // One second of white noise, reused for every slap. Building it per
+  // hit would allocate 44100 floats on the same tick as the flash.
+  noise = actx.createBuffer(1, actx.sampleRate, actx.sampleRate);
+  var d = noise.getChannelData(0);
+  for (var i = 0; i < d.length; i++) { d[i] = Math.random() * 2 - 1; }
+  return actx;
+}
+
+function env(node, peak, attack, decay) {
+  var g = actx.createGain();
+  var t = actx.currentTime;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+  node.connect(g);
+  g.connect(actx.destination);
+  node.start(t);
+  node.stop(t + attack + decay + 0.02);
+  return g;
+}
+
+function tone(type, from, to, peak, attack, decay) {
+  var o = actx.createOscillator();
+  o.type = type;
+  var t = actx.currentTime;
+  o.frequency.setValueAtTime(from, t);
+  if (to !== from) { o.frequency.exponentialRampToValueAtTime(to, t + attack + decay); }
+  env(o, peak, attack, decay);
+}
+
+function slap() {
+  // A real slap is broadband and over in about a tenth of a second: a
+  // filtered noise crack for the skin, a low sine for the weight behind
+  // it. A pure tone reads as a beep no matter how short it is.
+  var src = actx.createBufferSource();
+  src.buffer = noise;
+  var bp = actx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.value = 1600;
+  bp.Q.value = 0.7;
+  src.connect(bp);
+  var g = actx.createGain();
+  var t = actx.currentTime;
+  g.gain.setValueAtTime(0.9, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+  bp.connect(g);
+  g.connect(actx.destination);
+  src.start(t);
+  src.stop(t + 0.15);
+  tone("sine", 180, 70, 0.5, 0.005, 0.11);
+}
+
+function sound(word) {
+  if (!wantSound || !audio()) { return; }
+  if (actx.state === "suspended") { actx.resume(); }
+  if (word === "HIT") { slap(); }
+  // The arm bluffed and the hand moved: a short comic drop, because a
+  // flinch is the one result that is the player's own fault.
+  else if (word === "FLINCH") { tone("sawtooth", 520, 150, 0.22, 0.01, 0.26); }
+  // Both of these are points for the hand, so both go up rather than
+  // down, and the two-note version is the one you earned by holding.
+  else if (word === "DODGED") { tone("square", 520, 880, 0.16, 0.008, 0.14); }
+  else if (word === "HELD") {
+    tone("sine", 660, 660, 0.2, 0.01, 0.16);
+    setTimeout(function () { if (actx) { tone("sine", 990, 990, 0.2, 0.01, 0.3); } }, 130);
+  }
+}
+
+var elSound = document.getElementById("sound");
+
+function setSound(on) {
+  wantSound = on;
+  elSound.textContent = on ? "sound on \u00b7 press S to mute"
+                           : "sound off \u00b7 click or press S";
+  elSound.classList.toggle("on", on);
+  try { localStorage.setItem("tlod.sound", on ? "1" : "0"); } catch (e) {}
+  // Resuming has to happen inside the gesture that turned it on, or the
+  // context stays suspended and the first few results are silent.
+  if (on && audio() && actx.state === "suspended") { actx.resume(); }
+}
+
+// Default off. A page that starts making noise the moment it is opened
+// is a page someone closes, and the browser would refuse anyway until it
+// had been clicked.
+var stored = null;
+try { stored = localStorage.getItem("tlod.sound"); } catch (e) {}
+setSound(stored === "1");
+
+document.addEventListener("click", function () { setSound(!wantSound); });
+document.addEventListener("keydown", function (e) {
+  if (e.key === "s" || e.key === "S") { setSound(!wantSound); }
+});
 
 function apply(d) {
   elRobot.textContent = d.robot;
