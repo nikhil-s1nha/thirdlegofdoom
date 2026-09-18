@@ -112,8 +112,26 @@ def build_arm(cfg: Config):
         if not ports:
             raise SystemExit("no serial ports found. Is the controller board plugged in and powered?")
         if len(ports) > 1:
-            raise SystemExit(f"several ports found, set arm.port explicitly: {ports}")
-        port = ports[0]
+            # Two boards on USB is the normal state once the eyes are
+            # plugged in, and refusing to start was the wrong answer: the
+            # arm can be identified rather than guessed at. Ask each port
+            # whether servos answer, the same survey `connect()` runs
+            # before it energises anything, and take the one that does.
+            # Enumeration order is not evidence -- ACM0 is whichever board
+            # the kernel saw first this boot.
+            from tlod.arm.feetech import servos_answer
+
+            live = [p for p in ports
+                    if servos_answer(p, cfg.arm.baudrate)]
+            if len(live) != 1:
+                raise SystemExit(
+                    f"several ports found and {'none' if not live else 'more than one'} "
+                    f"has servos behind it: {ports}. Run `tlod ports --probe` to see "
+                    "what is on each, then set arm.port in the config.")
+            port = live[0]
+            log.info("arm found on %s by asking; the other ports had no servos", port)
+        else:
+            port = ports[0]
 
     calib = None
     if cfg.arm.calibration:
@@ -1837,12 +1855,48 @@ def cmd_cameras(args) -> int:
 
 
 def cmd_ports(args) -> int:
-    from tlod.arm.feetech import find_ports
+    """List the serial ports, and say which one the arm is on.
 
-    found = find_ports()
-    print(f"  serial ports: {found or 'none found'}")
+    Printing paths alone was fine with one board plugged in and useless
+    with two: `['/dev/ttyACM0', '/dev/ttyACM1']` names them without
+    telling them apart, and the numbering follows enumeration order, so it
+    can swap on a reboot or a replug. The USB descriptor distinguishes
+    them, and `--probe` settles it outright by asking each port whether
+    six servos live behind it.
+    """
+    from tlod.arm.feetech import MOTOR_IDS, describe_ports, find_ports, servos_answer
+
+    found = describe_ports()
     if not found:
+        print(f"  serial ports: {find_ports() or 'none found'}")
         print("  (plug in the controller board, and check it has power)")
+        return 0
+
+    cfg = Config.load(args.config)
+    baud = cfg.arm.baudrate
+    print(f"  {'port':16s} {'usb id':10s} {'description':28s} serial")
+    for p in found:
+        print(f"  {p['device']:16s} {p['usb_id']:10s} {p['description'][:28]:28s} "
+              f"{p['serial_number']}")
+
+    if args.probe:
+        print(f"\n  asking each port for servos at {baud} baud "
+              "(read-only, nothing is energised):")
+        arms = []
+        for p in found:
+            n = servos_answer(p["device"], baud)
+            print(f"  {p['device']:16s} {n} of {len(MOTOR_IDS)} answered"
+                  + ("   <-- the arm" if n else ""))
+            if n:
+                arms.append(p["device"])
+        if len(arms) == 1:
+            print(f"\n  set it explicitly so a replug cannot move it:\n"
+                  f"    arm:\n      port: {arms[0]}")
+        elif not arms:
+            print("\n  nothing answered. Check the arm's power switch -- an "
+                  "unpowered bus enumerates as a port and answers nothing.")
+    else:
+        print("\n  --probe asks each port whether the servos are behind it")
     return 0
 
 
@@ -2323,6 +2377,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_cameras)
 
     s = sub.add_parser("ports", help="list serial ports")
+    s.add_argument("--probe", action="store_true",
+                   help="ask each port whether the servos are behind it")
     s.set_defaults(func=cmd_ports)
 
     s = sub.add_parser("first-light", help="verify a newly assembled arm, one joint at a time")

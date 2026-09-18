@@ -176,3 +176,95 @@ class TestConnectAsksBeforeItEnergises:
         arm._packet_handler = Boom()
         arm._port_handler = object()
         assert arm._survey() == ([], [])
+
+
+def _fake_comports(monkeypatch, entries):
+    """Install a stub `serial.tools.list_ports` describing `entries`.
+
+    pyserial is an optional extra, so the tests cannot assume it is
+    importable -- and the interesting cases here are about what the port
+    list *says*, which no amount of real hardware would make reproducible
+    anyway.
+    """
+    import sys
+    import types
+
+    serial = types.ModuleType("serial")
+    tools = types.ModuleType("serial.tools")
+    lp = types.ModuleType("serial.tools.list_ports")
+    lp.comports = lambda: entries
+    tools.list_ports = lp
+    serial.tools = tools
+    monkeypatch.setitem(sys.modules, "serial", serial)
+    monkeypatch.setitem(sys.modules, "serial.tools", tools)
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", lp)
+
+
+def _port(device, description="", vid=None, pid=None, serial_number=""):
+    import types
+
+    return types.SimpleNamespace(device=device, description=description,
+                                 manufacturer="", serial_number=serial_number,
+                                 vid=vid, pid=pid)
+
+
+def test_describe_ports_carries_enough_to_tell_two_boards_apart(monkeypatch):
+    """Two boards on USB is the normal state once the eyes are plugged in.
+
+    `['/dev/ttyACM0', '/dev/ttyACM1']` names them without distinguishing
+    them, and the numbering follows enumeration order, so it is not even
+    stable across a replug. The USB ids are.
+    """
+    from tlod.arm import feetech
+
+    _fake_comports(monkeypatch, [
+        _port("/dev/ttyACM0", "Seeed XIAO M0", 0x2886, 0x802F, "A1B2"),
+        _port("/dev/ttyACM1", "USB Single Serial", 0x1A86, 0x55D3),
+    ])
+    got = feetech.describe_ports()
+    assert [d["device"] for d in got] == ["/dev/ttyACM0", "/dev/ttyACM1"]
+    assert got[0]["usb_id"] == "2886:802f"
+    assert got[1]["usb_id"] == "1a86:55d3"
+    assert got[0]["usb_id"] != got[1]["usb_id"], "nothing here separates the boards"
+    assert got[0]["description"] == "Seeed XIAO M0"
+
+
+def test_describe_ports_survives_a_descriptor_with_nothing_in_it(monkeypatch):
+    """Plenty of adapters report no vid, no serial and an empty string for
+    a description. That is a thin answer, not a crash."""
+    from tlod.arm import feetech
+
+    _fake_comports(monkeypatch, [_port("/dev/ttyUSB0")])
+    got = feetech.describe_ports()
+    assert got == [{"device": "/dev/ttyUSB0", "description": "",
+                    "manufacturer": "", "serial_number": "", "usb_id": ""}]
+
+
+def test_describe_ports_ignores_ports_that_are_not_candidates(monkeypatch):
+    """Bluetooth and console devices are serial ports and never the arm."""
+    from tlod.arm import feetech
+
+    _fake_comports(monkeypatch, [
+        _port("/dev/ttyACM0", "arm"),
+        _port("/dev/cu.Bluetooth-Incoming-Port", "bluetooth"),
+    ])
+    assert [d["device"] for d in feetech.describe_ports()] == ["/dev/ttyACM0"]
+
+
+def test_servos_answer_is_zero_without_the_sdk(monkeypatch):
+    """No SDK means no way to ask, which is not the same as an answer of
+    'yes'. Autodetect keys off this, so guessing here would pick a port
+    with an Arduino on it and energise nothing while claiming success."""
+    import builtins
+
+    from tlod.arm import feetech
+
+    real = builtins.__import__
+
+    def no_scs(name, *a, **k):
+        if name == "scservo_sdk":
+            raise ImportError("not installed")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_scs)
+    assert feetech.servos_answer("/dev/ttyACM0") == 0

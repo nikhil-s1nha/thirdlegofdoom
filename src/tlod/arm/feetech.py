@@ -536,3 +536,81 @@ def find_ports() -> list[str]:
         if any(k in name for k in ("usbmodem", "ttyACM", "ttyUSB", "usbserial", "COM")):
             out.append(name)
     return sorted(out)
+
+
+def describe_ports() -> list[dict]:
+    """Every candidate port with whatever the USB descriptor says about it.
+
+    `find_ports` returns bare paths, which is enough right up until a
+    second board is plugged in -- and then `['/dev/ttyACM0',
+    '/dev/ttyACM1']` is exactly as much help as no answer at all. The
+    numbers are assigned in enumeration order, so they are not stable
+    across a reboot or a replug either, and last week's ACM0 is not
+    necessarily this week's.
+
+    The descriptor is: the servo adapter and an Arduino identify
+    themselves with different vendor and product ids whatever order they
+    happened to enumerate in.
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    wanted = set(find_ports())
+    out = []
+    for p in list_ports.comports():
+        if str(p.device) not in wanted:
+            continue
+        vid, pid = getattr(p, "vid", None), getattr(p, "pid", None)
+        out.append({
+            "device": str(p.device),
+            "description": (p.description or "").strip(),
+            "manufacturer": (getattr(p, "manufacturer", None) or "").strip(),
+            "serial_number": (getattr(p, "serial_number", None) or "").strip(),
+            "usb_id": f"{vid:04x}:{pid:04x}" if vid and pid else "",
+        })
+    return sorted(out, key=lambda d: d["device"])
+
+
+def servos_answer(port: str, baudrate: int = 1_000_000,
+                  motor_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6)) -> int:
+    """How many servos answer on `port`. 0 for anything that is not the arm.
+
+    Identification by asking rather than by guessing, which is the same
+    move as opening the camera index the config names instead of trusting
+    a number that shifts. A port either has servos behind it or it does
+    not, and one round trip per id settles it.
+
+    Read-only and it energises nothing: `connect()` surveys and *then*
+    configures motors, and this is only the survey. Safe to point at an
+    Arduino -- the sketch sees a few bytes of a protocol it does not parse
+    and drops them. A port already open by something else raises, which is
+    also an answer: not this one.
+    """
+    try:
+        import scservo_sdk as scs
+    except ImportError:
+        return 0
+    handler = None
+    try:
+        handler = scs.PortHandler(port)
+        if not handler.openPort() or not handler.setBaudRate(baudrate):
+            return 0
+        packet = scs.PacketHandler(0)
+        seen = 0
+        for mid in motor_ids:
+            try:
+                _, comm, _ = packet.read1ByteTxRx(handler, mid, ADDR_ERROR_STATUS)
+            except Exception:
+                continue
+            if comm == 0:
+                seen += 1
+        return seen
+    except Exception:
+        return 0
+    finally:
+        try:
+            if handler is not None:
+                handler.closePort()
+        except Exception:
+            pass

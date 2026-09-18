@@ -66,6 +66,9 @@ class Scoreboard:
         self._result = ""
         self._result_round = 0
         self._result_at = 0.0
+        self._flourish = ""
+        self._flourish_count = 0
+        self._flourish_at = 0.0
         self._seen: tuple[int, str] | None = None
 
     # -- state -------------------------------------------------------------
@@ -103,8 +106,21 @@ class Scoreboard:
                 self._result_round = rounds
                 self._result_at = time.perf_counter()
 
+            # The gesture is its own edge. It starts about a second after
+            # the verdict, so keying it off the round number would fire
+            # the sound while the arm is still retracting; the counter the
+            # game bumps when it actually starts performing is the honest
+            # signal, and it also distinguishes two gloats in a row.
+            count = int(getattr(policy, "flourishes", 0) or 0)
+            if count != self._flourish_count:
+                self._flourish_count = count
+                self._flourish = str(getattr(policy, "last_flourish", "") or "")
+                self._flourish_at = time.perf_counter()
+
             age = (time.perf_counter() - self._result_at) if self._result else 0.0
             return {
+                "flourish": self._flourish,
+                "flourish_n": self._flourish_count,
                 "robot": robot,
                 "human": human,
                 "rounds": rounds,
@@ -308,6 +324,35 @@ function slap() {
   tone("sine", 180, 70, 0.5, 0.005, 0.11);
 }
 
+// One noise per gesture, so the performance is audible from wherever the
+// player is actually looking, which is at their own hand. These are
+// deliberately smaller than the verdict sounds: the verdict is the news
+// and the flourish is the robot mugging about it, so a gloat that drowned
+// out the slap would have the emphasis backwards.
+function gesture(name) {
+  if (!wantSound || !audio()) { return; }
+  if (actx.state === "suspended") { actx.resume(); }
+  // Three bites, and the arm is showing off: a rising arpeggio.
+  if (name === "spin") { arp([440, 660, 880], 70, "triangle", 0.13); }
+  // The shimmy is the wrist rolling and the jaw snapping; three clicks.
+  else if (name === "shimmy") { arp([700, 700, 700], 110, "square", 0.09); }
+  else if (name === "wag") { arp([500, 380], 110, "triangle", 0.11); }
+  // Sulking, so both of these fall.
+  else if (name === "nod") { arp([420, 300], 150, "sine", 0.13); }
+  else if (name === "bob") { arp([320, 240], 150, "sine", 0.13); }
+  // The jaw itself: three low clacks rather than a tune.
+  else if (name === "chomp") { arp([160, 150, 140], 150, "square", 0.16); }
+  else if (name === "jig") { arp([620, 780, 620, 780], 60, "square", 0.08); }
+}
+
+function arp(freqs, gap, type, peak) {
+  freqs.forEach(function (f, i) {
+    setTimeout(function () {
+      if (actx) { tone(type, f, f, peak, 0.006, 0.09); }
+    }, i * gap);
+  });
+}
+
 function sound(word) {
   if (!wantSound || !audio()) { return; }
   if (actx.state === "suspended") { actx.resume(); }
@@ -349,7 +394,10 @@ document.addEventListener("keydown", function (e) {
   if (e.key === "s" || e.key === "S") { setSound(!wantSound); }
 });
 
+var seenGesture = null;           // last flourish counter we made a noise for
+
 function apply(d) {
+  applyGesture(d);
   elRobot.textContent = d.robot;
   elHuman.textContent = d.human;
   elRounds.textContent = "round " + d.rounds + (d.running ? "" : "  \\u00b7  paused");
@@ -369,6 +417,15 @@ function apply(d) {
   }
 }
 
+function applyGesture(d) {
+  if (!d.flourish_n) { return; }
+  if (seenGesture === null) { seenGesture = d.flourish_n; return; }
+  if (d.flourish_n !== seenGesture) {
+    seenGesture = d.flourish_n;
+    gesture(d.flourish);
+  }
+}
+
 function poll() {
   fetch("score.json", {cache: "no-store"})
     .then(function (r) { return r.json(); })
@@ -380,6 +437,7 @@ function poll() {
       // when the link comes back still gets its flash.
       document.body.classList.add("stale");
       seen = null;
+      seenGesture = null;
     });
 }
 poll();

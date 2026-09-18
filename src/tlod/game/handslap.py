@@ -310,6 +310,13 @@ class HandSlapGame(StateMachine):
         self.reason: str = ""
         self.strikes = 0
         self.feints = 0
+        # The gesture the arm is performing, and how many it has done.
+        # Kept separate from `last_result` because they are separate
+        # events: the verdict lands when the round is judged, the gesture
+        # a second or so later once the retract has finished, and anything
+        # reacting to the performance wants the second one.
+        self.last_flourish: str = ""
+        self.flourishes = 0
 
     # -- gating ------------------------------------------------------------
     def _hand(self, robot):
@@ -364,14 +371,18 @@ class HandSlapGame(StateMachine):
         self._performed = True
         mood = {"HIT": "gloat", "DODGED": "sulk",
                 "FLINCH": "smug", "HELD": "caught"}.get(self.last_result, "idle")
-        self.run_motion(
-            flourish(mood, rng=self.rng,
-                     duration=self.personality.flourish_duration,
-                     speed=self.personality.flourish_speed,
-                     accel=self.personality.flourish_accel,
-                     jerk=self.personality.flourish_jerk),
-            controller,
-        )
+        gesture = flourish(mood, rng=self.rng,
+                           duration=self.personality.flourish_duration,
+                           speed=self.personality.flourish_speed,
+                           accel=self.personality.flourish_accel,
+                           jerk=self.personality.flourish_jerk)
+        # Named so anything watching can react to the gesture rather than
+        # to the verdict. The two are not the same event: the verdict is
+        # announced the moment the round is judged, and the arm starts
+        # performing a second or so later, once the retract has finished.
+        self.last_flourish = gesture.move_name
+        self.flourishes += 1
+        self.run_motion(gesture, controller)
 
     def _may_strike(self, robot) -> bool:
         if robot.controller.estopped:

@@ -850,6 +850,8 @@ class Flourish(Motion):
     """
 
     name = "flourish"
+    # Which entry of FLOURISHES this is, when it came from `flourish()`.
+    move_name = ""
 
     # How close to the starting configuration counts as back there.
     HOME_EPSILON = 1e-3
@@ -915,8 +917,14 @@ def flourish(mood: str, rng=None, duration: float = 1.2, speed: float = 12.0,
     names = MOODS.get(mood) or MOODS["idle"]
     pick = (rng.choice(len(names)) if rng is not None
             else np.random.randint(len(names)))
-    return Flourish(FLOURISHES[names[int(pick)]], duration=duration, speed=speed,
-                    accel=accel, jerk=jerk)
+    chosen = names[int(pick)]
+    motion = Flourish(FLOURISHES[chosen], duration=duration, speed=speed,
+                      accel=accel, jerk=jerk)
+    # Which one it picked, so a caller can say so. The mood is chosen by
+    # the game and the gesture by this function, so the game cannot
+    # otherwise name what its own arm is about to do.
+    motion.move_name = chosen
+    return motion
 
 
 class Hold(Motion):
