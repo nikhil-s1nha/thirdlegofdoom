@@ -117,6 +117,32 @@ tlod calibrate intrinsics --fisheye --preview 8080
 tlod calibrate extrinsics --marker red --preview 8080
 ```
 
+## Showing the score
+
+`--preview` is for whoever is debugging. The person with their hand on
+the table needs something else: they cannot read a 14 px HUD line in the
+corner of an 8 fps stream while watching an arm move at them.
+
+```bash
+tlod play --real --scoreboard 8090
+```
+
+Open `http://<control board>:8090/` from a laptop or a phone. The score
+is always on screen, and the whole page flashes the verdict as each round
+resolves — red HIT, amber FLINCH, green DODGED, blue HELD — then decays
+back to the score. Colour first, word second: which way the point went is
+readable from across the room before the word is.
+
+Unlike `--preview` this costs nothing worth measuring. There are no
+frames, no JPEG encode and no arm reads: a poll five times a second reads
+three integers and a string off the game object from the HTTP thread, and
+the control loop never sees it. It is fine to leave on during a real
+session, which is the point of it being separate.
+
+It can share a port with `--preview` (`--preview 8090 --scoreboard 8090`
+serves one socket, scoreboard on `/`, annotated stream on `/stream`), or
+take its own.
+
 ## Four smaller views
 
 Bringing the camera up on a headless board produced four diagnostics that
