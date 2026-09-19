@@ -316,15 +316,22 @@ class TestPlayConfig:
         cfg = play_config(Config(), camera=5, real=True)
         assert cfg.arm.backend == "feetech"
 
-    def test_there_is_no_way_to_ask_for_a_torque_sensor(self, monkeypatch):
-        """`--contact` is gone, and a stale invocation must fail loudly.
+    def test_the_only_sensors_on_offer_are_the_two_that_were_measured(self, monkeypatch):
+        """`--contact` offers exactly plane and press, and defaults to plane.
 
-        It offered four ways to judge a round and three were worse in
-        ways already measured, so it was not a choice -- it was a way to
-        run the wrong one by accident, which is what its `proximity`
-        default did for several commits after `height` landed. A script
-        or a shell history carrying `--contact press` should stop rather
-        than quietly do something else.
+        It used to offer four and default to the wrong one, which is not a
+        choice but a way to run the wrong sensor by accident -- so it was
+        removed outright. `press` came back because it was measured to be
+        the one that still separates at full reach, where the geometric
+        sensor's clusters close to a millimetre. The other two never
+        earned a way back in: load during the swing put a rigid book
+        *between* an empty table and a hand, and `Present_Current` moved
+        by one quantisation step across all three.
+
+        So the guarantee is narrower than "there is no choice" but it is
+        still a guarantee: two options, both with numbers behind them, and
+        a stale invocation naming any of the retired three stops loudly
+        rather than quietly doing something else.
         """
         import pytest as _pytest
 
@@ -333,19 +340,28 @@ class TestPlayConfig:
         seen = {}
         monkeypatch.setattr(cli, "cmd_play", lambda args: seen.update(vars(args)) or 0)
         assert cli.main(["play"]) == 0
-        assert "contact" not in seen
+        assert seen["contact"] == "plane", "the cheap sensor has to be the default"
 
-        for stale in ("proximity", "press", "servo", "height"):
+        for good in ("plane", "press"):
+            seen.clear()
+            assert cli.main(["play", "--contact", good]) == 0
+            assert seen["contact"] == good
+
+        for stale in ("proximity", "servo", "height"):
             with _pytest.raises(SystemExit):
                 cli.main(["play", "--contact", stale])
 
-    def test_the_real_arm_is_judged_by_the_encoders(self):
-        """Tier C constructs one sensor, and torque is not it.
+    def test_the_real_arm_is_judged_by_the_encoders_unless_asked_otherwise(self):
+        """Tier C reaches for the encoders by default; load is opt-in.
 
         Reaching the construction for real needs a camera, an arm and a
         calibration, so this reads the wiring instead. Crude, but it is
         the thing that regressed: the sensor was right and the branch
         selecting it was not.
+
+        `ServoPressContactSensor` is allowed here now, and only here --
+        behind an explicit `--contact press`. The other two are not, and
+        that is the part still worth pinning.
         """
         import inspect
 
@@ -353,9 +369,31 @@ class TestPlayConfig:
 
         body = inspect.getsource(cli.cmd_play)
         assert "CollisionPlaneContactSensor(" in body
-        assert "ServoPressContactSensor(" not in body
         assert "ServoLoadContactSensor(" not in body
         assert "SerialContactSensor(" not in body
+        # Reachable, but not without saying so.
+        assert "ServoPressContactSensor(" in body
+        assert 'args.contact == "press"' in body
+
+    def test_either_sensor_can_report_a_round_and_a_session(self):
+        """Both selectable sensors answer the same two questions.
+
+        `cmd_play` prints a line per round and a summary at the end, and
+        both go through whatever sensor is wired up. `ServoPressContactSensor`
+        had neither, so `--contact press` ran a whole session with no
+        per-round numbers and then died on the summary with an
+        AttributeError -- after the arm had been swinging at a hand for
+        sixteen rounds. A sensor that cannot say what it saw is not
+        finished.
+        """
+        from tlod.game.contact import (
+            CollisionPlaneContactSensor, ServoPressContactSensor,
+        )
+
+        for sensor in (CollisionPlaneContactSensor(lambda: 0.0),
+                       ServoPressContactSensor(lambda: None)):
+            assert "no reading" in sensor.report()
+            assert sensor.peak_summary()
 
     def test_the_retired_sensors_are_kept_but_unreachable(self):
         """Kept for their measurements; wired to nothing.
@@ -370,8 +408,7 @@ class TestPlayConfig:
         from tlod import cli
         from tlod.game import contact
 
-        for name in ("ServoLoadContactSensor", "ServoPressContactSensor",
-                     "SerialContactSensor"):
+        for name in ("ServoLoadContactSensor", "SerialContactSensor"):
             cls = getattr(contact, name)
             assert cls.__doc__.lstrip().splitlines()[2].strip().startswith("UNUSED"), (
                 f"{name} is not constructed anywhere; its docstring has to say so")
@@ -953,6 +990,51 @@ class TestCollisionPlaneContact:
         from tlod.game.contact import CollisionPlaneContactSensor
         thin_hand = 0.020
         assert thin_hand - tip_floor > CollisionPlaneContactSensor(lambda: 0.0).margin * 1.5
+
+    def test_a_strike_that_missed_the_hand_says_so(self):
+        """"Reached its floor" is only a dodge if the paddle was over the hand.
+
+        These two rounds are identical in every height the sensor reads --
+        same floor, same stopping point, same shortfall -- and they are
+        different events with opposite fixes. One is a human who pulled
+        their hand away. The other is a strike aimed somewhere the hand
+        was not, which reaches its floor exactly like an unobstructed one
+        and so scores as a dodge.
+
+        This cost a whole session. With the aim carrying a ~24 mm bias,
+        one run hit 7 of 14 and the next hit 0 of 7 with nothing changed
+        in between, and the round lines were indistinguishable -- so it
+        read as the threshold drifting rather than the paddle landing off
+        the hand. The horizontal distance was in hand the whole time.
+        """
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        floor = 0.005
+        landed = np.array([0.22, 0.0, 0.004])      # reached the floor
+
+        # A dodge: the paddle came down where the hand had been.
+        sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0)
+        sensor.arm()
+        for _ in range(3):
+            sensor.poll(pressing=True, tool_xyz=landed,
+                        hand_xyz=np.array([0.23, 0.0, 0.030]))
+        dodge = sensor.report()
+        assert "MISSED" not in dodge
+        assert sensor.misses == 0
+
+        # A miss: same heights, but the hand was 80 mm away.
+        sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0)
+        sensor.arm()
+        for _ in range(3):
+            sensor.poll(pressing=True, tool_xyz=landed,
+                        hand_xyz=np.array([0.30, 0.0, 0.030]))
+        miss = sensor.report()
+        assert "MISSED" in miss, miss
+        assert "80 mm" in miss, miss
+        assert sensor.misses == 1, "a miss is counted once, not once per poll"
+
+        # The heights alone cannot tell them apart -- which is the point.
+        assert dodge.split("[")[0] == miss.split("[")[0]
 
     def test_it_reports_its_numbers_whichever_way_the_round_went(self):
         """A verdict alone is unfalsifiable from outside the arm.

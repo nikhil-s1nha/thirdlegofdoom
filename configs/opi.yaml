@@ -32,20 +32,38 @@ arm:
   # 3-4 mm above the floor. The hand has to be able to stop the paddle,
   # because "stopped short of the floor" is the entire signal.
   strike_torque: 350
-  # 8 mm, not the 17 mm default. The press has to be deep enough that a
-  # hand of any thickness is in the paddle's way, and shallow enough that
-  # the palm does not simply compress out of it -- and 17 mm was on the
-  # wrong side of that. A palm is about 25 mm thick, so aiming 17 mm under
-  # its surface aims very nearly at the table: measured with a hand
-  # deliberately left there, the paddle reached 9 mm against a 13 mm floor
-  # on all twelve strikes of a session, and reaching the floor is what the
-  # sensor calls a dodge.
+  # 15 mm. This number has been at 17, then 8, and both ends were wrong
+  # for opposite reasons -- it is bounded on both sides and the window is
+  # narrow, so the bounds are worth writing down rather than rediscovering.
   #
-  # 8 mm puts the floor at 22 mm under a 30 mm hand plane. An empty strike
-  # still reaches it, a hand blocks a few millimetres above it, and the
-  # band narrowing from 17 mm to 8 pulls the threshold down to its 2 mm
-  # floor -- which is what gives the gap somewhere to live.
-  press_depth: 0.008
+  # Too deep and the paddle presses through the palm to its floor, which
+  # the sensor calls a dodge by definition. Swept in one session against a
+  # hand deliberately left in the way, floor = 30 mm hand plane less the
+  # press:
+  #
+  #     press 25 mm   floor  5 mm   paddle reached 4 mm     every round
+  #     press 20 mm   floor 10 mm   paddle reached 6-9 mm   every round
+  #     press 15 mm   floor 15 mm   paddle held at 19 mm    scored a hit
+  #      press 8 mm   floor 22 mm   paddle held at 24-26    scored hits
+  #
+  # Too shallow and the floor climbs above a thin hand, and then nothing
+  # can stop the paddle short of it. At 8 mm the floor sits at 22 mm and a
+  # 20 mm hand is *above* it -- there is no band left at all, which
+  # `TestCollisionPlaneContact.test_the_floor_leaves_the_measured_table_clear`
+  # objects to in as many words, and which is why that test has been red.
+  #
+  # 15 mm is the middle of the window: the floor lands at 15 mm, clear
+  # below even a thin 20 mm hand, and well above the 5-10 mm where the
+  # palm gets crushed flat. Measured there, an empty strike settles 2-7 mm
+  # *below* the floor and a blocked one held 4 mm above it, against a
+  # threshold of 2.25 mm (15% of the band).
+  #
+  # If hits still score as dodges after this, the next knob is
+  # `strike_torque` *downward*, not press_depth: less push-down authority
+  # means the palm holds the paddle higher and the shortfall grows. The
+  # trend is already in the record -- at 500 the paddle drove through on
+  # every strike, at 350 the same hand held it 3-4 mm up.
+  press_depth: 0.015
   # The droop no sensor here can see, fitted to ruler readings. With the
   # encoder-side sag already corrected -- forward kinematics reporting
   # 67-69 mm against a commanded 69 -- a ruler on the paddle read:
