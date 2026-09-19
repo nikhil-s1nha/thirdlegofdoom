@@ -23,24 +23,29 @@ arm:
   calibration: calib/mine.json
   servo_accel: 35.0
   torque_limit: 800
-  # 500, not the 350 default, and this is the number that makes play at
-  # full reach work at all.
+  # Back to 350. The 500 was mine, on a hypothesis this rig had already
+  # disproved: an A/B at 350 and 500 moved neither contact cluster, and
+  # peak load never passed 0.27 against either ceiling, so torque was
+  # never the constraint. What it did do is press harder -- at 500 the
+  # paddle drove through a hand to its floor on all twelve strikes of a
+  # session, so every hit scored as a dodge. At 350 the same hand held it
+  # 3-4 mm above the floor. The hand has to be able to stop the paddle,
+  # because "stopped short of the floor" is the entire signal.
+  strike_torque: 350
+  # 8 mm, not the 17 mm default. The press has to be deep enough that a
+  # hand of any thickness is in the paddle's way, and shallow enough that
+  # the palm does not simply compress out of it -- and 17 mm was on the
+  # wrong side of that. A palm is about 25 mm thick, so aiming 17 mm under
+  # its surface aims very nearly at the table: measured with a hand
+  # deliberately left there, the paddle reached 9 mm against a 13 mm floor
+  # on all twelve strikes of a session, and reaching the floor is what the
+  # sensor calls a dodge.
   #
-  # Measured stopping heights of the paddle: at 250 mm, 11 mm on an empty
-  # table and 20-23 mm on a hand -- a 9 mm signal, easy to threshold. At
-  # 400 mm the empty table only gets it to 13-15 mm while a hand still
-  # blocks at 16-23, the clusters overlap, and hit/dodge is a coin flip.
-  # The geometry is identical between those two; what differs is that near
-  # full extension most of the torque budget goes on holding the arm up,
-  # leaving little to push down with.
-  #
-  # So the fix for "it misreads at range" is authority, not thresholds.
-  # 500 of 1000 still yields on contact -- the servos cannot exceed it
-  # however deep they are asked to go -- and the measured lean at 350
-  # against a rigid book was 0.038 of rated torque, so this is firmer but
-  # nowhere near rigid. If a hit ever feels hard, this is the number to
-  # lower, and hit/dodge wants re-measuring if you do.
-  strike_torque: 500
+  # 8 mm puts the floor at 22 mm under a 30 mm hand plane. An empty strike
+  # still reaches it, a hand blocks a few millimetres above it, and the
+  # band narrowing from 17 mm to 8 pulls the threshold down to its 2 mm
+  # floor -- which is what gives the gap somewhere to live.
+  press_depth: 0.008
   # The droop no sensor here can see, fitted to ruler readings. With the
   # encoder-side sag already corrected -- forward kinematics reporting
   # 67-69 mm against a commanded 69 -- a ruler on the paddle read:
@@ -59,7 +64,13 @@ arm:
   # Re-measure with a ruler if the payload changes. See
   # ArmController.compensate.
   flex_gain: 0.102
-  flex_offset: -0.0074
+  # -0.0034, four millimetres up from the fitted -0.0074. The slope was
+  # right and the constant was not: measured after the fit, a commanded
+  # 69 mm landed at 65 and a commanded 13 mm landed at 9. Same 4 mm at
+  # both ends of the stroke, so it is a constant rather than a second
+  # term in the height -- which also says the radius-only model holds at
+  # the floor as well as at the hover, which was not obvious.
+  flex_offset: -0.0034
 
 safety:
   max_speed: 3.5
