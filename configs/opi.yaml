@@ -37,11 +37,12 @@ arm:
   # 10 mm, not the 17 mm default. That default was set when every height
   # was measured to the tool point, so it was really "17 mm plus a
   # paddle" -- 86 mm below the hand, through the table. Now that
-  # `tip_offset` exists, 17 mm would press 17 mm into a palm that is only
-  # about 25 mm thick, and squashing it flat is what closed the gap
-  # between the hit and dodge clusters. 10 mm is enough press to be
-  # unambiguous and leaves the palm a palm.
-  press_depth: 0.025
+  # `tip_offset` exists it means what it says, and 18 mm puts the paddle
+  # 12 mm above the table -- agreeing exactly with `safety.min_height`, so
+  # neither clamps the other. Deeper presses harder into the palm and
+  # risks the table; shallower and a compressing palm reaches the floor,
+  # which reads as a dodge.
+  press_depth: 0.018
 
 safety:
   max_speed: 3.5
@@ -86,12 +87,20 @@ safety:
   # up by 2 mm relative to the world: the table is now at model z = +2 mm
   # rather than 0. Five millimetres of actual air is therefore 7 mm here.
   # Leaving it at 0.005 would have put the clamp 3 mm inside the table.
-  # 0.035 = the 30 mm paddle plus 5 mm of air. This is a *tool point*
-  # limit, so at 0.007 it was permitting the tip 23 mm below the table --
-  # which is exactly what `move --real ... 0.020` did when it drove the
-  # gripper into the wood. The guard was never wrong about its own number;
-  # it was guarding the wrong end of the tool.
-  min_height: 0.035
+  # 0.042 = the 30 mm paddle plus 12 mm of air, not 5. Five was not
+  # enough: at a commanded floor of 35 mm the paddle still hit the table,
+  # because the arm droops a few millimetres more on the way down than the
+  # encoders report and FK cannot see it. The clearance has to cover that
+  # droop, and 5 mm did not.
+  #
+  # This is the number that actually sets the floor -- `max(hand +
+  # tip_offset - press_depth, min_height)` -- so `press_depth` below is
+  # chosen to agree with it rather than to fight it. This is a *tool point*
+  # It is a *tool point* limit, so at 0.007 it was permitting the tip
+  # 23 mm below the table -- which is exactly what `move --real ... 0.020`
+  # did when it drove the gripper into the wood. The guard was never wrong
+  # about its own number; it was guarding the wrong end of the tool.
+  min_height: 0.042
 
 vision:
   num_hands: 1
