@@ -418,12 +418,66 @@ class ArmController:
                 return
             time.sleep(max(0.0, period - (time.perf_counter() - t0 - elapsed)))
 
-    def goto_pose(self, target: Pose, duration: float = 1.5, *, position_only: bool = True) -> bool:
+    # How many times `goto_pose` re-aims at a target it has undershot, and
+    # how close is close enough to stop.
+    #
+    # The servos are proportional position controllers, so under a constant
+    # load they settle where their restoring torque balances gravity --
+    # a steady-state offset, not a tracking failure, and one that grows
+    # with reach because the gravitational torque on the shoulder does.
+    # The encoders see it: FK reports the drooped height, not the
+    # commanded one.
+    #
+    # It lands almost entirely in z. For an arm stretched out roughly
+    # horizontally, an angular droop of `d` at the shoulder drops the tool
+    # by about L*d -- first order in the reach -- and moves it sideways by
+    # about L*d^2, which vanishes. Measured on this rig at a commanded
+    # z of 69 mm: 67 mm achieved at (0.20, 0.10), 52 mm at (0.40, 0.10),
+    # 43 mm at (0.36, 0.165). Same command, 24 mm of spread, and x and y
+    # within a few mm throughout.
+    #
+    # So rather than model it, close the loop: move, read where the arm
+    # actually got to, and re-aim by the difference. This converges on the
+    # right pose whatever the load, the reach or the payload, because it
+    # predicts nothing. Two passes take 26 mm to a couple of mm.
+    REAIM_PASSES: int = 2
+    REAIM_TOLERANCE: float = 0.003     # metres; stop once inside this
+
+    def goto_pose(self, target: Pose, duration: float = 1.5, *, position_only: bool = True,
+                  reaim: bool | None = None) -> bool:
+        """Drive the tool to `target`, re-aiming at what the encoders report.
+
+        `reaim=False` for a caller that wants one open-loop shot -- a
+        ballistic strike, where the point is that it is fast and a second
+        pass would be a second, slower descent.
+        """
         result, _, _ = self.solve(target, position_only=position_only)
         if not result.ok:
             log.warning("goto_pose: IK failed, %.1f mm off", result.pos_error * 1e3)
             return False
         self.goto_joints(result.q, duration)
+
+        if reaim is False or self.REAIM_PASSES <= 0:
+            return True
+
+        wanted = target.xyz()
+        for _ in range(self.REAIM_PASSES):
+            error = wanted - self.pose().xyz()
+            if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
+                break
+            # Aim past the target by however far it fell short. Solving for
+            # the corrected point rather than nudging joints keeps the
+            # safety clamp and the IK branch choice in the loop.
+            aim = Pose(*(wanted + error))
+            again, _, _ = self.solve(aim, position_only=position_only)
+            if not again.ok:
+                break
+            # Short, because it is a small correction from a standstill.
+            self.goto_joints(again.q, max(duration * 0.35, 0.25))
+
+        left = float(np.linalg.norm(wanted - self.pose().xyz()))
+        if left > self.REAIM_TOLERANCE:
+            log.info("goto_pose: %.1f mm off after re-aiming", left * 1e3)
         return True
 
     def park(self, duration: float = 2.0) -> None:
