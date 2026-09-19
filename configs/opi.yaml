@@ -23,12 +23,17 @@ arm:
   calibration: calib/mine.json
   servo_accel: 35.0
   torque_limit: 800
-  # Measured: stepping `move --real` down at the play position, the paddle
-  # tip touches the table when FK reports the tool point at 69 mm. So the
-  # paddle hangs 69 mm below the frame every height in this file is
-  # written in, and until now nothing knew that. See
-  # StrikeLimits.tip_offset for what it was costing.
-  tip_offset: 0.069
+  # Measured, and measured the second time correctly. 69 mm was the
+  # *commanded* height at which the tip touched, and this arm sags 30-34
+  # mm at the play radius, so the tool was really at ~30 mm when the
+  # paddle reached the table. Cross-checks: FK reporting 59 mm has the tip
+  # 30 mm off the table by ruler, and the hover -- FK 59, tip 30 -- grazing
+  # a 28 mm palm is what a 30 mm offset predicts exactly.
+  #
+  # Commanded and achieved are not the same number anywhere on this rig,
+  # and the difference is the whole reason the first attempt was 39 mm
+  # out. See StrikeLimits.tip_offset.
+  tip_offset: 0.030
   # 10 mm, not the 17 mm default. That default was set when every height
   # was measured to the tool point, so it was really "17 mm plus a
   # paddle" -- 86 mm below the hand, through the table. Now that
@@ -81,12 +86,12 @@ safety:
   # up by 2 mm relative to the world: the table is now at model z = +2 mm
   # rather than 0. Five millimetres of actual air is therefore 7 mm here.
   # Leaving it at 0.005 would have put the clamp 3 mm inside the table.
-  # 0.074 = the 69 mm paddle plus 5 mm of air. This is a *tool point*
-  # limit, so at 0.007 it was permitting the tip to go 62 mm below the
-  # table -- which is exactly what `move --real ... 0.020` did when it
-  # drove the gripper into the wood. The guard was never wrong about its
-  # own number; it was guarding the wrong end of the tool.
-  min_height: 0.074
+  # 0.035 = the 30 mm paddle plus 5 mm of air. This is a *tool point*
+  # limit, so at 0.007 it was permitting the tip 23 mm below the table --
+  # which is exactly what `move --real ... 0.020` did when it drove the
+  # gripper into the wood. The guard was never wrong about its own number;
+  # it was guarding the wrong end of the tool.
+  min_height: 0.035
 
 vision:
   num_hands: 1
