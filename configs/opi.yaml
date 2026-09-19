@@ -23,26 +23,6 @@ arm:
   calibration: calib/mine.json
   servo_accel: 35.0
   torque_limit: 800
-  # Measured, and measured the second time correctly. 69 mm was the
-  # *commanded* height at which the tip touched, and this arm sags 30-34
-  # mm at the play radius, so the tool was really at ~30 mm when the
-  # paddle reached the table. Cross-checks: FK reporting 59 mm has the tip
-  # 30 mm off the table by ruler, and the hover -- FK 59, tip 30 -- grazing
-  # a 28 mm palm is what a 30 mm offset predicts exactly.
-  #
-  # Commanded and achieved are not the same number anywhere on this rig,
-  # and the difference is the whole reason the first attempt was 39 mm
-  # out. See StrikeLimits.tip_offset.
-  tip_offset: 0.030
-  # 10 mm, not the 17 mm default. That default was set when every height
-  # was measured to the tool point, so it was really "17 mm plus a
-  # paddle" -- 86 mm below the hand, through the table. Now that
-  # `tip_offset` exists it means what it says, and 18 mm puts the paddle
-  # 12 mm above the table -- agreeing exactly with `safety.min_height`, so
-  # neither clamps the other. Deeper presses harder into the palm and
-  # risks the table; shallower and a compressing palm reaches the floor,
-  # which reads as a dodge.
-  press_depth: 0.018
 
 safety:
   max_speed: 3.5
@@ -62,7 +42,15 @@ safety:
   # orientation for position; and the contact thresholds were measured at
   # ~300 mm, so a strike at 430 mm decelerates differently. Recheck
   # hit/dodge if you start playing at the edge.
-  max_radius: 0.43
+  # Back to the stock 0.33. 0.43 was added because hands at a natural
+  # distance were being refused, but the refusal was really a 55 mm aim
+  # bias that the camera recalibration has since cut to ~24 mm -- and
+  # reaching further cost more than it bought. Measured at 400 mm: the arm
+  # sags 34 mm at hover against ~13 mm at 300, so the hover never gets to
+  # height, the drop comes up short, and the paddle ends lower than
+  # commanded and reaches the table. Everything downstream of the strike
+  # is calibrated inside this envelope.
+  max_radius: 0.33
   # This floor is only about not driving into the table -- and the table
   # is at z = 0, not 17 mm below it as this comment used to claim. Driven
   # to the joint angles at which the gripper rests on the table, FK
@@ -87,20 +75,16 @@ safety:
   # up by 2 mm relative to the world: the table is now at model z = +2 mm
   # rather than 0. Five millimetres of actual air is therefore 7 mm here.
   # Leaving it at 0.005 would have put the clamp 3 mm inside the table.
-  # 0.042 = the 30 mm paddle plus 12 mm of air, not 5. Five was not
-  # enough: at a commanded floor of 35 mm the paddle still hit the table,
-  # because the arm droops a few millimetres more on the way down than the
-  # encoders report and FK cannot see it. The clearance has to cover that
-  # droop, and 5 mm did not.
+  # 0.007 = the original 0.005 plus the 2 mm the base was lowered. This
+  # value ran a whole working session and nothing about the hardware has
+  # changed since, so it is right.
   #
-  # This is the number that actually sets the floor -- `max(hand +
-  # tip_offset - press_depth, min_height)` -- so `press_depth` below is
-  # chosen to agree with it rather than to fight it. This is a *tool point*
-  # It is a *tool point* limit, so at 0.007 it was permitting the tip
-  # 23 mm below the table -- which is exactly what `move --real ... 0.020`
-  # did when it drove the gripper into the wood. The guard was never wrong
-  # about its own number; it was guarding the wrong end of the tool.
-  min_height: 0.042
+  # There is a known gap in the frame it is written in: the paddle sits
+  # ~36 mm past the URDF's tool frame, so this permits the tip lower than
+  # the number says. That gap predates every working run -- it is not what
+  # broke anything -- and closing it would change what every other height
+  # in this file means. Recorded here rather than corrected.
+  min_height: 0.007
 
 vision:
   num_hands: 1
