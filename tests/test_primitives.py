@@ -505,3 +505,66 @@ def test_moods_pick_from_their_own_repertoire():
     # An unknown mood falls back rather than raising: a missing reaction
     # should cost a joke, not a round.
     assert flourish("triumphant-despair", rng=rng) is not None
+
+
+def test_tip_offset_puts_the_paddle_where_the_geometry_means_it(controller):
+    """The offset between the tool point and the end of the tool.
+
+    Every height in this system is written in tool-point coordinates and
+    every one of them is about the paddle, so a tool with any length at
+    all breaks the equivalence. Measured on the rig: the paddle hangs
+    69 mm below the tool point, so a floor of 13 mm was commanding the tip
+    56 mm underground. Every strike bottomed out on the table, and the
+    encoders -- which read the servo shaft, not the flexing link -- went on
+    reporting that it had stopped where it was asked to.
+    """
+    limits = StrikeLimits(tip_offset=0.069, press_depth=0.010)
+    hand = np.array([0.24, 0.0, 0.030])
+
+    # Hover clearance is for the tip, so the tool sits a tip higher again.
+    drive(Hover(hand, limits, duration=0.4), controller)
+    tool_z = controller.pose().z
+    assert abs((tool_z - limits.tip_offset) - (hand[2] + limits.hover_height)) < 4e-3, (
+        f"tip hovers at {(tool_z - limits.tip_offset) * 1e3:.0f} mm, wanted "
+        f"{(hand[2] + limits.hover_height) * 1e3:.0f}")
+
+    # And the floor puts the tip press_depth below the hand, not below the
+    # table. This is the number that was 56 mm underground.
+    strike = Strike(hand, limits, duration=0.2)
+    strike.start(controller)
+    lowest = 1e9
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < 3.0:
+        done = strike.step(controller, 0.005)
+        lowest = min(lowest, controller.pose().z)
+        if done:
+            break
+        time.sleep(0.005)
+    tip_floor = lowest - limits.tip_offset
+    assert tip_floor > 0.0, f"tip driven {abs(tip_floor) * 1e3:.0f} mm below the table"
+    want = hand[2] - limits.press_depth
+    assert abs(tip_floor - want) < 3e-3, (
+        f"tip floor {tip_floor * 1e3:.1f} mm, wanted {want * 1e3:.1f}")
+
+
+def test_a_bare_gripper_is_unaffected_by_the_offset(controller):
+    """tip_offset defaults to 0, so nothing without a paddle changes."""
+    plain = StrikeLimits()
+    assert plain.tip_offset == 0.0
+    hand = np.array([0.24, 0.0, 0.030])
+    drive(Hover(hand, plain, duration=0.4), controller)
+    assert abs(controller.pose().z - (hand[2] + plain.hover_height)) < 4e-3
+
+
+def test_min_height_has_to_cover_the_tool_it_is_guarding():
+    """`safety.min_height` is a tool-point floor, so a tool that hangs
+    below the tool point needs it raised by that much or the guard permits
+    the tip through the table -- which is what drove the gripper into the
+    wood at a commanded 20 mm."""
+    from tlod.config import Config
+
+    cfg = Config.load("configs/opi.yaml")
+    tip = cfg.arm.tip_offset
+    assert cfg.safety.min_height >= tip, (
+        f"min_height {cfg.safety.min_height * 1e3:.0f} mm allows the tip "
+        f"{(tip - cfg.safety.min_height) * 1e3:.0f} mm below the table")
