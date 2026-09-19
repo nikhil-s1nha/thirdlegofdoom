@@ -365,13 +365,9 @@ class GoToPose(GoTo):
         self.pose = pose
         self.ok = False
         self._reaims = 0
-        self._aimed = pose
 
     def _on_start(self, controller) -> None:
-        # Compensated once, here, and the re-aiming below then works in
-        # that frame -- see `ArmController.compensate`.
-        self._aimed = controller.compensate(self.pose)
-        result, _, _ = controller.solve(self._aimed, position_only=True, compensate=False)
+        result, _, _ = controller.solve(self.pose, position_only=True)
         self.ok = result.ok
         self.q_target = result.q
         super()._on_start(controller)
@@ -398,14 +394,13 @@ class GoToPose(GoTo):
         done = super().step(controller, dt)
         if not done or self._reaims >= self.REAIM_PASSES:
             return done
-        wanted = self._aimed.xyz()
+        wanted = self.pose.xyz()
         error = wanted - controller.pose().xyz()
         if float(np.linalg.norm(error)) <= self.REAIM_TOLERANCE:
             return True
         # Aim past the target by however far it fell short, then let the
         # base class run another min-jerk to it from here.
-        result, _, _ = controller.solve(Pose(*(wanted + error)), position_only=True,
-                                        compensate=False)
+        result, _, _ = controller.solve(Pose(*(wanted + error)), position_only=True)
         if not result.ok:
             return True
         self._reaims += 1
@@ -500,7 +495,10 @@ class Strike(Motion):
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
-        start_z = model.tool_pose(self._q0[:5]).z
+        # Real frame: see the note in `Feint._on_start`. With this read
+        # from forward kinematics instead, the drop clamped against a
+        # phantom 33 mm and the paddle stopped 25 mm above its floor.
+        start_z = controller.uncompensate(model.tool_pose(self._q0[:5])).z
         # `press_depth` below the estimated hand surface, so the paddle is
         # still trying to descend when it meets the hand and the servos
         # have something to spend torque on. The guard against a wrong
@@ -720,7 +718,12 @@ class Feint(Motion):
 
     def _on_start(self, controller) -> None:
         self._q0 = controller.commanded.copy()
-        start_z = model.tool_pose(self._q0[:5]).z
+        # Real frame, not the kinematic one. `target` comes from the
+        # vision pipeline and `solve` takes real coordinates, so a start
+        # height read straight out of forward kinematics is a different
+        # frame by however much the arm is flexing -- 33 mm at full reach.
+        # Mixing them made this motion travel three millimetres.
+        start_z = controller.uncompensate(model.tool_pose(self._q0[:5])).z
         drop = self.limits.clamp_drop(start_z - self.target[2]) * self.fraction
         goal = Pose(float(self.target[0]), float(self.target[1]), float(start_z - drop))
         result, _, _ = controller.solve(goal, position_only=True)
