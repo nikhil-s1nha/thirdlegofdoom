@@ -528,16 +528,48 @@ def cmd_play(args) -> int:
             """
             return float(model.tool_pose(app.controller.commanded[:5]).z)
 
-        contact = CollisionPlaneContactSensor(
-            _floor,
-            **({} if args.contact_threshold is None
-               else {"margin": args.contact_threshold}),
-            **({} if args.contact_band is None
-               else {"band_fraction": args.contact_band}))
-        source = (f"collision plane, {contact.band_fraction:.0%} of the way from the "
-                  f"commanded floor up to the hand (at least "
-                  f"{contact.margin * 1e3:.0f} mm), after "
-                  f"{contact.settle * 1000:.0f} ms pressing")
+        if args.contact == "press":
+            # Servo load, held still at the bottom. The geometric sensor
+            # asks how far short the paddle stopped, and that question
+            # stops having an answer at range: measured at 400 mm, an
+            # empty table settles +1..+2 mm short and a hand +3..+5, which
+            # no threshold separates. At 250 mm the same test gives 11 mm
+            # against 20-23 -- the signal is there, it just collapses as
+            # the arm extends, and raising the strike torque from 350 to
+            # 500 changed neither cluster (the load never exceeded 0.27 of
+            # either ceiling, so torque was never the constraint).
+            #
+            # What does still separate at 400 mm is what the arm is
+            # pushing against once stopped: held load read 0.008 empty
+            # against 0.040-0.052 on a hand, five times over, against this
+            # sensor's 0.02 threshold. That matches the 0.001 / 0.038 this
+            # was originally measured at.
+            #
+            # It is not the default because it costs what its own
+            # docstring says: ~300 ms of six servos stalled at their
+            # torque limit per strike, and sustained stall current is what
+            # a 5 A supply has least of. Slower rounds, and worth watching
+            # `tlod power` if the bus starts dropping transactions.
+            from tlod.game.contact import ServoPressContactSensor
+
+            contact = ServoPressContactSensor(
+                lambda: app.controller.backend.read(),
+                **({} if args.contact_threshold is None
+                   else {"threshold": args.contact_threshold}))
+            source = (f"servo load held at the bottom, over "
+                      f"{contact.threshold:.3f} of rated torque after "
+                      f"{contact.settle * 1000:.0f} ms pressing")
+        else:
+            contact = CollisionPlaneContactSensor(
+                _floor,
+                **({} if args.contact_threshold is None
+                   else {"margin": args.contact_threshold}),
+                **({} if args.contact_band is None
+                   else {"band_fraction": args.contact_band}))
+            source = (f"collision plane, {contact.band_fraction:.0%} of the way from the "
+                      f"commanded floor up to the hand (at least "
+                      f"{contact.margin * 1e3:.0f} mm), after "
+                      f"{contact.settle * 1000:.0f} ms pressing")
         _size_hold_to(limits, contact)
         game = HandSlapGame(args.difficulty, limits=limits,
                             personality=Personality(enabled=not args.deadpan),
@@ -2206,6 +2238,15 @@ def main(argv: list[str] | None = None) -> int:
     # is a way to run the wrong one by accident -- which is exactly what
     # its `proximity` default did for several commits after `height`
     # landed. The encoders answer it directly, so they answer it.
+    s.add_argument("--contact", choices=("plane", "press"), default="plane",
+                   help="which contact sensor: 'plane' asks how far short of "
+                        "its floor the paddle stopped, read from the encoders; "
+                        "'press' asks what torque it is still spending once "
+                        "stopped. plane is cheaper and is the default, but its "
+                        "signal collapses as the arm extends -- measured, an "
+                        "empty table and a hand are 1 mm apart at 400 mm reach "
+                        "and 9-12 mm apart at 250. press costs ~300 ms of stall "
+                        "per strike and more current")
     s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
                    help="--real only: the absolute floor, in metres, under "
