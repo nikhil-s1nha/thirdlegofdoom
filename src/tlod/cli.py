@@ -28,6 +28,7 @@ import numpy as np
 # load OpenCV. cmd_calibrate checks the two agree.
 MARKER_COLOURS = ("green", "blue", "yellow", "magenta", "red")
 
+from tlod.eyes import EMOTIONS as EYE_EMOTIONS
 from tlod.leg import COMMANDS as LEG_COMMANDS
 from tlod.config import Config
 
@@ -2125,6 +2126,10 @@ def cmd_leg(args) -> int:
 
     link = LegLink(
         port=args.port or cfg.leg.port,
+        # The eyes board would be rejected anyway -- it never sends `<3` --
+        # but only after the full probe timeout, and there is no reason to
+        # open a port that belongs to something else at all.
+        exclude=tuple(x for x in (cfg.arm.port, cfg.eyes.port) if x),
         baudrate=cfg.leg.baudrate,
         ack_timeout=cfg.leg.ack_timeout,
         boot_timeout=cfg.leg.boot_timeout,
@@ -2211,6 +2216,103 @@ def _leg_monitor(link, lines: list, duration: float) -> int:
         return 1
     if worst > HEARTBEAT_TIMEOUT:
         print("  a gap that long means the sketch was blocked or the link dropped")
+    return 0
+
+
+def cmd_eyes(args) -> int:
+    """Drive the NeoPixel eyes, and check they are actually being driven.
+
+    `selftest` is the one that answers "are the LEDs working": it forces
+    mood changes the board has to announce, then sends a point and checks
+    the distance it computes against the same sqrt done here.
+    """
+    from tlod.eyes import EyesError, EyesLink, emotion_for
+
+    cfg = Config.load(args.config)
+    port = args.port or cfg.eyes.port
+    if not port:
+        from tlod.eyes import find_eyes_port
+        print("  no eyes.port set; probing for a board that answers `?` ...")
+        port = find_eyes_port(exclude=tuple(x for x in (cfg.arm.port, cfg.leg.port) if x))
+        if not port:
+            print("  nothing answered. `tlod ports` lists what is plugged in.")
+            return 1
+
+    lines: list[tuple[str, float]] = []
+    link = EyesLink(
+        port=port, baudrate=cfg.eyes.baudrate, scale=args.scale or cfg.eyes.scale,
+        reply_timeout=cfg.eyes.reply_timeout, precision=cfg.eyes.precision,
+        on_line=(lambda ln, t: lines.append((ln, t))) if args.action == "monitor" else None,
+    )
+    try:
+        link.connect(verify=args.action != "monitor")
+    except EyesError as e:
+        print(f"  {e}")
+        return 1
+    print(f"  eyes on {link.port} at {link.baudrate} baud, scale x{link.scale:g}")
+
+    try:
+        if args.action == "selftest":
+            return _eyes_selftest(link)
+        if args.action == "monitor":
+            return _eyes_monitor(link, lines, args.duration)
+        if args.action == "point":
+            reply = link.send_point(*args.xyz)
+            agree = "" if reply.agrees else "   <-- the numbers did not survive the trip"
+            print(f"  sent {tuple(args.xyz)} m x{link.scale:g} -> board says "
+                  f"{reply.distance:.2f}, expected {reply.expected:.2f}{agree}")
+            print(f"  mood: {reply.emotion}"
+                  + ("  (announced)" if reply.changed else "  (unchanged)")
+                  + f"; this distance should give {emotion_for(reply.expected)}")
+            return 0 if reply.agrees else 1
+        ack = link.set_emotion(args.action)
+        print(f"  {args.action}: " + ("announced" if ack.changed else
+              "no announcement -- it was already there, or it is not listening "
+              "(`tlod eyes selftest` tells them apart)"))
+    except EyesError as e:
+        print(f"  {e}")
+        return 1
+    finally:
+        link.disconnect()
+    return 0
+
+
+def _eyes_selftest(link) -> int:
+    print("  proving the pixels are driven, not just the cable connected:\n")
+    results = link.selftest()
+    for step, ok, note in results:
+        print(f"  [{'PASS' if ok else 'FAIL'}]  {step:20s} {note}")
+    failed = [r for r in results if not r[1]]
+    print()
+    if failed:
+        print(f"  {len(failed)} of {len(results)} checks failed")
+        return 1
+    print("  the eyes are alive: they answer, they change mood, and they "
+          "read the numbers they are sent")
+    return 0
+
+
+def _eyes_monitor(link, lines: list, duration: float) -> int:
+    """Watch what the board says, writing nothing.
+
+    Worth remembering that this board never speaks first, so an empty
+    monitor is the expected result unless something else is talking to it.
+    """
+    print(f"  listening {duration:g}s, writing nothing. Ctrl-C to stop.\n")
+    start = time.perf_counter()
+    seen = 0
+    try:
+        while time.perf_counter() - start < duration:
+            time.sleep(0.05)
+            while seen < len(lines):
+                line, t = lines[seen]
+                seen += 1
+                print(f"  {t - start:6.2f}s  {line}")
+    except KeyboardInterrupt:
+        print()
+    if not seen:
+        print("  nothing. Expected, unless something else is sending it points --\n"
+              "  this sketch only replies. Use `tlod eyes selftest` to ask it a question.")
     return 0
 
 
@@ -2560,6 +2662,18 @@ def main(argv: list[str] | None = None) -> int:
                         "overrides leg.strike_dwell")
     s.add_argument("--duration", type=float, default=10.0, help="seconds to `monitor` for")
     s.set_defaults(func=cmd_leg)
+
+    s = sub.add_parser("eyes", help="drive the NeoPixel eyes, or prove they work")
+    s.add_argument("action", choices=[*EYE_EMOTIONS, "point", "selftest", "monitor"],
+                   help="set a mood, send an x,y,z point, prove the pixels are "
+                        "driven, or just listen")
+    s.add_argument("xyz", nargs="*", type=float, default=[0.25, 0.0, 0.10],
+                   metavar="X Y Z", help="metres, for `point`")
+    s.add_argument("--port", default=None, help="serial port; overrides eyes.port")
+    s.add_argument("--scale", type=float, default=None,
+                   help="multiplies metres before sending; overrides eyes.scale")
+    s.add_argument("--duration", type=float, default=10.0, help="seconds to `monitor` for")
+    s.set_defaults(func=cmd_eyes)
 
     s = sub.add_parser("config", help="write the effective config to a file")
     s.add_argument("-o", "--output", default="configs/effective.yaml")

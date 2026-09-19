@@ -35,6 +35,7 @@ class ArmConfig:
     # express. See tlod.arm.feetech.acc_counts.
     servo_accel: float = 9.2
     torque_limit: int = 800
+    # How far below the hand surface the paddle tip is commanded, metres.
     # Paddle tip below the FK tool point, metres. See
     # StrikeLimits.tip_offset -- 0 for a bare gripper.
     tip_offset: float = 0.0
@@ -140,6 +141,25 @@ class LegConfig:
 
 
 @dataclass(slots=True)
+class EyesConfig:
+    """Two NeoPixel rings on a XIAO SAMD21. See tlod.eyes."""
+
+    enabled: bool = False
+    port: str = ""                    # no autodetect by default: probing writes
+    baudrate: int = 9600
+    # Metres -> centimetres. The sketch's thresholds are 20/60, and this
+    # rig's coordinates are 0.08-0.40 m, so unscaled metres are always
+    # "near" and the eyes never leave angry.
+    scale: float = 100.0
+    # loop() ends in delay(20), so it can only read between frames.
+    reply_timeout: float = 0.5
+    # Updates per second. Above ~50 the board cannot keep up and the
+    # backlog grows without bound.
+    rate: float = 20.0
+    precision: int = 1                # decimals in the x,y,z line
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     control_hz: float = 100.0
     perception_max_age: float = 0.25
@@ -156,6 +176,7 @@ class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     leg: LegConfig = field(default_factory=LegConfig)
+    eyes: EyesConfig = field(default_factory=EyesConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     @classmethod
@@ -174,6 +195,7 @@ class Config:
             "camera": CameraConfig,
             "vision": VisionConfig,
             "leg": LegConfig,
+            "eyes": EyesConfig,
             "runtime": RuntimeConfig,
         }
         kwargs = {}
