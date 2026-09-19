@@ -41,6 +41,25 @@ arm:
   # nowhere near rigid. If a hit ever feels hard, this is the number to
   # lower, and hit/dodge wants re-measuring if you do.
   strike_torque: 500
+  # The droop no sensor here can see, fitted to ruler readings. With the
+  # encoder-side sag already corrected -- forward kinematics reporting
+  # 67-69 mm against a commanded 69 -- a ruler on the paddle read:
+  #
+  #     radius 0.224 m   52 mm   gap 15.4 mm
+  #     radius 0.316 m   44 mm   gap 25.0 mm
+  #     radius 0.396 m   36 mm   gap 33.0 mm
+  #
+  # Consecutive slopes 103.7 and 100.3 mm per metre, so it is a straight
+  # line in the reach -- which is what a bending beam does, deflection
+  # going with the moment arm. These two fit all three points inside
+  # 0.3 mm.
+  #
+  # Feed-forward, not a loop: the thing being corrected is invisible to
+  # every sensor on the machine, so there is nothing to close a loop on.
+  # Re-measure with a ruler if the payload changes. See
+  # ArmController.compensate.
+  flex_gain: 0.102
+  flex_offset: -0.0074
 
 safety:
   max_speed: 3.5
