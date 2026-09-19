@@ -38,6 +38,12 @@ class ArmConfig:
     # Paddle tip below the FK tool point, metres. See
     # StrikeLimits.tip_offset -- 0 for a bare gripper.
     tip_offset: float = 0.0
+    # Torque ceiling *during a strike*, of 1000. Separate from
+    # `torque_limit`, which is the normal one. Configurable because it is
+    # what decides whether the paddle can reach its floor at full reach:
+    # near full extension most of the budget goes on holding the arm up.
+    # See StrikeLimits.torque_limit.
+    strike_torque: int = 350
     # How far below the hand surface the paddle tip is commanded, metres.
     # Configurable because `tip_offset` changed what it means: it used to
     # be measured to the tool point and so was really 17 mm *plus a

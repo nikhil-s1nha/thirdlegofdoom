@@ -145,7 +145,18 @@ class StrikeLimits:
     # the real height of a palm because it is also the plane the camera
     # intersects its rays with.
     tip_offset: float = 0.0
-    torque_limit: int = 350             # of 1000, while striking; yields on contact
+    # Of 1000, while striking; yields on contact. This is what bounds the
+    # force, and it is also what decides whether the paddle can reach its
+    # commanded floor at full reach -- near full extension most of the
+    # budget is spent holding the arm up, so there is little left to push
+    # down with, and the paddle stops high whatever is under it.
+    #
+    # Measured: at 250 mm the paddle stops at 11 mm on an empty table and
+    # 20-23 mm on a hand -- a 9 mm signal. At 400 mm the empty table only
+    # gets it to 13-15 mm while a hand still blocks at 16-23, so the two
+    # clusters overlap and hit and dodge become a coin flip. That is not
+    # geometry; the geometry is identical. It is authority.
+    torque_limit: int = 350
     normal_torque_limit: int = 800
     # Stay down at the bottom, still at `torque_limit`, before retracting.
     #
@@ -206,6 +217,22 @@ class StrikeLimits:
                 self.max_drop * 1e3, (needed - self.max_drop) * 1e3,
                 (self.max_drop - self.press_depth) * 1e3, needed * 1e3)
 
+    #  Slack in `max_hover`, so a hover that arrives high does not raise
+    #  the floor. The clamp is `max(floor, start_z - clamp_drop(start_z -
+    #  floor))`, so any hover above the planned one eats into max_drop and
+    #  lifts the floor with it -- and the floor is what both contact
+    #  sensors measure against.
+    #
+    #  Measured, and it is not a hypothetical: across three bench strikes
+    #  the hover came back 90, then 101, then 104 mm, and the floor went
+    #  13, 21, 24 with it. The paddle's actual stopping heights were a
+    #  clean 11 / 20 / 23 mm for nothing / a hand / a palm -- a 10 mm
+    #  signal -- and the moving floor turned all three into -2/-1/+1 mm
+    #  short, so every round scored as a dodge. With no slack at all,
+    #  `hover_height + press_depth == max_drop`, one millimetre of
+    #  overshoot is enough to start it.
+    HOVER_SLACK: float = 0.008
+
     @property
     def max_hover(self) -> float:
         """The highest hover from which the paddle can still reach its floor.
@@ -214,9 +241,10 @@ class StrikeLimits:
         *and* the press below the hand, so this is what any caller
         choosing a hover has to clamp against -- not `max_drop` itself,
         which is the mistake that leaves the floor sitting exactly on the
-        hand plane.
+        hand plane. Less `HOVER_SLACK`, because the hover does not arrive
+        exactly where it was asked to.
         """
-        return self.max_drop - self.press_depth
+        return self.max_drop - self.press_depth - self.HOVER_SLACK
 
     @property
     def reachable_floor_offset(self) -> float:
@@ -852,7 +880,7 @@ FLOURISHES: dict[str, Move] = {
     # Twitchy on purpose at 0.4 s. Two hops of 15 degrees is all that
     # duration buys -- the same trade as chomp, run the other way.
     "jig": Move((0.28, -0.25, 0.00, 0.00, 0.00, 0.00),
-                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 0.40),
+                (2.0, 0.5, 1.0, 1.0, 1.0, 1.0), 0.52),
 }
 
 # Which flourishes suit which outcome. Named by mood rather than by
