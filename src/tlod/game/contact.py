@@ -290,6 +290,22 @@ class ServoLoadContactSensor(ContactSensor):
         # summary that was never written. Both are the same omission.
         self.last: float | None = None
 
+    def hold_needed(self) -> float:
+        """How long the paddle must stay down for this to get a reading.
+
+        `settle` is only the minimum now, so a caller sizing `press_hold`
+        from it alone retracts the arm out from under a round that was
+        still waiting for the paddle to stop.
+        """
+        return self.settle + self.max_wait
+
+    def _still(self) -> bool:
+        """Has the paddle stopped moving, as far as the encoders can tell?"""
+        if len(self._recent) < self.still_ticks:
+            return False
+        window = self._recent[-self.still_ticks:]
+        return (max(window) - min(window)) <= self.still_epsilon
+
     def peak_summary(self) -> str:
         """End-of-run line. A fraction of rated torque, not a height."""
         return (f"peak held load {self.peak_rise:.3f} of rated torque "
@@ -397,6 +413,9 @@ class CollisionPlaneContactSensor(ContactSensor):
         margin: float = 0.001,
         settle: float = 0.12,
         band_fraction: float = 0.15,
+        still_epsilon: float = 0.0006,
+        still_ticks: int = 4,
+        max_wait: float = 0.15,
     ) -> None:
         # () -> commanded floor height, metres. Where the paddle actually
         # reached comes in on `tool_xyz`, which the caller has already read
@@ -454,8 +473,52 @@ class CollisionPlaneContactSensor(ContactSensor):
         # a stable reference rather than a noisy one. Without it this
         # falls back to `margin` alone.
         self.band_fraction = band_fraction
-        # Long enough for an unobstructed press to have arrived.
+        # Long enough for an unobstructed press to have arrived. This is
+        # now the *minimum* wait, not the moment of judgement -- see
+        # `still_epsilon`.
         self.settle = settle
+        # The reading is taken when the paddle has actually stopped
+        # moving, not at a fixed time after the press starts.
+        #
+        # This is the difference between a signal and noise on this rig.
+        # A bench trace at the game's own geometry: the paddle is still
+        # descending 120 ms into the press and does not settle until
+        # ~180-220 ms, and `strike_bench` prints the gap in as many
+        # words -- "settled at 55 mm, 182 ms into the hold / the game
+        # would read 59 mm at 120 ms, +4 mm off the settled value."
+        #
+        # 4 mm of "still falling" error, against a hit/dodge signal that
+        # is 2-4 mm wide. So the error is the whole signal: a dodge read
+        # early looks like a hit, and a hit read late looks like a dodge,
+        # which is exactly the coin-flip behaviour that made the verdicts
+        # look arbitrary while every threshold in sight was correct.
+        #
+        # `Strike` already had this lesson -- the descent ends when the
+        # arm stops rather than when the asking stops -- and the sensor
+        # judging it did not.
+        self.still_epsilon = still_epsilon
+        self.still_ticks = still_ticks
+        # A blocked paddle leaning on a palm can creep for a long time,
+        # so there has to be a point where a verdict is given anyway.
+        # A round judged on the timeout says so in `report()`.
+        #
+        # 150 ms, and the ceiling on it is the power supply rather than
+        # anything about detection. `press_hold` is sized from
+        # `hold_needed()`, so this lands as 350 ms of six servos stalled
+        # at their torque limit every strike -- against a 200 ms default,
+        # and against the afternoon `press_hold` went to 450 ms and the
+        # bus started dropping transactions. Do not raise it without
+        # watching `tlod power`.
+        #
+        # It is enough because the slow case is the *empty* one: a
+        # blocked paddle stops when it meets the hand, while an
+        # unobstructed one overshoots its floor and creeps back for
+        # ~200 ms after the press starts. Measured on the bench, settling
+        # completes 180-220 ms in, and `settle` already covers the first
+        # 120 of that.
+        self.max_wait = max_wait
+        self._recent: list[float] = []
+        self._judged_moving = False
         self._pressing_since: float | None = None
         self._fired = False
         self.last: tuple[float, float, float] | None = None   # reached, floor, hand
@@ -521,6 +584,24 @@ class CollisionPlaneContactSensor(ContactSensor):
         self.last_lateral = None
         self.last_aim = None
         self.last_hand_moved = None
+        self._recent = []
+        self._judged_moving = False
+
+    def hold_needed(self) -> float:
+        """How long the paddle must stay down for this to get a reading.
+
+        `settle` is only the minimum now, so a caller sizing `press_hold`
+        from it alone retracts the arm out from under a round that was
+        still waiting for the paddle to stop.
+        """
+        return self.settle + self.max_wait
+
+    def _still(self) -> bool:
+        """Has the paddle stopped moving, as far as the encoders can tell?"""
+        if len(self._recent) < self.still_ticks:
+            return False
+        window = self._recent[-self.still_ticks:]
+        return (max(window) - min(window)) <= self.still_epsilon
 
     def peak_summary(self) -> str:
         """End-of-run line. In millimetres, because this is not a torque."""
@@ -565,6 +646,10 @@ class CollisionPlaneContactSensor(ContactSensor):
                      f"strike was committed -- a real dodge]")
         elif self.last_lateral is not None:
             line += f"  [{self.last_lateral * 1e3:.0f} mm off the hand centre]"
+        if self._judged_moving:
+            line += ("  [still moving when judged -- the paddle never stopped "
+                     "within press_hold, so this height is a snapshot of a "
+                     "descent, not a resting place]")
         return line
 
     def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
@@ -586,6 +671,20 @@ class CollisionPlaneContactSensor(ContactSensor):
             self.read_failures += 1
             return None
         reached = float(tool_xyz[2])
+        # Wait for the paddle to stop before judging anything. Reading a
+        # fixed time into the press reads a height the paddle is still
+        # falling *through*, and the descent is ~4 mm from done at 120 ms
+        # -- the whole width of the hit/dodge signal. See `still_epsilon`.
+        self._recent.append(reached)
+        if len(self._recent) > self.still_ticks:
+            del self._recent[0]
+        if not self._still():
+            if now - self._pressing_since - self.settle < self.max_wait:
+                return None
+            # Out of time. Judge anyway rather than defaulting to a dodge,
+            # but mark it so the round line cannot be read as a settled
+            # measurement.
+            self._judged_moving = True
         hand = float(hand_xyz[2]) if hand_xyz is not None else float("nan")
         self.last = (float(reached), float(floor), hand)
         # Horizontal distance from the paddle to the tracked hand. Cheap
@@ -722,6 +821,22 @@ class ServoPressContactSensor(ContactSensor):
         # -- and then crashed at the end of the run reaching for a
         # summary that was never written. Both are the same omission.
         self.last: float | None = None
+
+    def hold_needed(self) -> float:
+        """How long the paddle must stay down for this to get a reading.
+
+        `settle` is only the minimum now, so a caller sizing `press_hold`
+        from it alone retracts the arm out from under a round that was
+        still waiting for the paddle to stop.
+        """
+        return self.settle + self.max_wait
+
+    def _still(self) -> bool:
+        """Has the paddle stopped moving, as far as the encoders can tell?"""
+        if len(self._recent) < self.still_ticks:
+            return False
+        window = self._recent[-self.still_ticks:]
+        return (max(window) - min(window)) <= self.still_epsilon
 
     def peak_summary(self) -> str:
         """End-of-run line. A fraction of rated torque, not a height."""

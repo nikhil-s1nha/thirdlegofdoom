@@ -262,7 +262,9 @@ class TestTheThresholdSitsBetweenTheClusters:
             s = self.sensor()
             s.arm()
             fired = False
-            for _ in range(4):
+            # Enough polls for the paddle to read as still: the sensor
+            # judges when the height stops changing, not at a fixed time.
+            for _ in range(8):
                 if s.poll(pressing=True, tool_xyz=(0.22, 0.0, reached),
                           hand_xyz=(0.22, 0.0, self.HAND)) is not None:
                     fired = True
@@ -1039,7 +1041,7 @@ class TestCollisionPlaneContact:
         # A dodge: the paddle came down where the hand had been.
         sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0)
         sensor.arm()
-        for _ in range(3):
+        for _ in range(6):   # enough polls for the paddle to read as still
             sensor.poll(pressing=True, tool_xyz=landed,
                         hand_xyz=np.array([0.23, 0.0, 0.030]))
         dodge = sensor.report()
@@ -1050,7 +1052,7 @@ class TestCollisionPlaneContact:
         # the paddle came down, so it was never over the hand at all.
         sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0)
         sensor.arm()
-        for _ in range(3):
+        for _ in range(6):   # enough polls for the paddle to read as still
             sensor.poll(pressing=True, tool_xyz=landed,
                         hand_xyz=np.array([0.30, 0.0, 0.030]),
                         aimed_at=np.array([0.30, 0.0, 0.030]))
@@ -1061,6 +1063,50 @@ class TestCollisionPlaneContact:
 
         # The heights alone cannot tell them apart -- which is the point.
         assert dodge.split("[")[0] == miss.split("[")[0]
+
+    def test_it_waits_for_the_paddle_to_stop_before_judging(self):
+        """A descent read early is a hit that never happened.
+
+        Measured on the bench at the game's own geometry: the paddle is
+        still falling 120 ms into the press and does not settle until
+        ~180-220 ms. `strike_bench` prints the gap outright -- "settled at
+        55 mm, 182 ms into the hold / the game would read 59 mm at
+        120 ms, +4 mm off the settled value".
+
+        4 mm of still-falling error against a hit/dodge signal that is
+        2-4 mm wide. So an unobstructed strike, read at a fixed time,
+        reports a height it is merely passing through and scores a hit --
+        which is the coin-flip behaviour that made the verdicts look
+        arbitrary while every threshold involved was correct.
+
+        `Strike` already learned this: the descent ends when the arm
+        stops, not when the asking stops. The sensor judging it did not.
+        """
+        from tlod.game.contact import CollisionPlaneContactSensor
+
+        floor = 0.020
+        # An empty-table descent: passes well above the floor, then
+        # settles a shade under it. Every one of these is the same round.
+        falling = [0.030, 0.027, 0.025, 0.023, 0.021]
+        rest = [0.019] * 8
+
+        sensor = CollisionPlaneContactSensor(lambda: floor, settle=0.0,
+                                             margin=0.001, still_ticks=4,
+                                             still_epsilon=0.0006, max_wait=10.0)
+        sensor.arm()
+        fired_at = None
+        for i, z in enumerate(falling + rest):
+            if sensor.poll(pressing=True, tool_xyz=np.array([0.22, 0.0, z]),
+                           hand_xyz=np.array([0.22, 0.0, 0.030])) is not None:
+                fired_at = i
+                break
+
+        assert fired_at is None, (
+            f"scored a hit on tick {fired_at} at "
+            f"{(falling + rest)[fired_at] * 1e3:.0f} mm -- a height the paddle "
+            f"was falling through, not resting at")
+        reached, _, _ = sensor.last
+        assert abs(reached - 0.019) < 1e-9, "judged on the settled height"
 
     def test_a_hand_that_left_is_a_dodge_not_a_miss(self):
         """Aimed correctly and the hand moved: the game working, not failing.
@@ -1077,7 +1123,7 @@ class TestCollisionPlaneContact:
         aimed = np.array([0.22, 0.0, 0.030])
         sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
         sensor.arm()
-        for _ in range(3):
+        for _ in range(6):   # enough polls for the paddle to read as still
             # Paddle landed on target; the hand is now 90 mm away.
             sensor.poll(pressing=True, tool_xyz=np.array([0.22, 0.0, 0.004]),
                         hand_xyz=np.array([0.31, 0.0, 0.030]), aimed_at=aimed)
@@ -1255,8 +1301,8 @@ class TestStrikeGeometryIsSelfConsistent:
         tool = np.array([0.22, 0.0, 0.030])
         sensor = CollisionPlaneContactSensor(lambda: 0.005, settle=0.0)
         sensor.arm()
-        sensor.poll(pressing=True, tool_xyz=tool)
-        sensor.poll(pressing=True, tool_xyz=tool)
+        for _ in range(6):   # enough polls for the paddle to read as still
+            sensor.poll(pressing=True, tool_xyz=tool)
         assert "mm" in sensor.peak_summary()
         assert "25 mm" in sensor.peak_summary(), sensor.peak_summary()
 
