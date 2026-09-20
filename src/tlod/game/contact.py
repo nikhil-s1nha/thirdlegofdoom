@@ -394,7 +394,7 @@ class CollisionPlaneContactSensor(ContactSensor):
     def __init__(
         self,
         floor_source,
-        margin: float = 0.002,
+        margin: float = 0.001,
         settle: float = 0.12,
         band_fraction: float = 0.15,
     ) -> None:
@@ -411,6 +411,17 @@ class CollisionPlaneContactSensor(ContactSensor):
         # The absolute floor under `band_fraction`, for a band too thin
         # for a fraction to mean anything. It is not the working
         # threshold; `band_fraction` is, and on any sane geometry it wins.
+        #
+        # 1 mm, down from 2. The measured clusters at press_depth 8 mm are
+        # +2..+4 mm short for a hand and -0..-15 for an empty table, so the
+        # gap between them is the 2 mm from 0 to +2 and a threshold of
+        # 2 mm sat on its upper edge -- a hit landing at exactly +2 was
+        # decided by the comparison being strict. 1 mm centres it, with a
+        # millimetre of room on each side.
+        #
+        # That the gap is only 2 mm wide is the real problem and this does
+        # not fix it; see `arm.strike_torque`, which changes how hard the
+        # paddle leans on the palm and so how far apart the clusters sit.
         self.margin = margin
         # The threshold that actually decides, as a fraction of the band
         # between the floor and the hand.

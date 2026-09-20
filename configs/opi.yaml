@@ -31,39 +31,53 @@ arm:
   # session, so every hit scored as a dodge. At 350 the same hand held it
   # 3-4 mm above the floor. The hand has to be able to stop the paddle,
   # because "stopped short of the floor" is the entire signal.
+  #
+  # 350 for now, but this is the knob that *widens* the hit/dodge gap
+  # rather than sliding it around, and it has not been swept downward
+  # yet. Same physics as the note on `press_depth` below: the paddle
+  # stops where the servos' push-down force meets the palm's resistance,
+  # so less authority means the palm holds it higher and the shortfall
+  # grows. The trend is three points long and monotone -- at 500 the
+  # paddle drove through a hand on all twelve strikes of a session; at
+  # 350 leaning 3 mm the same hand held it; at 350 leaning 15 mm it went
+  # through again.
+  #
+  # What bounds it from below is the swing, not the press: bench traces
+  # peak at 0.21-0.30 of rated torque while braking the arm's own mass,
+  # so a ceiling under ~0.30 starts clipping the descent itself and an
+  # empty strike stops reaching its floor -- which kills the other half
+  # of the signal. Sweep it over an empty table and keep the lowest
+  # value where `descent arrived` still holds every time:
+  #
+  #     python3 scripts/strike_bench.py 0.36 0.165 --torque 300
+  #     python3 scripts/strike_bench.py 0.36 0.165 --torque 250
   strike_torque: 350
-  # 15 mm. This number has been at 17, then 8, and both ends were wrong
-  # for opposite reasons -- it is bounded on both sides and the window is
-  # narrow, so the bounds are worth writing down rather than rediscovering.
+  # 8 mm, and shallower is the direction that works -- the opposite of
+  # what "press deeper so the hand is definitely in the way" suggests,
+  # so here is the whole sweep. Floor = the 30 mm hand plane less the
+  # press; every row is a hand deliberately left in the way:
   #
-  # Too deep and the paddle presses through the palm to its floor, which
-  # the sensor calls a dodge by definition. Swept in one session against a
-  # hand deliberately left in the way, floor = 30 mm hand plane less the
-  # press:
+  #     press 25 mm   floor  5 mm   paddle reached  4 mm   dodge, always
+  #     press 20 mm   floor 10 mm   paddle reached 6-9 mm  dodge, always
+  #     press 15 mm   floor 15 mm   paddle reached 12-16   dodge, always
+  #      press 8 mm   floor 22 mm   paddle HELD at 24-26   hit
   #
-  #     press 25 mm   floor  5 mm   paddle reached 4 mm     every round
-  #     press 20 mm   floor 10 mm   paddle reached 6-9 mm   every round
-  #     press 15 mm   floor 15 mm   paddle held at 19 mm    scored a hit
-  #      press 8 mm   floor 22 mm   paddle held at 24-26    scored hits
+  # It is not a gentle trend, it is a cliff between 15 and 8, and the
+  # reason is that these servos are proportional position controllers.
+  # Push-down force goes with the position error, so a floor 15 mm under
+  # the palm leans on it several times as hard as a floor 3 mm under it.
+  # Flesh yields: below some force the palm holds the paddle up, above it
+  # the palm flattens and the paddle carries on to its floor. A deeper
+  # press does not put the hand more firmly in the way, it just pushes
+  # harder through it -- and reaching the floor is what the sensor calls
+  # a dodge, so pressing harder is how a real hit gets scored as a miss.
   #
-  # Too shallow and the floor climbs above a thin hand, and then nothing
-  # can stop the paddle short of it. At 8 mm the floor sits at 22 mm and a
-  # 20 mm hand is *above* it -- there is no band left at all, which
-  # `TestCollisionPlaneContact.test_the_floor_leaves_the_measured_table_clear`
-  # objects to in as many words, and which is why that test has been red.
-  #
-  # 15 mm is the middle of the window: the floor lands at 15 mm, clear
-  # below even a thin 20 mm hand, and well above the 5-10 mm where the
-  # palm gets crushed flat. Measured there, an empty strike settles 2-7 mm
-  # *below* the floor and a blocked one held 4 mm above it, against a
-  # threshold of 2.25 mm (15% of the band).
-  #
-  # If hits still score as dodges after this, the next knob is
-  # `strike_torque` *downward*, not press_depth: less push-down authority
-  # means the palm holds the paddle higher and the shortfall grows. The
-  # trend is already in the record -- at 500 the paddle drove through on
-  # every strike, at 350 the same hand held it 3-4 mm up.
-  press_depth: 0.015
+  # 8 mm keeps the lean under that yield. The paddle comes to rest on the
+  # palm at 24-26 mm against a 22 mm floor: +2 to +4 mm short, against
+  # empty-table strikes reaching -0 to -15. That is a 2 mm gap between
+  # the clusters, which is thin -- `strike_torque` above is the knob that
+  # widens it rather than sliding it around.
+  press_depth: 0.008
   # The droop no sensor here can see, fitted to ruler readings. With the
   # encoder-side sag already corrected -- forward kinematics reporting
   # 67-69 mm against a commanded 69 -- a ruler on the paddle read:

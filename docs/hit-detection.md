@@ -242,36 +242,63 @@ analysis says no hand height explains the ray, so it is the extrinsics.
 a 24 mm bias lands the paddle near the edge and sometimes past it --
 intermittently, which is the worst way for it to fail.
 
-## How deep to press, and why it is bounded on both sides
+## How deep to press: shallower, and it is a cliff
 
-`press_depth` has been at 17 mm, then 8, and both were wrong in opposite
-directions. The window is narrow enough to be worth writing down.
-
-**Too deep and the palm gets crushed to the floor**, which is a dodge by
-definition. Swept in one session with a hand deliberately left in the
-way, floor = the 30 mm hand plane less the press:
+`press_depth` reads like a safety margin -- press further under the hand
+and the hand is more definitely in the way. It is the opposite. Floor =
+the 30 mm hand plane less the press; every row is a hand deliberately
+left under the paddle:
 
 | press | floor | where the paddle ended up | verdict |
 |---|---|---|---|
 | 25 mm | 5 mm | 4 mm | dodge, every round |
 | 20 mm | 10 mm | 6-9 mm | dodge, every round |
-| 15 mm | 15 mm | 19 mm when blocked | **hit** |
-| 8 mm | 22 mm | 24-26 mm when blocked | **hit** |
+| 15 mm | 15 mm | 12-16 mm | dodge, every round |
+| 8 mm | 22 mm | **held at 24-26 mm** | **hit** |
 
-**Too shallow and the floor climbs above a thin hand**, and then nothing
-can stop the paddle short of it. At 8 mm the floor is at 22 mm and a
-20 mm hand is *above* it: no band at all. A test says so in as many
-words, and was red for as long as 8 mm was configured.
+Not a gentle trend -- a cliff between 15 and 8.
 
-15 mm is the middle: clear below even a thin hand, well above the crush
-regime.
+**Why.** These servos are proportional position controllers, so push-down
+force goes with position error. A floor 15 mm under the palm leans on it
+several times as hard as a floor 3 mm under it. Flesh yields: under some
+force the palm holds the paddle up, over it the palm flattens and the
+paddle carries on to its floor. Pressing deeper does not put the hand
+more firmly in the way, it pushes harder *through* it -- and reaching the
+floor is what the sensor calls a dodge. **So pressing harder is how a
+genuine hit gets scored as a miss.**
 
-If hits still read as dodges from there, **the next knob is
-`strike_torque` downward, not `press_depth`.** Less push-down authority
-means the palm holds the paddle higher and the shortfall grows. The trend
-is already recorded -- at 500 the paddle drove through on every strike of
-a session; at 350 the same hand held it 3-4 mm above the floor. Re-measure
-both clusters after changing it, per the rule above.
+The corollary is that "how thick is a hand" is the wrong question. What
+matters is where the paddle *comes to rest* on one, which is a force
+balance and not an anatomical fact. On this rig that is 24-26 mm, and it
+collapses to the floor once the lean passes about 10 mm.
+
+### The gap is 2 mm, and press_depth cannot widen it
+
+At 8 mm the clusters are +2..+4 mm short for a hand and -0..-15 for an
+empty table. The threshold sits at 1 mm, centred, with a millimetre
+either side. That works, and it is thin.
+
+`press_depth` only slides the clusters; it cannot pull them apart.
+**`arm.strike_torque` can** -- it sets how hard the paddle leans, so it
+sets where the palm's resistance balances it. The trend is three points
+long and monotone:
+
+- 500, leaning hard: drove through a hand on all twelve strikes of a session
+- 350, leaning 3 mm: the same hand held it, +2..+4 mm short
+- 350, leaning 15 mm: through again
+
+Downward is untried and is the obvious next experiment. What bounds it
+from below is the *swing*, not the press: bench traces peak at 0.21-0.30
+of rated torque braking the arm's own mass, so a ceiling under ~0.30
+starts clipping the descent and an empty strike stops reaching its floor
+-- which kills the other half of the signal. Sweep it over an empty
+table and keep the lowest value where `descent arrived` still holds
+every time:
+
+```bash
+python3 scripts/strike_bench.py 0.36 0.165 --torque 300
+python3 scripts/strike_bench.py 0.36 0.165 --torque 250
+```
 
 ## The two ways the geometry can silently break
 
