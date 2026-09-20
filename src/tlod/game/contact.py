@@ -462,6 +462,14 @@ class CollisionPlaneContactSensor(ContactSensor):
         # How far to the side of the tracked hand the paddle came down,
         # metres, for the last judged round. See MISS_RADIUS.
         self.last_lateral: float | None = None
+        # How far the paddle came down from where the round was *aimed*,
+        # and how far the hand has moved since. These are two different
+        # failures and `last_lateral` alone cannot separate them: a big
+        # number there means either the strike went somewhere the hand
+        # never was, or the hand left after the strike was committed --
+        # which is a dodge, and the whole point of the game.
+        self.last_aim: float | None = None
+        self.last_hand_moved: float | None = None
         # Diagnostics: the largest settled shortfall seen, in metres.
         self.peak_rise = 0.0
         self.read_failures = 0
@@ -511,6 +519,8 @@ class CollisionPlaneContactSensor(ContactSensor):
         self._pressing_since = None
         self.last = None
         self.last_lateral = None
+        self.last_aim = None
+        self.last_hand_moved = None
 
     def peak_summary(self) -> str:
         """End-of-run line. In millimetres, because this is not a torque."""
@@ -537,17 +547,28 @@ class CollisionPlaneContactSensor(ContactSensor):
         # paddle that came down 60 mm wide of the hand reads exactly like
         # a paddle the human pulled away from, and the two have nothing
         # in common except the word "dodged".
-        if self.last_lateral is not None:
-            if self.last_lateral > self.MISS_RADIUS:
-                line += (f"  [MISSED: came down {self.last_lateral * 1e3:.0f} mm "
-                         f"to the side of the hand, so this round says nothing "
-                         f"about hit or dodge -- check the aim, not the threshold]")
-            else:
-                line += f"  [{self.last_lateral * 1e3:.0f} mm off the hand centre]"
+        # Without `aimed_at` there is nothing to separate the two cases
+        # with, so fall back to the raw offset and say so in the weaker
+        # form. `strike_bench` and the tests poll this way.
+        offset = self.last_aim if self.last_aim is not None else self.last_lateral
+        if offset is not None and offset > self.MISS_RADIUS:
+            # The paddle went somewhere the hand was not when the round
+            # was committed. Nothing about this round is evidence.
+            where = "from where it aimed" if self.last_aim is not None else "from the hand"
+            line += (f"  [MISSED: came down {offset * 1e3:.0f} mm {where}, so this "
+                     f"round says nothing about hit or dodge -- check the aim, "
+                     f"not the threshold]")
+        elif self.last_hand_moved is not None and self.last_hand_moved > self.MISS_RADIUS:
+            # Aimed correctly and the hand left. That is a dodge, and it
+            # is the one large-offset case that is working as intended.
+            line += (f"  [hand moved {self.last_hand_moved * 1e3:.0f} mm since the "
+                     f"strike was committed -- a real dodge]")
+        elif self.last_lateral is not None:
+            line += f"  [{self.last_lateral * 1e3:.0f} mm off the hand centre]"
         return line
 
     def poll(self, pressing: bool = False, tool_xyz=None, hand_xyz=None,
-             **kwargs) -> ContactEvent | None:
+             aimed_at=None, **kwargs) -> ContactEvent | None:
         if self._fired or tool_xyz is None:
             return None
         if not pressing:
@@ -574,8 +595,25 @@ class CollisionPlaneContactSensor(ContactSensor):
         if hand_xyz is not None and len(hand_xyz) >= 2:
             lateral = float(np.linalg.norm(
                 np.asarray(tool_xyz, float)[:2] - np.asarray(hand_xyz, float)[:2]))
-        was_miss = self.last_lateral is None and lateral is not None and lateral > self.MISS_RADIUS
+        # Split that into the two things it confounds. `aimed_at` is
+        # where the hand was when the round was committed, so the paddle
+        # against it is the aiming error, and the hand against it is how
+        # far the human has moved since -- which is the dodge.
+        aim = moved = None
+        if aimed_at is not None and len(aimed_at) >= 2:
+            goal = np.asarray(aimed_at, float)[:2]
+            aim = float(np.linalg.norm(np.asarray(tool_xyz, float)[:2] - goal))
+            if hand_xyz is not None and len(hand_xyz) >= 2:
+                moved = float(np.linalg.norm(np.asarray(hand_xyz, float)[:2] - goal))
+        # A miss is an *aiming* failure, so count it off `aim` where that
+        # is known. Counting it off `lateral` charged every dodge as a
+        # miss, since a hand that leaves is far away by definition.
+        offset = aim if aim is not None else lateral
+        was_miss = (self.last_lateral is None and self.last_aim is None
+                    and offset is not None and offset > self.MISS_RADIUS)
         self.last_lateral = lateral
+        self.last_aim = aim
+        self.last_hand_moved = moved
         short = float(reached) - float(floor)
         self.peak_rise = max(self.peak_rise, short)
         if was_miss:

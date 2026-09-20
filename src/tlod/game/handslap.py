@@ -556,7 +556,12 @@ class HandSlapGame(StateMachine):
         # robot would need.
         pos = track.filter.predict(self.difficulty.strike_duration * 0.5)
         self.strike_target = np.array(pos, float)
-        self.hand_at_commit = None
+        # Where the hand was when the round was committed. Feints have
+        # always recorded this, to spot a flinch; strikes did not, and
+        # that is what left the contact sensor unable to say whether the
+        # hand it is measuring against had moved since being aimed at.
+        # See CollisionPlaneContactSensor.report.
+        self.hand_at_commit = np.array(pos, float)
         # Blank the sensor for the launch. Servo load cannot tell the
         # torque of accelerating the arm from the torque of meeting a
         # hand, and the paddle has not reached the hand yet anyway --
@@ -599,6 +604,7 @@ class HandSlapGame(StateMachine):
         # braking torque -- see ServoPressContactSensor.
         pressing = bool(getattr(self.motion, "pressing", False))
         if self.contact.poll(tool_xyz=tool, hand_xyz=hand,
+                             aimed_at=self.hand_at_commit,
                              pressing=pressing) is not None:
             self._report_contact()
             self._resolve(robot, controller, hit=True)
