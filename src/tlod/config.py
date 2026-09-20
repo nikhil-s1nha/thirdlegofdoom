@@ -38,6 +38,11 @@ class ArmConfig:
     # Paddle tip below the FK tool point, metres. See
     # StrikeLimits.tip_offset -- 0 for a bare gripper.
     tip_offset: float = 0.0
+    # How far below its commanded floor an unobstructed strike actually
+    # comes to rest, metres. Measured with `scripts/strike_bench.py` over
+    # an empty table; 0 for an arm that holds its commanded height. See
+    # CollisionPlaneContactSensor.floor_sag.
+    strike_sag: float = 0.0
     # Torque ceiling *during a strike*, of 1000. Separate from
     # `torque_limit`, which is the normal one. Configurable because it is
     # what decides whether the paddle can reach its floor at full reach:

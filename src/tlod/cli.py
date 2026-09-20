@@ -574,6 +574,8 @@ def cmd_play(args) -> int:
         else:
             contact = CollisionPlaneContactSensor(
                 _floor,
+                floor_sag=(cfg.arm.strike_sag if args.floor_sag is None
+                           else args.floor_sag),
                 **({} if args.contact_threshold is None
                    else {"margin": args.contact_threshold}),
                 **({} if args.contact_band is None
@@ -582,6 +584,9 @@ def cmd_play(args) -> int:
                       f"commanded floor up to the hand (at least "
                       f"{contact.margin * 1e3:.0f} mm), after "
                       f"{contact.settle * 1000:.0f} ms pressing")
+            if contact.floor_sag:
+                source += (f"; measured against where an empty strike rests, "
+                           f"{contact.floor_sag * 1e3:.0f} mm under the floor")
         _size_hold_to(limits, contact)
         game = HandSlapGame(args.difficulty, limits=limits,
                             personality=Personality(enabled=not args.deadpan),
@@ -2293,6 +2298,16 @@ def main(argv: list[str] | None = None) -> int:
                         "empty table and a hand are 1 mm apart at 400 mm reach "
                         "and 9-12 mm apart at 250. press costs ~300 ms of stall "
                         "per strike and more current")
+    s.add_argument("--floor-sag", type=float, default=None, dest="floor_sag",
+                   metavar="M",
+                   help="--real only: how far below its commanded floor an "
+                        "unobstructed strike actually comes to rest, metres. "
+                        "A strike is ballistic and never re-aims, so it carries "
+                        "the arm's full static sag -- measured at 9-12 mm on "
+                        "this rig, which puts both contact clusters under the "
+                        "floor and every round on the dodge side of a threshold "
+                        "placed above it. Measure with scripts/strike_bench.py "
+                        "over an empty table; defaults to arm.strike_sag")
     s.add_argument("--contact-threshold", type=float, default=None,
                    dest="contact_threshold",
                    help="--real only: the absolute floor, in metres, under "

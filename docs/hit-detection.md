@@ -207,6 +207,59 @@ above the hand so there was nothing to stop short of, or the hand simply
 compressed. Each has a different fix. Guessing between them is what
 several rounds of this cost.
 
+## The sixth wrong answer, and the one that cost most: the reference
+
+**The paddle never reaches its commanded floor.** Everything above
+compares where it stopped against where it was *told* to stop, and on
+this rig those are 10 mm apart.
+
+Measured on the bench at 0.36/0.165, commanded floor 20 mm, nothing under
+the paddle:
+
+```
+settled at 11 mm, 8 mm, 9 mm, 9 mm      -- and held there for 300+ ms
+```
+
+Not a transient. The trace shows the command sitting at 21 mm and the arm
+resting at 8-9 mm for the rest of the hold. The arm simply cannot hold
+itself at its commanded height in that pose.
+
+Why a strike and not a `move`: `goto_pose` re-aims at what the encoders
+report and converges to a couple of millimetres. `Strike` deliberately
+does not -- it is meant to be fast, and a second pass is a second, slower
+descent. So a strike carries the arm's full static sag with nothing
+correcting it, and `ArmController.compensate` does not cover it either:
+that model was fitted at hover height and the arm is in a very different
+pose at the floor.
+
+Now put the hand cluster next to it, same geometry, hand left
+deliberately in the way every round:
+
+```
+empty table   8-11 mm      a hand   13-16 mm
+```
+
+**The signal was there the whole time** -- 2-5 mm, perfectly serviceable.
+Both clusters just sit ~10 mm *under* the floor, and the threshold was
+placed 1.5 mm *above* it. Above both. So every round scored a dodge,
+including the ones that visibly hit a hand, and no amount of moving
+`press_depth`, `strike_torque`, `margin` or `band_fraction` could ever
+have found it, because all of them adjust the paddle or the threshold and
+none of them adjust the reference.
+
+`arm.strike_sag` is that reference: how far below its commanded floor an
+unobstructed strike actually rests. `strike_bench` over an empty table
+prints the number to put in it. Set it to centre the threshold between
+the two clusters rather than at the mean of either -- at 9.5 mm the
+resting reference lands at 10.5, an empty strike reads -2.5..+0.5 and a
+blocked one +2.5..+5.5 against a 1.5 mm threshold, a millimetre of room
+each side.
+
+It is the `band_fraction` rule in another form, and the reason it kept
+biting for so long is that the reference was never measured at all --
+only assumed, from the one number in the system that is a command rather
+than a measurement.
+
 ## The fifth wrong answer: scoring a miss as a dodge
 
 Added after a session where the arm went 7-14 in one run and 0-7 in the
