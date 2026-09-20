@@ -161,6 +161,37 @@ no port is configured, the same way `tlod ports --probe` asks each port
 whether six servos answer; the probe writes nothing, so pointing it at
 the servo bus by mistake is harmless. Set `leg.port` once it is known.
 
+### Opening the port used to reboot the board
+
+DTR is wired to RESET on an Arduino, so a plain `serial.Serial(port, ...)`
+restarts the sketch every time anything connects -- and this `setup()`
+writes 90 to **both** servos, so the door swings open and the leg parks
+mid-travel before a single command has been sent.
+
+On the rig that looked like a five second delay and every gesture
+happening in two steps from positions nothing had asked for. The board
+was never slow: `close` acked in 17 ms and `open` in 215, which is its
+own `delay(200)` and nothing else. All of the wait was *before* the
+command went out -- bootloader, then `setup()`, then the first heartbeat.
+Probing made it worse, since `find_leg_port` opens every candidate.
+
+`LegLink` and `heartbeat_answers` now hold DTR low before opening, which
+leaves RESET alone: the sketch keeps running, the servos stay where they
+were, and the first heartbeat arrives within its own 500 ms interval.
+
+Not every driver honours a pre-open DTR -- CH340 and FTDI parts differ --
+so a failure falls back to the ordinary open rather than refusing to talk
+to the leg. **If the two-step movement comes back, that fallback is where
+to look**; the hardware fix is the usual 10 uF between RESET and GND.
+
+Naming the port in the config skips the search entirely, which is faster
+and cannot disturb anything else on the way past:
+
+```yaml
+leg:
+  port: /dev/ttyUSB0
+```
+
 ### Two rules the sketch does not enforce
 
 **`close` does not retract the leg.** It drives servo 0 to 145 and leaves
