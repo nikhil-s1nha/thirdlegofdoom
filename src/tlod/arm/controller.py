@@ -569,6 +569,42 @@ class ArmController:
         """Return to the safe home configuration."""
         self.goto_joints(model.HOME, duration)
 
+    # How close to `model.STOW` each joint must be for the hatch to be
+    # considered clear, radians. 0.09 rad is ~5 degrees, which at this
+    # arm's proportions is a couple of centimetres at the tool -- tight
+    # enough that a half-finished move does not read as stowed, loose
+    # enough that the servos' own steady-state droop does not make a
+    # completed stow read as unfinished.
+    STOW_TOLERANCE: float = 0.09
+
+    def stow(self, duration: float = 2.5) -> None:
+        """Fold back so the third leg's hatch can open.
+
+        Slower than `park` on purpose: it ends near a joint limit with
+        the arm folded over itself, which is the least forgiving place
+        for the profile to still be catching up when the plan ends.
+        """
+        self.goto_joints(model.STOW, duration)
+
+    def is_stowed(self, tolerance: float | None = None) -> bool:
+        """Is the arm actually out of the leg's way?
+
+        Read from the encoders rather than from what was commanded. The
+        difference matters here more than anywhere else in this file: a
+        commanded stow that the arm never completed -- because it was
+        e-stopped, or the profile was still catching up, or something is
+        in the way -- would otherwise report the hatch as clear while the
+        arm is still in front of it.
+        """
+        tol = self.STOW_TOLERANCE if tolerance is None else tolerance
+        try:
+            with self._lock:
+                q = self.backend.read().q[:5]
+        except Exception:
+            # Cannot prove it is clear, so it is not clear.
+            return False
+        return bool(np.all(np.abs(np.asarray(q, float) - model.STOW) <= tol))
+
     # -- gripper -----------------------------------------------------------
     def set_gripper(self, opening: float) -> None:
         """`opening` in [0, 1]: 0 fully closed, 1 fully open."""

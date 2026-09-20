@@ -104,17 +104,22 @@ it; `tlod leg` is the command.
 
 | pin | servo | what it does | positions |
 |---|---|---|---|
-| 7 | `servos[0]` | jaw | 90 open, 145 shut |
-| 8 | `servos[1]` | paddle | 120 up (home), 40 down |
+| 7 | `servos[0]` | **the hatch door** | 90 open, 145 shut |
+| 8 | `servos[1]` | the leg itself | 120 up (home), 40 down |
+
+Servo 0 was called "the jaw" here for a while, which is worth correcting
+rather than quietly fixing: a jaw is something you may close whenever you
+like, and a door in front of a deployed leg is not. See the two rules
+below.
 
 Four commands in, one line back, plus `<3` every 500 ms unasked:
 
 | command | does | replies |
 |---|---|---|
-| `open` | jaw 90, then **after 200 ms** paddle 40 | `OPEN` |
-| `close` | jaw 145 | `CLOSE` |
-| `home` | paddle 120 | *an empty line* |
-| `slap` | paddle 40 | `s` |
+| `open` | door 90, then **after 200 ms** leg 40 | `OPEN` |
+| `close` | door 145 -- *and nothing else* | `CLOSE` |
+| `home` | leg 120 | *an empty line* |
+| `slap` | leg 40 | `s` |
 
 9600 baud, newline-terminated, `Serial.readStringUntil('\n')` on the far
 side. Send commands one at a time and wait for the reply.
@@ -155,6 +160,64 @@ the leg can swap between boots. `tlod leg` probes for the heartbeat when
 no port is configured, the same way `tlod ports --probe` asks each port
 whether six servos answer; the probe writes nothing, so pointing it at
 the servo bus by mistake is harmless. Set `leg.port` once it is known.
+
+### Two rules the sketch does not enforce
+
+**`close` does not retract the leg.** It drives servo 0 to 145 and leaves
+servo 1 wherever it was, so closing while the leg is at 40 shuts the door
+onto a deployed leg and holds it there -- a hobby servo stalled against a
+mechanical stop for as long as the board has power, which is how one gets
+cooked. `LegLink.retract()` sends `home` then `close`, always in that
+order, and is the only thing that should ever close the door.
+
+**`open` leaves the leg down.** It ends at servo 1 = 40, and `slap` also
+writes 40, so a slap straight after an open moves nothing at all.
+`LegLink.deploy()` sends `open` then `home`, which is what makes the leg
+*ready* rather than merely out.
+
+    deploy()   open  -> home           door open, leg out, leg lifted
+    strike()   slap  -> dwell -> home  the gesture
+    retract()  home  -> close          leg up FIRST, then the door
+
+### The arm has to be out of the way first
+
+The leg deploys through a hatch the arm sits in front of, so **the two
+effectors are physically exclusive**. `model.STOW` is what "out of the
+way" means:
+
+```
+shoulder_pan -0.009   shoulder_lift -1.745   elbow_flex +1.634
+wrist_flex   -0.988   wrist_roll    -0.014
+```
+
+which puts the tool at 166 mm reach and 283 mm up -- folded back, off the
+table, nowhere the game ever plays.
+
+`LegService` refuses to gesture until `ArmController.is_stowed()` agrees,
+within 5 degrees a joint. That check reads the **encoders**, not the
+commanded pose, and the difference is the whole point: a stow that was
+commanded and never finished -- e-stopped, still catching up, something
+in the way -- would otherwise report the hatch as clear while the arm is
+still in front of it. A bus read that throws counts as *not* clear, since
+the interlock guards a collision and its failure mode has to be refusal.
+
+Refusals are counted as `blocked` and reported apart from `dropped`,
+because they mean opposite things: dropped is the leg being asked to
+gesture faster than a 250 ms gesture allows, blocked is the arm being
+where the leg needs to go.
+
+One wrinkle before re-measuring it. The pose was found by hand with
+torque off and came back with `shoulder_lift` at **-1.861** -- 6.6
+degrees past the URDF limit of -1.74533. The servo reaches there when
+pushed; `clamp_to_limits` will not command it. So `STOW` carries the
+clamped -1.745, which lands the tool 22 mm away and was confirmed on the
+hardware to still clear the hatch. **A stow pose that gets silently
+clipped is a stow pose that does not happen**, and a test pins that.
+
+```bash
+tlod -c configs/opi.yaml move --real --stow    # fold back, hatch can open
+tlod -c configs/opi.yaml move --real --home    # back to playing position
+```
 
 ```bash
 tlod leg monitor          # listen only: is it there, is the sketch running

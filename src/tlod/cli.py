@@ -1065,7 +1065,10 @@ def cmd_move(args) -> int:
     print(f"  start   ({start.x:+.4f}, {start.y:+.4f}, {start.z:+.4f}) m")
 
     try:
-        if args.home:
+        if args.stow:
+            controller.stow(duration=max(args.duration, 2.5))
+            target = None
+        elif args.home:
             controller.goto_joints(HOME, duration=args.duration)
             target = None
         elif args.joints is not None:
@@ -2569,6 +2572,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("z", type=float, nargs="?", default=0.12)
     s.add_argument("--joints", type=float, nargs=5, metavar=("J1", "J2", "J3", "J4", "J5"))
     s.add_argument("--home", action="store_true", help="go to the home configuration")
+    s.add_argument("--stow", action="store_true",
+                   help="fold back so the third leg's hatch can open. The arm "
+                        "sits in front of that hatch, so the leg refuses to "
+                        "gesture until the arm is here -- see model.STOW")
     s.add_argument("--duration", type=float, default=1.5)
     s.add_argument("--hold", type=float, default=0.0, help="stay there for N seconds")
     s.add_argument("--park", action="store_true", help="return home afterwards")

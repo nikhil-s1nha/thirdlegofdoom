@@ -359,3 +359,235 @@ def test_ack_types_are_what_the_rest_of_the_project_expects(leg):
     assert isinstance(ack, Ack)
     assert ack.stamp > 0                # perf_counter, same clock as Frame.stamp
     assert 0 <= ack.latency < 1.0
+
+
+class _Link:
+    """Stands in for LegLink: records gestures, takes time over them."""
+
+    def __init__(self, dwell: float = 0.03) -> None:
+        self.gestures: list[str] = []
+        self._dwell = dwell
+
+    def strike(self, dwell: float = 0.25) -> None:
+        self.gestures.append("strike")
+        time.sleep(self._dwell)
+
+    def send(self, command: str) -> None:
+        self.gestures.append(command)
+
+
+class TestLegServiceKeepsTheControlThreadMoving:
+    """`fire()` is called from a policy tick, so it may never block.
+
+    `LegLink.strike()` slaps, sleeps for `dwell`, then homes -- 250 ms
+    and two serial round trips against a control loop that ticks every
+    10 ms. Doing that inline would stall the arm mid-swing, and a policy
+    tick that raises reaches `RobotApp._control_loop`, which answers a
+    failed tick by e-stopping. The arm freezing directly above the hand
+    it was aiming at is the failure this class exists to prevent.
+    """
+
+    def test_fire_returns_immediately(self):
+        from tlod.leg import LegService
+
+        svc = LegService(_Link(dwell=0.2), dwell=0.2)
+        svc.start()
+        try:
+            t0 = time.perf_counter()
+            assert svc.fire() is True
+            elapsed = time.perf_counter() - t0
+        finally:
+            svc.stop()
+        assert elapsed < 0.005, (
+            f"fire() took {elapsed * 1e3:.1f} ms; the control loop ticks every 10")
+
+    def test_a_second_request_is_dropped_not_queued(self):
+        """A slap that lands two rounds late is wrong, not late.
+
+        Queueing would have the leg still working through round three's
+        gesture when round five resolved. Dropping is counted instead, so
+        a session can say it is being asked to gesture faster than a
+        250 ms gesture allows -- which is a pacing decision, not
+        something the driver should paper over.
+        """
+        from tlod.leg import LegService
+
+        link = _Link(dwell=0.15)
+        svc = LegService(link, dwell=0.15)
+        svc.start()
+        try:
+            assert svc.fire() is True
+            dropped = sum(1 for _ in range(4) if svc.fire() is False)
+            time.sleep(0.3)
+        finally:
+            svc.stop()
+        assert dropped == 4
+        assert link.gestures == ["strike"], "a dropped request must not arrive late"
+        assert svc.stats.dropped == 4
+
+    def test_a_dead_board_costs_a_gesture_and_not_the_game(self):
+        from tlod.leg import LegService
+
+        class Dead:
+            def strike(self, dwell: float = 0.25) -> None:
+                raise RuntimeError("port went away")
+
+        svc = LegService(Dead())
+        svc.start()
+        try:
+            svc.fire()
+            time.sleep(0.15)
+        finally:
+            svc.stop()
+        assert svc.stats.failed == 1
+        assert svc.stats.fired == 0
+        assert "port went away" in svc.report()
+
+
+class TestTheLegWaitsForTheArmToGetOutOfTheWay:
+    """The hatch the leg deploys through is behind the arm.
+
+    So the two effectors are physically exclusive, and a gesture asked
+    for while the arm is still in front of the hatch is a collision
+    rather than a missed cue. `model.STOW` is what "out of the way"
+    means and `ArmController.is_stowed` reads it off the encoders.
+    """
+
+    def test_nothing_moves_until_the_arm_is_stowed(self):
+        from tlod.leg import LegService
+
+        clear = {"now": False}
+        link = _Link()
+        svc = LegService(link, dwell=0.02, is_clear=lambda: clear["now"])
+        svc.start()
+        try:
+            for _ in range(3):
+                assert svc.fire() is False
+            time.sleep(0.1)
+            assert link.gestures == [], "the leg moved with the arm in the way"
+            assert svc.stats.blocked == 3
+            assert svc.stats.fired == 0
+
+            clear["now"] = True
+            assert svc.fire() is True
+            time.sleep(0.15)
+        finally:
+            svc.stop()
+        assert link.gestures == ["strike"]
+
+    def test_an_unreadable_arm_counts_as_in_the_way(self):
+        """Cannot prove it is clear, so it is not clear.
+
+        The interlock guards a collision, so its failure mode has to be
+        refusal. A bus read that throws must not read as permission.
+        """
+        from tlod.leg import LegService
+
+        def boom() -> bool:
+            raise OSError("servo bus went away")
+
+        link = _Link()
+        svc = LegService(link, is_clear=boom)
+        svc.start()
+        try:
+            assert svc.fire() is False
+            time.sleep(0.1)
+        finally:
+            svc.stop()
+        assert link.gestures == []
+        assert svc.stats.blocked == 1
+
+    def test_blocked_and_dropped_are_reported_apart(self):
+        """They mean opposite things and have opposite fixes.
+
+        Dropped is the leg being asked faster than it can gesture.
+        Blocked is the arm being where the leg needs to go. Collapsing
+        them into one number would hide an interlock that never opens
+        behind what looks like an over-eager caller.
+        """
+        from tlod.leg import LegService
+
+        svc = LegService(_Link(), is_clear=lambda: False)
+        svc.start()
+        try:
+            svc.fire()
+        finally:
+            svc.stop()
+        assert "blocked" in svc.report()
+        assert "not stowed" in svc.report()
+        assert svc.stats.dropped == 0
+
+
+class TestTheStowPose:
+    def test_it_is_a_pose_the_arm_can_actually_be_sent_to(self):
+        """Measured by hand with torque off, which is not the same thing.
+
+        The rig's own measurement had `shoulder_lift` at -1.861, which is
+        6.6 degrees past the URDF limit -- reachable by pushing the arm
+        there, not reachable by commanding it. A stow pose that
+        `clamp_to_limits` silently clips is a stow pose that does not
+        happen, and the hatch would open into an arm still in the way.
+        """
+        import numpy as np
+
+        from tlod.arm import model
+
+        assert np.allclose(model.clamp_to_limits(model.STOW.copy()), model.STOW), (
+            "STOW is outside the joint limits and would be silently clipped")
+
+    def test_it_folds_the_arm_back_out_of_the_workspace(self):
+        """It has to be somewhere the game never reaches, or the check is noise."""
+        import numpy as np
+
+        from tlod.arm import model
+
+        stowed = model.tool_pose(model.STOW).xyz()
+        radius = float(np.hypot(stowed[0], stowed[1]))
+        assert radius < 0.20, f"stowed at {radius * 1e3:.0f} mm reach, still over the table"
+        assert stowed[2] > 0.20, f"stowed at {stowed[2] * 1e3:.0f} mm, not lifted clear"
+
+
+class _Recorder(LegLink):
+    """A LegLink whose `send` records instead of talking to a board."""
+
+    def __init__(self) -> None:
+        super().__init__(transport=object())
+        self.seen: list[str] = []
+
+    def send(self, command: str, timeout: float | None = None) -> Ack:
+        self.seen.append(command)
+        return Ack(command=command, line=ACKS.get(command, ""), stamp=0.0,
+                   latency=0.0, expected=True)
+
+
+class TestTheDoorIsNeverClosedOntoTheLeg:
+    """The sketch will happily shut the door on a deployed leg.
+
+    `close` drives servo 0 to 145 and does not touch servo 1, so closing
+    while the leg is at 40 holds a hobby servo against a mechanical stop
+    for as long as the board has power. Nothing in the .ino prevents it,
+    which makes it the driver's rule.
+    """
+
+    def test_retract_homes_the_leg_before_shutting_the_door(self):
+        link = _Recorder()
+        link.retract()
+        assert link.seen == ["home", "close"], (
+            f"retract sent {link.seen}; closing before homing stalls the door servo")
+
+    def test_deploy_lifts_the_leg_so_a_slap_has_somewhere_to_go(self):
+        """`open` ends with the leg at 40 and `slap` also writes 40.
+
+        So a slap straight after an open moves nothing at all. Homing is
+        what makes the leg ready rather than merely out.
+        """
+        link = _Recorder()
+        link.deploy()
+        assert link.seen == ["open", "home"]
+
+    def test_strike_leaves_the_leg_up_so_the_door_can_still_shut(self):
+        """Every gesture has to end somewhere `retract` is safe from."""
+        link = _Recorder()
+        link.strike(dwell=0.0)
+        assert link.seen[-1] == "home", (
+            f"strike ended on {link.seen[-1]!r}, leaving the leg down")
