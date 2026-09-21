@@ -498,6 +498,18 @@ class LegLink:
 
 # -- finding the thing ------------------------------------------------------
 
+# Set true to open the port exactly as a serial monitor does: the plain
+# constructor, DTR left asserted, HUPCL left alone. `tlod leg --plain-open`
+# flips it.
+#
+# It exists because those two settings are the *only* things this driver
+# does to the port that the Arduino IDE does not, and "it behaves
+# differently from the IDE" is a claim that deserves a controlled test
+# rather than an argument. Nothing else here touches the port outside
+# `send()`.
+PLAIN_OPEN = False
+
+
 def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0.1):
     """Open the port without rebooting the board on the other end.
 
@@ -525,6 +537,10 @@ def _open_without_resetting(serial, port: str, baudrate: int, timeout: float = 0
     movement comes back, that fallback is where to look; the fix in
     hardware is the usual 10 uF between RESET and GND.
     """
+    if PLAIN_OPEN:
+        log.info("leg: opening %s the way a serial monitor does "
+                 "(DTR asserted, HUPCL untouched)", port)
+        return serial.Serial(port, baudrate, timeout=timeout)
     ser = serial.Serial()
     ser.port = port
     ser.baudrate = baudrate
