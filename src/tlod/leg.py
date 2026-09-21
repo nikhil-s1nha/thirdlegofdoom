@@ -153,21 +153,55 @@ class LegLink:
 
         self._beats = 0
         self._commands = 0
+        # Set by `connect`: did the board reboot when we opened the port,
+        # and how long the first heartbeat took. See RESET_TELL.
+        self.reset_on_connect = False
+        self.first_beat = float("nan")
         self._first_beat = 0.0
         self._last_beat = 0.0
 
     # -- lifecycle ---------------------------------------------------------
-    def connect(self) -> None:
-        """Open the port and wait until the sketch is actually running."""
+    # Above this, the first heartbeat took long enough that the board must
+    # have gone through a bootloader -- which means it reset, which means
+    # `setup()` ran. A board that was already running answers inside its
+    # own 500 ms beat interval.
+    RESET_TELL: float = 1.0
+
+    def connect(self, on_reset: Callable[[], None] | None = None) -> None:
+        """Open the port and wait until the sketch is actually running.
+
+        `on_reset` is called if the board turns out to have rebooted on
+        open, *before* `connect` returns. That is not a diagnostic nicety:
+        this sketch's `setup()` writes 90 to both servos and 90 is the
+        door's **open** position, so a reset swings the hatch open with no
+        command sent. Merely connecting can therefore move the door into
+        an arm that is not stowed, and the caller is the only thing that
+        knows whether that matters.
+        """
         if self._thread is not None:
             return
         if self._ser is None:
             self._ser = self._open_port()
         self._stop.clear()
         self._beat.clear()
+        opened = time.perf_counter()
         self._thread = threading.Thread(target=self._read_loop, name="leg-reader", daemon=True)
         self._thread.start()
-        if not self.wait_for_heartbeat(self.boot_timeout):
+        got = self.wait_for_heartbeat(self.boot_timeout)
+        # Measured rather than assumed. Holding DTR low stops the reset on
+        # some adapters and not others -- CH340 parts in particular -- and
+        # the difference is invisible from the outside until a servo moves
+        # on its own. This makes it a number.
+        self.first_beat = time.perf_counter() - opened if got else float("nan")
+        self.reset_on_connect = bool(got and self.first_beat > self.RESET_TELL)
+        if self.reset_on_connect:
+            log.warning(
+                "leg: the board reset on connect (first beat after %.1f s), so "
+                "setup() ran and both servos went to 90 -- which OPENS the door",
+                self.first_beat)
+            if on_reset is not None:
+                on_reset()
+        if not got:
             self.disconnect()
             raise LegError(
                 f"no heartbeat from {self.port or 'the leg'} in {self.boot_timeout:.0f}s. "

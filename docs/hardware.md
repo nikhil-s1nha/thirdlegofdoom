@@ -179,10 +179,30 @@ Probing made it worse, since `find_leg_port` opens every candidate.
 leaves RESET alone: the sketch keeps running, the servos stay where they
 were, and the first heartbeat arrives within its own 500 ms interval.
 
-Not every driver honours a pre-open DTR -- CH340 and FTDI parts differ --
-so a failure falls back to the ordinary open rather than refusing to talk
-to the leg. **If the two-step movement comes back, that fallback is where
-to look**; the hardware fix is the usual 10 uF between RESET and GND.
+Not every driver honours a pre-open DTR, and **on this rig's CH340 it did
+not take**: the board still resets when the port opens. Measured, so it
+is not a guess -- `LegLink.connect()` times the first heartbeat, and a
+board that went through a bootloader answers after a second or more while
+one that kept running answers inside its own 500 ms beat interval.
+`tlod leg` prints which happened.
+
+**A reset opens the hatch.** `setup()` writes 90 to both servos and 90 is
+servo 0's *open* position, so merely connecting swings the door -- with
+no command sent, and with `monitor` claiming to be read-only. That makes
+connecting the dangerous operation, not gesturing:
+
+> **Stow the arm before connecting to the leg board, not just before
+> asking it for a gesture.**
+
+`LegService`'s interlock guards gestures. It cannot guard the port
+opening, because the port has to be open before anything can be asked.
+`connect(on_reset=...)` fires as soon as a reset is detected so a caller
+can react, but by then the door has already moved.
+
+The real fix is hardware, and it is the standard one: **10 uF between
+RESET and GND**, or cut the reset-enable trace. Either stops the board
+rebooting when anything opens the port, and then holding DTR low is
+belt-and-braces rather than the whole defence.
 
 Naming the port in the config skips the search entirely, which is faster
 and cannot disturb anything else on the way past:

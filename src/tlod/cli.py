@@ -2221,6 +2221,19 @@ def cmd_leg(args) -> int:
         return 1
 
     print(f"  leg on {link.port} at {link.baudrate} baud")
+    if link.reset_on_connect:
+        print(f"  THE BOARD RESET when the port opened (first beat after "
+              f"{link.first_beat:.1f}s).")
+        print( "  setup() ran, so both servos went to 90 -- and 90 is the")
+        print( "  door's OPEN position. Opening the port swung the hatch.")
+        print( "  Stow the arm before connecting, not just before gesturing:")
+        print( "    tlod move --real --stow")
+        print( "  To stop it: 10 uF between RESET and GND on the Arduino, or")
+        print( "  cut the reset-enable trace. Holding DTR low did not take on")
+        print( "  this adapter.")
+    elif link.first_beat == link.first_beat:      # not NaN
+        print(f"  board kept running (first beat after {link.first_beat:.2f}s, "
+              f"no reset)")
     if not (args.port or cfg.leg.port):
         print(f"  set it so a replug cannot move it:\n    leg:\n      port: {link.port}")
 
