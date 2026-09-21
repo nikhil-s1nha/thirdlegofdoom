@@ -2243,11 +2243,16 @@ def cmd_leg(args) -> int:
         print(f"  set it so a replug cannot move it:\n    leg:\n      port: {link.port}")
 
     try:
-        if "monitor" in args.action:
-            if len(args.action) > 1:
-                print("  `monitor` only listens; run it on its own")
-                return 2
-            return _leg_monitor(link, lines, args.duration)
+        # `monitor` last in a sequence keeps the port open after the
+        # gesture, which is the only way to see what the servos do once
+        # the commands stop *without* closing the port and possibly
+        # resetting the board. A servo that only misbehaves after the
+        # command "ends" is describing the disconnect, not the gesture.
+        watch = args.action[-1] == "monitor"
+        actions = args.action[:-1] if watch else args.action
+        if "monitor" in actions:
+            print("  `monitor` goes last, or on its own")
+            return 2
 
         # Several actions share one connection on purpose. Opening the
         # port reboots this board, so a separate invocation per gesture
@@ -2256,7 +2261,7 @@ def cmd_leg(args) -> int:
         for i in range(args.repeat):
             if i:
                 time.sleep(args.interval)
-            for action in args.action:
+            for action in actions:
                 if action == "strike":
                     # `strike` is open then close, and printing only the
                     # Ack it returns hid the close entirely -- so a
@@ -2280,6 +2285,9 @@ def cmd_leg(args) -> int:
                               f"check on servo 1 -- `strike` is the gesture.")
                     ack = link.send(action)
                 _leg_say(ack)
+        if watch:
+            print()
+            return _leg_monitor(link, lines, args.duration)
     except LegError as e:
         print(f"  {e}")
         return 1
