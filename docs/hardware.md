@@ -248,16 +248,23 @@ the board had power.
 **`open` waits 500 ms between the door and the leg.** At 200 ms the leg
 started down into a door still swinging, and hit it.
 
-**`open` still leaves the leg down**, at 30, which is where `slap` also
-puts it -- so a `slap` immediately after an `open` moves nothing. Send
-`home` first, or let `strike` do it.
+**`open` leaves the leg down** at 30, which is the deployed position --
+out through the hatch. That is the end of the blow, not an unfinished
+one, and `close` is what follows it.
 
-    deploy()   open                   the sketch waits for the door
-    strike()   slap  -> dwell -> home  the gesture
-    retract()  close                   the sketch homes the leg first
+    strike()   open -> dwell -> close   THE GESTURE
+    deploy()   open                     come out and stay out
+    retract()  close                    go back in
 
-`deploy` and `retract` are one word each because the board sequences them
-itself. They used to send `home` either side, from when it did not.
+**`open` is the strike.** The leg coming out of the hatch is the blow --
+not a wind-up before one. `open` swings the door, waits 500 ms for it,
+and drives the leg out and down, all in one word. `close` puts it away.
+
+**`slap` and `home` are bench commands. Do not build gestures from
+them.** They drive servo 1 alone, with the door in whatever state it was
+already in: at best nothing happens, since `open` leaves the leg at 30
+where `slap` also writes, and at worst the leg is driven into a shut
+hatch. They exist to check that servo 1 answers.
 
 ### The arm has to be out of the way first
 

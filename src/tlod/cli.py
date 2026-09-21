@@ -2262,10 +2262,10 @@ def cmd_leg(args) -> int:
                 else:
                     # Raw sketch commands, including `close`, which does
                     # not retract the leg. `retract` is the safe one.
-                    if action == "close":
-                        print("  note: `close` shuts the door and leaves the leg "
-                              "where it is. If it is down, that is the door being "
-                              "held against it -- `retract` homes first.")
+                    if action in ("slap", "home"):
+                        print(f"  note: `{action}` moves the leg alone, with the "
+                              f"door wherever it already was. It is a bench "
+                              f"check on servo 1 -- `strike` is the gesture.")
                     ack = link.send(action)
                 flag = "" if ack.expected else "   <-- not what the sketch should say"
                 print(f"  {ack.command:6s} -> {ack.line!r:8s} "
@@ -2795,14 +2795,12 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("leg", help="drive the Arduino paddle, or watch its heartbeat")
     s.add_argument("action", nargs="+",
                    choices=[*LEG_COMMANDS, "strike", "deploy", "retract", "monitor"],
-                   help="the sketch's four raw commands, or one of the three "
-                        "safe sequences: `deploy` is open then home (open "
-                        "alone leaves the leg down, where slap also writes, so "
-                        "a slap after an open moves nothing), `strike` is slap "
-                        "then home, `retract` is home then close -- always in "
-                        "that order, because close shuts the door without "
-                        "retracting the leg and will hold it against one that "
-                        "is still down. `monitor` only listens")
+                   help="`strike` is the gesture: open, wait, close -- the leg "
+                        "coming out of the hatch IS the blow. `deploy` is open "
+                        "alone and `retract` is close alone, for holding it "
+                        "out. `slap` and `home` drive servo 1 without regard "
+                        "for the door and are for bench-testing that servo, "
+                        "not for hitting anything. `monitor` only listens")
     s.add_argument("--port", default=None,
                    help="serial port; overrides leg.port. Empty probes for the heartbeat")
     s.add_argument("--repeat", type=int, default=1, help="send it this many times")

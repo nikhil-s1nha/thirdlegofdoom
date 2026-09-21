@@ -148,12 +148,18 @@ def test_every_command_acks_with_a_word_of_its_own(leg):
     assert HEARTBEAT not in ACKS.values()
 
 
-def test_strike_slaps_then_homes(leg):
-    """`slap` alone leaves the paddle down; a second one would do nothing."""
+def test_strike_comes_out_and_goes_back_in(leg):
+    """The blow is the leg coming out of the hatch, which is `open`.
+
+    Not `slap`. That drives servo 1 with the door in whatever state it
+    was already in -- at best nothing, since `open` leaves the leg at 30
+    already, at worst into a shut door. `slap` and `home` are for
+    bench-testing servo 1 and have no place in a gesture.
+    """
     link, board = leg
     ack = link.strike(dwell=0.01)
-    assert board.received == ["slap", "home"]
-    assert ack.command == "slap"        # the stamp a hit test wants
+    assert board.received == ["open", "close"]
+    assert ack.command == "open"        # the stamp a hit test wants
 
 
 def test_unknown_command_is_refused_before_it_reaches_the_board(leg):
@@ -599,12 +605,25 @@ class TestTheSequencingLivesInTheSketch:
         assert link.seen == ["open"], (
             f"deploy sent {link.seen}; the sketch already waits for the door")
 
-    def test_strike_leaves_the_leg_up_so_the_door_can_still_shut(self):
-        """Every gesture has to end somewhere `retract` is safe from."""
+    def test_strike_puts_everything_away_behind_it(self):
+        """A gesture has to end somewhere the next one can start from."""
         link = _Recorder()
         link.strike(dwell=0.0)
-        assert link.seen[-1] == "home", (
-            f"strike ended on {link.seen[-1]!r}, leaving the leg down")
+        assert link.seen[-1] == "close", (
+            f"strike ended on {link.seen[-1]!r}, leaving the hatch open")
+
+    def test_no_sequence_reaches_for_the_bench_commands(self):
+        """`slap` and `home` move servo 1 without regard for the door.
+
+        They exist to check that servo answers at all. A gesture built
+        from them can drive the leg into a shut hatch, so no sequence
+        here should name one.
+        """
+        link = _Recorder()
+        link.deploy()
+        link.strike(dwell=0.0)
+        link.retract()
+        assert set(link.seen) <= {"open", "close"}, link.seen
 
 
 class _FakeSerialModule:
