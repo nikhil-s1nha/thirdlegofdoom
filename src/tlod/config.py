@@ -153,7 +153,17 @@ class LegConfig:
     boot_timeout: float = 6.0
     # Paddle travel, 120 -> 40 and back. A guess until it is timed on the
     # bench: the board reports nothing, so nothing measures this for you.
-    strike_dwell: float = 0.25
+    # Seconds the leg stays out before `close` withdraws it. This has to
+    # cover the leg's *physical travel*, not just look right: the board
+    # acks `open` when it has taken the command, and `servo.write()` sets
+    # a target and returns -- there is no feedback on this board, so
+    # nothing anywhere knows when the leg has actually arrived.
+    #
+    # At 0.25 the close went out while the leg was still swinging out and
+    # reversed it mid-stroke, which from outside looks like the servo
+    # doing random things. Typing the same two commands into the Arduino
+    # IDE never showed it, because a human takes seconds between them.
+    strike_dwell: float = 0.8
 
 
 @dataclass(slots=True)

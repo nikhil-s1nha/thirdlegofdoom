@@ -712,3 +712,46 @@ class TestOpeningThePortDoesNotRebootTheBoard:
         body = inspect.getsource(leg.heartbeat_answers)
         assert "_open_without_resetting" in body
         assert "serial.Serial(" not in body
+
+
+class TestTheDriverIsFasterThanTheMechanism:
+    """An ack is the board taking a command, not a servo arriving.
+
+    There is no feedback on this board: `servo.write()` sets a target and
+    returns, so neither the sketch nor this file knows when the leg has
+    finished moving. Every wait in this protocol is a guess at travel
+    time, and a guess that is too short reverses the leg mid-swing.
+
+    Typing the same commands into a serial monitor never shows it,
+    because a human takes seconds between them. That is worth a test
+    rather than a comment: the failure looks like the hardware
+    misbehaving and is entirely in the timing here.
+    """
+
+    def test_the_dwell_outlasts_the_boards_own_door_wait(self):
+        """`open` blocks the sketch for ~700 ms before it even acks.
+
+        attachAt's delay(100), then delay(500) for the door, then
+        attachAt again -- measured as a 720 ms ack and a heartbeat
+        interval stretched from 500 ms to 722. The leg only *starts*
+        moving at the end of that, so a dwell shorter than the leg's own
+        travel closes the door on a leg still coming out.
+        """
+        import inspect
+
+        from tlod.config import LegConfig
+        from tlod.leg import LegLink
+
+        board_blocks_for = 0.7          # measured on the rig
+        default = inspect.signature(LegLink.strike).parameters["dwell"].default
+        assert default > board_blocks_for - 0.5, (
+            f"dwell {default}s leaves no room for the leg to travel after "
+            f"open acks")
+        assert LegConfig().strike_dwell == default, (
+            "the config default and the code default disagree, so the same "
+            "gesture behaves differently depending on which one is reached")
+
+    def test_strike_is_open_then_close_with_the_wait_between(self):
+        link = _Recorder()
+        link.strike(dwell=0.0)
+        assert link.seen == ["open", "close"]
