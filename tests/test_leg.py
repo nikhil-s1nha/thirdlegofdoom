@@ -571,35 +571,33 @@ class _Recorder(LegLink):
                    latency=0.0, expected=True)
 
 
-class TestTheDoorIsNeverClosedOntoTheLeg:
-    """The sketch will happily shut the door on a deployed leg.
+class TestTheSequencingLivesInTheSketch:
+    """`open` and `close` are whole gestures on the board now.
 
-    `close` drives servo 0 to 145 and does not touch servo 1, so closing
-    while the leg is at 40 holds a hobby servo against a mechanical stop
-    for as long as the board has power. Nothing in the .ino prevents it,
-    which makes it the driver's rule.
+    They were not always. `close` used to drive the door to 145 without
+    touching the leg, so closing while the leg was down shut the door
+    onto it and held it there -- a hobby servo stalled against a
+    mechanical stop for as long as the board had power. And `open` waited
+    only 200 ms before dropping the leg, which was not long enough for
+    the door to finish swinging, so the leg hit it.
+
+    Both are fixed in the .ino, which is the right place: the guard then
+    holds however the board is driven, including from a serial terminal
+    that has never heard of this file. The driver's job is to not undo it
+    by sending the same moves twice.
     """
 
-    def test_retract_homes_the_leg_before_shutting_the_door(self):
+    def test_retract_is_just_close(self):
         link = _Recorder()
-        link.retract(settle=0.0)
-        assert link.seen == ["home", "close"], (
-            f"retract sent {link.seen}; closing before homing stalls the door servo")
+        link.retract()
+        assert link.seen == ["close"], (
+            f"retract sent {link.seen}; the sketch already homes before closing")
 
-    def test_deploy_clears_the_leg_before_the_door_swings(self):
-        """The door swings through the space a lowered leg occupies.
-
-        And where the leg was left is a matter of history: the sketch has
-        no auto-home and `slap` leaves it at 40. So `deploy` homes first,
-        which makes the starting state known rather than inherited, then
-        opens, then homes again -- because `open` itself ends with the leg
-        back at 40 and `slap` also writes 40, so a slap straight after an
-        open moves nothing at all.
-        """
+    def test_deploy_is_just_open(self):
         link = _Recorder()
-        link.deploy(settle=0.0)
-        assert link.seen == ["home", "open", "home"], link.seen
-        assert link.seen[0] == "home", "the door swings before the leg is clear"
+        link.deploy()
+        assert link.seen == ["open"], (
+            f"deploy sent {link.seen}; the sketch already waits for the door")
 
     def test_strike_leaves_the_leg_up_so_the_door_can_still_shut(self):
         """Every gesture has to end somewhere `retract` is safe from."""
